@@ -6,6 +6,7 @@ import ErrorBanner from './components/ErrorBanner.jsx';
 import AutoDetectCard from './components/AutoDetectCard.jsx';
 import { generateReply } from './lib/api.js';
 import { loadAll } from './lib/storage.js';
+import { getThreadIdFromUrl, createOrUpdateLead } from './lib/leads.js';
 
 const CATEGORIES = [
   'auto',
@@ -182,6 +183,26 @@ export default function App() {
         lead_status_suggestion: res?.lead_status_suggestion,
         extracted_fields: res?.extracted_fields
       });
+
+      const threadId = getThreadIdFromUrl(autoDetect?.url);
+      if (threadId) {
+        try {
+          const lead = await createOrUpdateLead({
+            threadId,
+            partnerName: autoDetect?.partnerName || null,
+            fbThreadUrl: autoDetect?.url || null,
+            listingTitle: autoDetect?.listingTitle || null,
+            adType: res?.ad_type || 'unknown',
+            extractedFields: res?.extracted_fields || {},
+            leadStatusSuggestion: res?.lead_status_suggestion || null
+          });
+          console.log('[FB Reply Maker SP] lead updated:', lead);
+        } catch (err) {
+          console.error('[FB Reply Maker SP] lead update failed:', err);
+        }
+      } else {
+        console.log('[FB Reply Maker SP] no threadId in autoDetect.url, skipping lead update — url:', autoDetect?.url);
+      }
 
       setResult(res);
     } catch (err) {

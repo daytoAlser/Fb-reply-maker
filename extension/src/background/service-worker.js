@@ -2,6 +2,30 @@ chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
   .catch((err) => console.error('sidePanel.setPanelBehavior failed', err));
 
+const BADGE_COLOR = '#f59e0b';
+
+async function restoreBadgeFromStorage() {
+  try {
+    const data = await chrome.storage.local.get('unviewedQualifiedCount');
+    const count = typeof data.unviewedQualifiedCount === 'number' ? data.unviewedQualifiedCount : 0;
+    await chrome.action.setBadgeText({ text: count > 0 ? String(count) : '' });
+    await chrome.action.setBadgeBackgroundColor({ color: BADGE_COLOR });
+    console.log('[FB Reply Maker SW] badge restored to', count);
+  } catch (err) {
+    console.warn('[FB Reply Maker SW] badge restore failed:', err?.message || err);
+  }
+}
+
+restoreBadgeFromStorage();
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.unviewedQualifiedCount) {
+    const count = changes.unviewedQualifiedCount.newValue || 0;
+    chrome.action.setBadgeText({ text: count > 0 ? String(count) : '' }).catch(() => {});
+    chrome.action.setBadgeBackgroundColor({ color: BADGE_COLOR }).catch(() => {});
+  }
+});
+
 const CONTENT_SCRIPT_ID = 'marketplace';
 const CONTENT_SCRIPT_FILE = 'content/marketplace.js';
 const CONTENT_SCRIPT_MATCHES = [
