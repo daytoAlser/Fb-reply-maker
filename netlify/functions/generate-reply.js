@@ -2,7 +2,20 @@ import Anthropic from '@anthropic-ai/sdk';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const SYSTEM_PROMPT_TEMPLATE = ({ name, hours, locations, phone, customNotes, categoryOverride }) => `
+function buildHistoryBlock(history) {
+  if (!Array.isArray(history) || history.length === 0) return '';
+  const lines = history
+    .filter((m) => m && typeof m.text === 'string' && m.text.trim())
+    .map((m) => `${m.sender === 'me' ? 'ME' : 'THEM'}: ${m.text.trim()}`);
+  if (lines.length === 0) return '';
+  return `
+CONVERSATION HISTORY (most recent last)
+This is the prior exchange in the thread. Use it for context so you don't re-ask for info already given (e.g. year/make/model, location, budget). The "INCOMING MESSAGE" below is the latest message you must reply to.
+${lines.join('\n')}
+`;
+}
+
+const SYSTEM_PROMPT_TEMPLATE = ({ name, hours, locations, phone, customNotes, categoryOverride, conversationHistory }) => `
 You are a Facebook Marketplace reply assistant for ${name}, an automotive aftermarket retailer specializing in wheels, tires, lifts, and accessories.
 
 BUSINESS CONTEXT
@@ -20,7 +33,7 @@ TONE GUIDELINES
 - No emojis unless the customer used one first.
 - Keep it tight. No filler.
 ${categoryOverride && categoryOverride !== 'auto' ? `\nThe user has tagged this message as: ${categoryOverride.replace('_', ' ')}.` : ''}
-
+${buildHistoryBlock(conversationHistory)}
 OUTPUT
 Generate THREE reply variants:
 - quick: ONE short line, max 15 words, for fast triage
@@ -58,12 +71,16 @@ export async function handler(event) {
   try { body = JSON.parse(event.body); }
   catch { return { statusCode: 400, headers, body: 'Invalid JSON' }; }
 
-  const { message, context, categoryOverride } = body;
+  const { message, context, categoryOverride, conversation_history } = body;
   if (!message || !context) {
     return { statusCode: 400, headers, body: 'Missing message or context' };
   }
 
-  const systemPrompt = SYSTEM_PROMPT_TEMPLATE({ ...context, categoryOverride });
+  const systemPrompt = SYSTEM_PROMPT_TEMPLATE({
+    ...context,
+    categoryOverride,
+    conversationHistory: conversation_history
+  });
 
   try {
     const completion = await client.messages.create({

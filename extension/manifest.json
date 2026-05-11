@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "FB Reply Maker",
+  "version": "1.0.0",
+  "description": "AI reply assistant for FB Marketplace messages",
+  "permissions": ["storage", "sidePanel", "activeTab", "scripting"],
+  "host_permissions": [
+    "https://www.facebook.com/*",
+    "https://m.facebook.com/*",
+    "https://www.messenger.com/*"
+  ],
+  "background": {
+    "service_worker": "src/background/service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Open Reply Maker"
+  },
+  "side_panel": {
+    "default_path": "src/sidepanel/index.html"
+  },
+  "options_ui": {
+    "page": "src/options/index.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.facebook.com/marketplace/*",
+        "https://www.messenger.com/*"
+      ],
+      "js": ["src/content/marketplace.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
