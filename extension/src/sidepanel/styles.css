@@ -293,6 +293,33 @@ html, body {
   border-color: var(--accent);
 }
 
+.btn-mini:disabled,
+.btn-mini:disabled:hover {
+  opacity: 0.4;
+  cursor: not-allowed;
+  color: var(--text-dim);
+  border-color: var(--border-strong);
+  background: transparent;
+}
+
+.btn-mini-accent:disabled,
+.btn-mini-accent:disabled:hover {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+  background: transparent;
+  opacity: 0.4;
+}
+
+.insert-tip {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--text-mute);
+  font-style: italic;
+  padding: 2px 0 4px;
+  line-height: 1.4;
+}
+
 .btn-mini-accent {
   color: var(--accent);
   border-color: var(--accent-dim);

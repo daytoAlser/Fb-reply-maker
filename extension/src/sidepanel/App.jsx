@@ -235,6 +235,9 @@ export default function App() {
             <span className="badge">{result.category}</span>
             <p className="intent">{result.intent_summary}</p>
           </div>
+          <p className="insert-tip">
+            Tip: click on the @name in FB's reply box to convert it to a real tag before sending.
+          </p>
           <VariantCard kind="quick" text={result.variants.quick} />
           <VariantCard kind="standard" text={result.variants.standard} />
           <VariantCard kind="detailed" text={result.variants.detailed} />

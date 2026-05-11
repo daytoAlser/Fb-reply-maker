@@ -5,6 +5,7 @@ const TITLES = { quick: 'Quick', standard: 'Standard', detailed: 'Detailed' };
 export default function VariantCard({ kind, text }) {
   const [copied, setCopied] = useState(false);
   const [inserted, setInserted] = useState(null);
+  const [isFiring, setIsFiring] = useState(false);
   const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
 
   async function handleCopy() {
@@ -18,6 +19,12 @@ export default function VariantCard({ kind, text }) {
   }
 
   function handleInsert() {
+    if (isFiring) {
+      console.log('[FB Reply Maker SP] Insert click ignored — cooldown active');
+      return;
+    }
+    setIsFiring(true);
+    setTimeout(() => setIsFiring(false), 1000);
     console.log('[FB Reply Maker SP] Insert clicked, sending INSERT_REPLY', text.slice(0, 40));
     setInserted('pending');
     try {
@@ -62,6 +69,7 @@ export default function VariantCard({ kind, text }) {
           type="button"
           className={`btn-mini btn-mini-accent ${inserted === 'err' ? 'btn-mini-err' : ''}`}
           onClick={handleInsert}
+          disabled={isFiring}
         >
           {insertLabel}
         </button>
