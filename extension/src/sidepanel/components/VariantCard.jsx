@@ -18,17 +18,25 @@ export default function VariantCard({ kind, text }) {
   }
 
   function handleInsert() {
+    console.log('[FB Reply Maker SP] Insert clicked, sending INSERT_REPLY', text.slice(0, 40));
     setInserted('pending');
-    chrome.runtime.sendMessage({ type: 'INSERT_REPLY', text }, (res) => {
-      if (chrome.runtime.lastError) {
-        setInserted('err');
-      } else if (res?.ok) {
-        setInserted('ok');
-      } else {
-        setInserted('err');
-      }
+    try {
+      chrome.runtime.sendMessage({ type: 'INSERT_REPLY', text }, (res) => {
+        if (chrome.runtime.lastError) {
+          console.error('[FB Reply Maker SP] INSERT_REPLY failed:', chrome.runtime.lastError.message);
+          setInserted('err');
+        } else {
+          console.log('[FB Reply Maker SP] INSERT_REPLY response:', res);
+          if (res?.ok) setInserted('ok');
+          else setInserted('err');
+        }
+        setTimeout(() => setInserted(null), 1500);
+      });
+    } catch (err) {
+      console.error('[FB Reply Maker SP] sendMessage threw:', err);
+      setInserted('err');
       setTimeout(() => setInserted(null), 1500);
-    });
+    }
   }
 
   const insertLabel =

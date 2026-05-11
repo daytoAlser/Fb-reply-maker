@@ -2,6 +2,60 @@ chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
   .catch((err) => console.error('sidePanel.setPanelBehavior failed', err));
 
+const CONTENT_SCRIPT_ID = 'marketplace';
+const CONTENT_SCRIPT_FILE = 'content/marketplace.js';
+const CONTENT_SCRIPT_MATCHES = [
+  'https://*.facebook.com/*',
+  'https://*.messenger.com/*'
+];
+
+async function registerContentScripts() {
+  try {
+    try {
+      await chrome.scripting.unregisterContentScripts({ ids: [CONTENT_SCRIPT_ID] });
+    } catch {
+      // no prior registration; ignore
+    }
+    await chrome.scripting.registerContentScripts([
+      {
+        id: CONTENT_SCRIPT_ID,
+        matches: CONTENT_SCRIPT_MATCHES,
+        js: [CONTENT_SCRIPT_FILE],
+        runAt: 'document_idle',
+        world: 'ISOLATED',
+        persistAcrossSessions: true
+      }
+    ]);
+    const after = await chrome.scripting.getRegisteredContentScripts();
+    console.log('[FB Reply Maker SW] registered scripts:', after);
+  } catch (err) {
+    console.error('[FB Reply Maker SW] registerContentScripts failed:', err);
+  }
+}
+
+(async () => {
+  try {
+    const scripts = await chrome.scripting.getRegisteredContentScripts();
+    console.log('[FB Reply Maker SW] starting, registered scripts:', scripts);
+    if (!scripts.find((s) => s.id === CONTENT_SCRIPT_ID)) {
+      console.log('[FB Reply Maker SW] no registration found at startup; registering now');
+      await registerContentScripts();
+    }
+  } catch (err) {
+    console.error('[FB Reply Maker SW] startup log failed:', err);
+  }
+})();
+
+chrome.runtime.onInstalled.addListener(() => {
+  console.log('[FB Reply Maker SW] onInstalled');
+  registerContentScripts();
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  console.log('[FB Reply Maker SW] onStartup');
+  registerContentScripts();
+});
+
 const tabState = new Map();
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -49,16 +103,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab?.id) {
+        console.warn('[FB Reply Maker SW] INSERT_REPLY received but no active tab');
         sendResponse({ ok: false, reason: 'no_active_tab' });
         return;
       }
+      console.log('[FB Reply Maker SW] INSERT_REPLY received, forwarding to tab', tab.id, tab.url);
       try {
         const res = await chrome.tabs.sendMessage(tab.id, {
           type: 'INSERT_REPLY',
           text: msg.text
         });
+        console.log('[FB Reply Maker SW] INSERT_REPLY content-script reply:', res);
         sendResponse(res || { ok: false, reason: 'no_response' });
       } catch (err) {
+        console.error('[FB Reply Maker SW] INSERT_REPLY forward failed:', err?.message || err);
         sendResponse({ ok: false, reason: err?.message || 'no_content_script' });
       }
     })();

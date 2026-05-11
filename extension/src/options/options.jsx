@@ -38,6 +38,11 @@ function Options() {
     setSaved(false);
   }
 
+  function updateTop(key, value) {
+    setState({ ...state, [key]: value });
+    setSaved(false);
+  }
+
   async function handleSave(e) {
     e.preventDefault();
     setSaving(true);
@@ -58,6 +63,23 @@ function Options() {
         <h1>FB Reply Maker</h1>
         <span className="mono">SETTINGS</span>
       </header>
+
+      <section className="card">
+        <h2>You</h2>
+        <label className="field">
+          <span className="mono">YOUR NAME</span>
+          <input
+            type="text"
+            value={state.userName || ''}
+            onChange={(e) => updateTop('userName', e.target.value)}
+            placeholder="e.g. Dayton"
+            spellCheck={false}
+          />
+          <span className="field-hint">
+            Used in every reply opener (e.g. "Hey @John, Dayton here, happy to help you out today!"). Leave blank if you want generic openers.
+          </span>
+        </label>
+      </section>
 
       <section className="card">
         <h2>API</h2>

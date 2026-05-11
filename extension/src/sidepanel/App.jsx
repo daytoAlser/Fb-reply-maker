@@ -144,14 +144,35 @@ export default function App() {
           ? autoDetect.conversationHistory
           : null;
 
+      const partnerName = (autoDetect?.partnerName || '').trim();
+      const listingTitle = (autoDetect?.listingTitle || '').trim();
+      const userName = (settings.userName || '').trim();
+
+      if (!partnerName) {
+        console.warn('[FB Reply Maker SP] WARNING: partnerName missing, opener will degrade');
+      }
+      if (!userName) {
+        console.warn('[FB Reply Maker SP] WARNING: userName missing — set it in Options to personalize opener');
+      }
+
       const res = await generateReply({
         endpoint: settings.config.endpoint,
         secret: settings.config.secret,
         message: incoming,
         context: settings.context,
         categoryOverride,
-        conversationHistory
+        conversationHistory,
+        userName: userName || undefined,
+        partnerName: partnerName || undefined,
+        listingTitle: listingTitle || undefined
       });
+
+      console.log('[FB Reply Maker SP] response meta:', {
+        ad_type: res?.ad_type,
+        lead_status_suggestion: res?.lead_status_suggestion,
+        extracted_fields: res?.extracted_fields
+      });
+
       setResult(res);
     } catch (err) {
       setError(err.message || String(err));

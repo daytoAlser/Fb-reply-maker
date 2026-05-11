@@ -4,11 +4,23 @@ export async function generateReply({
   message,
   context,
   categoryOverride,
-  conversationHistory
+  conversationHistory,
+  userName,
+  partnerName,
+  listingTitle
 }) {
   const body = { message, context, categoryOverride };
   if (Array.isArray(conversationHistory) && conversationHistory.length > 0) {
     body.conversation_history = conversationHistory;
+  }
+  if (typeof userName === 'string' && userName.trim()) {
+    body.userName = userName.trim();
+  }
+  if (typeof partnerName === 'string' && partnerName.trim()) {
+    body.partnerName = partnerName.trim();
+  }
+  if (typeof listingTitle === 'string' && listingTitle.trim()) {
+    body.listingTitle = listingTitle.trim();
   }
   const res = await fetch(endpoint, {
     method: 'POST',

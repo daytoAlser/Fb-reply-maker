@@ -5,9 +5,8 @@
   "description": "AI reply assistant for FB Marketplace messages",
   "permissions": ["storage", "sidePanel", "activeTab", "scripting"],
   "host_permissions": [
-    "https://www.facebook.com/*",
-    "https://m.facebook.com/*",
-    "https://www.messenger.com/*"
+    "https://*.facebook.com/*",
+    "https://*.messenger.com/*"
   ],
   "background": {
     "service_worker": "src/background/service-worker.js",
@@ -22,15 +21,5 @@
   "options_ui": {
     "page": "src/options/index.html",
     "open_in_tab": true
-  },
-  "content_scripts": [
-    {
-      "matches": [
-        "https://www.facebook.com/marketplace/*",
-        "https://www.messenger.com/*"
-      ],
-      "js": ["src/content/marketplace.js"],
-      "run_at": "document_idle"
-    }
-  ]
+  }
 }
