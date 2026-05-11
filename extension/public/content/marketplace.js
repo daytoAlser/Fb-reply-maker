@@ -317,11 +317,177 @@ function fireActivationBurst() {
   );
 }
 
+function insertCharAtCaret(box, char) {
+  const sel = window.getSelection();
+  if (sel && sel.rangeCount) {
+    const range = sel.getRangeAt(0);
+    range.deleteContents();
+    const node = document.createTextNode(char);
+    range.insertNode(node);
+    range.setStartAfter(node);
+    range.setEndAfter(node);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    return;
+  }
+  const range = document.createRange();
+  range.selectNodeContents(box);
+  range.collapse(false);
+  range.insertNode(document.createTextNode(char));
+}
+
+function moveCaretToEnd(box) {
+  box.focus();
+  const range = document.createRange();
+  range.selectNodeContents(box);
+  range.collapse(false);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+async function simulateType(box, char) {
+  const isAt = char === '@';
+  const upperChar = char.toUpperCase();
+  const isUpper = char !== upperChar.toLowerCase() && char === upperChar;
+  const keyCode = isAt ? 50 : upperChar.charCodeAt(0);
+  const code = isAt ? 'Digit2' : (/[A-Za-z]/.test(char) ? `Key${upperChar}` : `Unidentified`);
+  const shift = isAt || isUpper;
+  const charCode = char.charCodeAt(0);
+
+  const keyProps = {
+    key: char,
+    code,
+    keyCode,
+    which: keyCode,
+    shiftKey: shift,
+    bubbles: true,
+    cancelable: true
+  };
+
+  box.dispatchEvent(new KeyboardEvent('keydown', { ...keyProps, charCode: 0 }));
+  box.dispatchEvent(new KeyboardEvent('keypress', {
+    ...keyProps,
+    keyCode: charCode,
+    which: charCode,
+    charCode
+  }));
+  box.dispatchEvent(new InputEvent('beforeinput', {
+    inputType: 'insertText',
+    data: char,
+    bubbles: true,
+    cancelable: true
+  }));
+  insertCharAtCaret(box, char);
+  box.dispatchEvent(new InputEvent('input', {
+    inputType: 'insertText',
+    data: char,
+    bubbles: true,
+    cancelable: true
+  }));
+  box.dispatchEvent(new KeyboardEvent('keyup', { ...keyProps, charCode: 0 }));
+
+  await new Promise((r) => setTimeout(r, 50));
+}
+
+function findMentionOption() {
+  const trySelectors = [
+    '[role="listbox"] [role="option"]',
+    '[aria-label*="Mention" i] [role="option"]',
+    '[role="option"]'
+  ];
+  for (const sel of trySelectors) {
+    const all = [...document.querySelectorAll(sel)];
+    const visible = all.filter((el) => {
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    });
+    if (visible.length > 0) {
+      return { element: visible[0], count: visible.length, selector: sel };
+    }
+  }
+  return { element: null, count: 0, selector: null };
+}
+
+async function insertWithMention(text) {
+  const match = text.match(/@(\w+)/);
+  if (!match) return tryInsertReply(text);
+
+  const idx = match.index;
+  const name = match[1];
+  const prefix = text.slice(0, idx);
+  const suffix = text.slice(idx + 1 + name.length);
+
+  console.log('[FB Reply Maker] mention insert: prefix=', JSON.stringify(prefix), 'name=', name, 'suffix=', JSON.stringify(suffix.slice(0, 60)));
+
+  const box = document.querySelector(SELECTORS.replyTextbox);
+  if (!box) return { ok: false, reason: 'no_textbox' };
+
+  try {
+    box.focus();
+
+    if (prefix) {
+      const r1 = await tryInsertReply(prefix);
+      if (!r1.ok) throw new Error('prefix_insert_failed:' + (r1.reason || 'unknown'));
+    }
+
+    moveCaretToEnd(box);
+
+    await simulateType(box, '@');
+    console.log('[FB Reply Maker] typed @, waiting for dropdown...');
+    await new Promise((r) => setTimeout(r, 150));
+
+    for (const ch of name) {
+      await simulateType(box, ch);
+    }
+
+    await new Promise((r) => setTimeout(r, 300));
+
+    const dropdown = findMentionOption();
+    console.log('[FB Reply Maker] dropdown options found:', dropdown.count, dropdown.selector || '');
+
+    let method;
+    if (dropdown.element) {
+      dropdown.element.click();
+      console.log('[FB Reply Maker] clicked mention suggestion');
+      await new Promise((r) => setTimeout(r, 250));
+      method = 'mention-tagged';
+    } else {
+      console.log('[FB Reply Maker] mention fallback to plain text');
+      method = 'mention-plain';
+    }
+
+    if (suffix) {
+      moveCaretToEnd(box);
+      const r2 = await tryInsertReply(suffix);
+      if (!r2.ok) throw new Error('suffix_insert_failed:' + (r2.reason || 'unknown'));
+    }
+
+    return { ok: true, method };
+  } catch (err) {
+    console.warn('[FB Reply Maker] mention insert failed:', err?.message, '— falling back to plain text insert of full reply');
+    try {
+      box.focus();
+      const range = document.createRange();
+      range.selectNodeContents(box);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      document.execCommand('delete', false);
+    } catch {}
+    return tryInsertReply(text);
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'INSERT_REPLY') {
-    console.log('[FB Reply Maker] INSERT_REPLY received, inserting:', (msg.text || '').slice(0, 40));
+    const text = msg.text || '';
+    const hasMention = /@\w+/.test(text);
+    console.log('[FB Reply Maker] INSERT_REPLY received, hasMention:', hasMention, 'preview:', text.slice(0, 40));
     (async () => {
-      const result = await tryInsertReply(msg.text || '');
+      const result = hasMention
+        ? await insertWithMention(text)
+        : await tryInsertReply(text);
       if (result.ok) {
         console.log('[FB Reply Maker] insert method succeeded:', result.method);
         fireActivationBurst();

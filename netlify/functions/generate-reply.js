@@ -18,7 +18,9 @@ ${lines.join('\n')}
 function firstWord(s) {
   if (!s || typeof s !== 'string') return null;
   const w = s.trim().split(/\s+/)[0];
-  return w || null;
+  if (!w) return null;
+  const clean = w.split(/[,.]/)[0];
+  return clean || null;
 }
 
 function buildOpenerLine(customerFirstName, rep) {
@@ -53,6 +55,8 @@ OPENER (use on first reply in a thread; optional on follow-ups):
 ${openerLine}
 
 This opener line above is already finalized — the customer's first name and the sales rep's name are plugged in (when available). Use the quoted string EXACTLY as written. Do not rewrite it, do not substitute names, do not add placeholders, do not omit the @ symbol if it's present. The @ before the customer's first name uses Facebook's mention system and triggers a notification on the customer's end — preserve it character-for-character.
+
+When using an @mention anywhere in a reply, use ONLY the customer's first name (a single word, no spaces). If their full name is "Glen Hans", use "@Glen" not "@Glen Hans". FB's tag system only matches single-word prefixes — multi-word @mentions break the tag dropdown and never resolve to a real notification.
 
 Then ask qualifying questions in "we" voice.
 
