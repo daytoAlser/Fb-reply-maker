@@ -155,6 +155,16 @@ export default function App() {
         console.warn('[FB Reply Maker SP] WARNING: userName missing — set it in Options to personalize opener');
       }
 
+      console.log('[FB Reply Maker SP] request payload:', {
+        hasMessage: !!incoming,
+        messageLength: incoming?.length,
+        userName: settings?.userName,
+        partnerName: autoDetect?.partnerName,
+        listingTitle: autoDetect?.listingTitle,
+        historyLength: conversationHistory?.length,
+        category: categoryOverride
+      });
+
       const res = await generateReply({
         endpoint: settings.config.endpoint,
         secret: settings.config.secret,

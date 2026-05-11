@@ -22,6 +22,9 @@ export async function generateReply({
   if (typeof listingTitle === 'string' && listingTitle.trim()) {
     body.listingTitle = listingTitle.trim();
   }
+
+  console.log('[FB Reply Maker API] sending body:', { ...body, secret: '[REDACTED]' });
+
   const res = await fetch(endpoint, {
     method: 'POST',
     headers: {
