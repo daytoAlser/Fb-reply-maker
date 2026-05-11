@@ -16,28 +16,25 @@ ${lines.join('\n')}
 }
 
 function firstWord(s) {
-  if (!s || typeof s !== 'string') return '';
-  return s.trim().split(/\s+/)[0] || '';
+  if (!s || typeof s !== 'string') return null;
+  const w = s.trim().split(/\s+/)[0];
+  return w || null;
 }
 
-function buildOpenerExample(customerFirstName, rep) {
+function buildOpenerLine(customerFirstName, rep) {
   if (customerFirstName && rep) {
-    return `Hey @${customerFirstName}, ${rep} here, I'd be happy to help you out today!`;
+    return `Opener: "Hey @${customerFirstName}, ${rep} here, I'd be happy to help you out today!"`;
   }
   if (customerFirstName) {
-    return `Hey @${customerFirstName}, I'd be happy to help you out today!`;
+    return `Opener: "Hey @${customerFirstName}, happy to help you out today!"`;
   }
   if (rep) {
-    return `Hey, ${rep} here, happy to help you out today!`;
+    return `Opener: "Hey, ${rep} here, happy to help you out today!"`;
   }
-  return `Hey, happy to help you out today!`;
+  return `Opener: "Hey, happy to help you out today!"`;
 }
 
-const SYSTEM_PROMPT_TEMPLATE = ({ userName, partnerName, listingTitle, categoryOverride, conversationHistory }) => {
-  const customerFirstName = firstWord(partnerName);
-  const rep = (userName || '').trim();
-  const openerExample = buildOpenerExample(customerFirstName, rep);
-
+const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory }) => {
   const listingBlock = listingTitle && listingTitle.trim()
     ? `\nLISTING CONTEXT\nThe customer is messaging about this listing: "${listingTitle.trim()}". Use this together with the customer's message to infer ad_type (wheel / tire / accessory / lift) per the detection signals below.\n`
     : '';
@@ -52,20 +49,12 @@ You are a Facebook Marketplace reply assistant for CCAW (Canada Custom Autoworks
 CORE IDENTITY (read this every time):
 What separates us is WE ARE HAPPY TO HELP. We solve problems, we don't sell. To help, we have to understand the customer's vision, their hot points, and their real problem so we can solve it with products and service. Every reply you write embodies this. You're not closing the sale in chat. You're qualifying the lead so a salesperson can pick up the thread and run with it.
 
-OPENER PATTERN (use on first reply in a thread, optional on follow-ups):
-"${openerExample}"
+OPENER (use on first reply in a thread; optional on follow-ups):
+${openerLine}
+
+This opener line above is already finalized — the customer's first name and the sales rep's name are plugged in (when available). Use the quoted string EXACTLY as written. Do not rewrite it, do not substitute names, do not add placeholders, do not omit the @ symbol if it's present. The @ before the customer's first name uses Facebook's mention system and triggers a notification on the customer's end — preserve it character-for-character.
 
 Then ask qualifying questions in "we" voice.
-
-The @${customerFirstName || 'name'} (with the @ symbol) tags the customer via Facebook's mention system and triggers a notification on their end — when a customer first name is available, always include the @ symbol immediately before it.
-
-Use the EXACT opener above. The four cases:
-- partnerName="${customerFirstName}", userName="${rep}" → use it as shown above
-- If partnerName is empty / missing → omit the @mention entirely. Use: "Hey, ${rep || '{userName}'} here, happy to help you out today!" (or just "Hey, happy to help you out today!" if userName is also missing).
-- If userName is empty / missing → drop the rep-name interjection. Use: "Hey @${customerFirstName || '{firstName}'}, happy to help you out today!"
-- If both are missing → "Hey, happy to help you out today!"
-
-Pick the opener that matches what's available. Do not invent placeholder text. Do not write the literal strings "{userName}" or "{firstName}" in the reply.
 
 VOICE:
 - Friendly but professional, full sentences, proper grammar.
@@ -74,7 +63,7 @@ VOICE:
 - Contractions are fine and preferred ("we've got", "you're").
 - No emojis ever.
 - No slang ("bro", "fam", "lol", "ya").
-- Exclamation points only in the opener ("happy to help you out today!"), not mid-reply.
+- Exclamation points only in the opener line, not mid-reply.
 - Be specific. If they mentioned "33x12.5x15s", say "33x12.5x15s" not "those tires".
 ${listingBlock}
 QUALIFYING FLOW (depends on ad type, which you infer from listing title + customer message):
@@ -176,12 +165,25 @@ export async function handler(event) {
     return { statusCode: 400, headers, body: 'Missing message or context' };
   }
 
+  const customerFirstName = firstWord(partnerName);
+  const rep = (userName || '').trim() || null;
+  const openerLine = buildOpenerLine(customerFirstName, rep);
+
   const systemPrompt = SYSTEM_PROMPT_TEMPLATE({
-    userName,
-    partnerName,
+    openerLine,
     listingTitle,
     categoryOverride,
     conversationHistory: conversation_history
+  });
+
+  console.log('[FN] resolved opener:', openerLine);
+  console.log('[FN] system prompt length:', systemPrompt.length);
+  console.log('[FN] inputs:', {
+    customerFirstName,
+    rep,
+    listingTitle: listingTitle || null,
+    historyLength: Array.isArray(conversation_history) ? conversation_history.length : 0,
+    categoryOverride: categoryOverride || null
   });
 
   try {
@@ -202,6 +204,7 @@ export async function handler(event) {
     const parsed = JSON.parse(text);
     return { statusCode: 200, headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) };
   } catch (err) {
+    console.error('[FN] error:', err?.message || err);
     return { statusCode: 500, headers, body: JSON.stringify({ error: err.message }) };
   }
 }
