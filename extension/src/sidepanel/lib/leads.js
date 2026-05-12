@@ -288,7 +288,10 @@ export async function createOrUpdateLead({
   overrideFlags,
   customerMessage,
   productsOfInterest,
-  readyForOptions
+  readyForOptions,
+  conversationMode,
+  silenceDurationMs,
+  lastCustomerMessageAt
 }) {
   if (!threadId) {
     console.warn('[FB Reply Maker leads] createOrUpdateLead: missing threadId, skipping');
@@ -389,11 +392,20 @@ export async function createOrUpdateLead({
     // the server-merged array when present (server is authoritative); carry
     // forward existing otherwise.
     productsOfInterest: effectiveProducts,
-    conversationMode: existing?.conversationMode || phaseEDefaults.conversationMode,
-    lastCustomerMessageAt: existing?.lastCustomerMessageAt ?? phaseEDefaults.lastCustomerMessageAt,
-    silenceDurationMs: typeof existing?.silenceDurationMs === 'number'
-      ? existing.silenceDurationMs
-      : phaseEDefaults.silenceDurationMs,
+    // Phase E.2: server is authoritative for conversation_mode / silence /
+    // last_customer_message_at. Trust the response; fall back to prior local
+    // value when the response omits (older deploy or non-thread generate).
+    conversationMode: typeof conversationMode === 'string' && conversationMode
+      ? conversationMode
+      : (existing?.conversationMode || phaseEDefaults.conversationMode),
+    lastCustomerMessageAt: typeof lastCustomerMessageAt === 'number' && lastCustomerMessageAt > 0
+      ? lastCustomerMessageAt
+      : (existing?.lastCustomerMessageAt ?? phaseEDefaults.lastCustomerMessageAt),
+    silenceDurationMs: typeof silenceDurationMs === 'number' && silenceDurationMs >= 0
+      ? silenceDurationMs
+      : (typeof existing?.silenceDurationMs === 'number'
+        ? existing.silenceDurationMs
+        : phaseEDefaults.silenceDurationMs),
     manualOptionsLog: Array.isArray(existing?.manualOptionsLog)
       ? existing.manualOptionsLog
       : phaseEDefaults.manualOptionsLog,

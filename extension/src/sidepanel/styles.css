@@ -1385,6 +1385,74 @@ select:focus-visible {
 }
 
 /* ============================================================
+   Phase E.2 — Returning customer banner + lead-card chip
+   ============================================================ */
+
+.returning-banner {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 10px 14px;
+  margin: 2px 0;
+  background: var(--bg-elev);
+  border: 1px solid var(--warning-dim);
+  border-left: 3px solid var(--warning);
+  border-radius: var(--radius-md);
+  color: var(--warning);
+  box-shadow: var(--glow-warning), var(--shadow-card);
+  animation: slideDown var(--dur-base) var(--ease-out-quint);
+}
+
+.returning-banner-icon { font-size: 14px; line-height: 1; }
+
+.returning-banner-title {
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.returning-banner-body {
+  grid-column: 1 / -1;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+
+.returning-banner-hint {
+  grid-column: 1 / -1;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+}
+
+.returning-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 9px;
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+  border-radius: var(--radius-pill);
+  color: var(--warning);
+  background: rgba(245, 158, 11, 0.14);
+  box-shadow: var(--glow-warning-soft);
+}
+
+.returning-chip-icon { font-size: 10px; line-height: 1; }
+
+/* ============================================================
    Phase E.1 — Ready-for-options banner (in reply view)
    ============================================================ */
 

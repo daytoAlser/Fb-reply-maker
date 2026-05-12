@@ -22,7 +22,75 @@ function mergeCapturedFields(newFields, existingFields) {
   return merged;
 }
 
-async function upsertLeadToSupabase({ thread_id, partner_name, fb_thread_url, listing_title, ad_type, captured_fields, status, flags, writeFlags, products_of_interest, ready_for_options }) {
+// Phase E.2: returning-customer detection
+const RETURNING_GAP_MS = 48 * 60 * 60 * 1000;
+const RETURNING_TRIGGER_STATUSES = new Set([
+  'options_sent', 'lead_warm_pending', 'qualified', 'contacted'
+]);
+const RESUMPTION_PATTERNS = [
+  /\bsorry just getting back to (you|ya|u)\b/i,
+  /\bsorry (about|for) (the )?(late|delayed?|slow) (reply|response|message)\b/i,
+  /\bsorry (about|for) (the )?(wait|delay)\b/i,
+  /\bstill got (those|them|the)\b/i,
+  /\bthe ones you (showed|sent|had|talked about)\b/i,
+  /\b(the )?(bronze|black|silver|chrome|gloss|matte) ones\b/i,
+  /\bare (those|they|these) still (available|in stock|around)\b/i,
+  /\byou still have (those|them|these|the)\b/i,
+  /\bstill interested\b/i,
+  /\bhaven'?t forgotten\b/i,
+  /\bhey again\b/i,
+  /\b(coming|getting) back to (this|you|ya|the (wheels|tires|setup))\b/i,
+  /\b(been )?meaning to (get back|reply|message|hit you up)\b/i,
+  /\bjust circling back\b/i
+];
+
+function hasResumptionLanguage(text) {
+  if (typeof text !== 'string' || !text.trim()) return false;
+  return RESUMPTION_PATTERNS.some((re) => re.test(text));
+}
+
+function toEpochMs(v) {
+  if (v == null) return null;
+  if (typeof v === 'number' && isFinite(v) && v > 0) return v;
+  if (typeof v === 'string' && v) {
+    const t = Date.parse(v);
+    if (!isNaN(t)) return t;
+  }
+  return null;
+}
+
+function detectReturningTrigger({ message, prevMode, prevStatus, prevLastCustomerMessageAt, prevLastUpdated, now }) {
+  // Already returning — preserve. Caller is responsible for freezing
+  // silence_duration_ms and last_customer_message_at across subsequent
+  // messages inside an active returning conversation.
+  if (prevMode === 'returning') {
+    return { mode: 'returning', firstTrigger: false, reason: 'preserved' };
+  }
+
+  const hasPriorStatus = prevStatus && prevStatus !== 'new';
+  if (!hasPriorStatus) {
+    return { mode: 'standard', firstTrigger: false, reason: 'no_prior_status' };
+  }
+
+  const reference = toEpochMs(prevLastCustomerMessageAt) || toEpochMs(prevLastUpdated);
+  const gap = reference ? Math.max(0, now - reference) : 0;
+
+  const gapTrigger = RETURNING_TRIGGER_STATUSES.has(prevStatus) && gap >= RETURNING_GAP_MS;
+  const langTrigger = hasResumptionLanguage(message);
+
+  if (gapTrigger || langTrigger) {
+    return {
+      mode: 'returning',
+      firstTrigger: true,
+      silenceDurationMs: gap,
+      reason: gapTrigger ? 'gap' : 'language'
+    };
+  }
+
+  return { mode: 'standard', firstTrigger: false, reason: 'no_trigger' };
+}
+
+async function upsertLeadToSupabase({ thread_id, partner_name, fb_thread_url, listing_title, ad_type, captured_fields, status, flags, writeFlags, products_of_interest, ready_for_options, conversation_mode, silence_duration_ms, last_customer_message_at }) {
   const row = {
     thread_id,
     last_updated: new Date().toISOString()
@@ -46,6 +114,16 @@ async function upsertLeadToSupabase({ thread_id, partner_name, fb_thread_url, li
     row.open_flags = combined;
   }
   if (Array.isArray(products_of_interest)) row.products_of_interest = products_of_interest;
+  if (typeof conversation_mode === 'string' && conversation_mode) {
+    row.conversation_mode = conversation_mode;
+  }
+  if (typeof silence_duration_ms === 'number' && isFinite(silence_duration_ms) && silence_duration_ms >= 0) {
+    row.silence_duration_ms = silence_duration_ms;
+  }
+  if (last_customer_message_at) {
+    const ms = toEpochMs(last_customer_message_at);
+    if (ms) row.last_customer_message_at = new Date(ms).toISOString();
+  }
 
   console.log('[FN] supabase upsert payload:', JSON.stringify(row));
 
@@ -220,13 +298,57 @@ Use these naturally when referenced in conversation. When the customer asks wher
 `;
 }
 
-const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest }) => {
+function buildReturningCustomerBlock({ conversationMode, priorStatus, silenceDurationMs }) {
+  if (conversationMode !== 'returning') return '';
+  const silenceLine = (typeof silenceDurationMs === 'number' && silenceDurationMs > 0)
+    ? `\n- Silence duration: ${Math.round(silenceDurationMs / (60 * 60 * 1000))} hours since the last customer message.`
+    : '';
+  const priorLine = priorStatus ? `\n- Prior lead status: ${priorStatus}.` : '';
+  const optionsReference = priorStatus === 'options_sent'
+    ? `\n- Prior options WERE sent. Reference them without re-listing ("which ones were you leaning toward", "did any of those catch your eye"). Do not propose NEW products in this turn.`
+    : '';
+  return `
+RETURNING CUSTOMER MODE — ACTIVE
+
+This customer is resuming after silence (gap-based OR resumption language detected). Use the returning-customer voice. The voice rules below OVERRIDE the OPENER LINE at the top of this prompt — do NOT use the formal "Hey @Name, [Rep] here, I'd be happy to help you out today" opener in any variant.${priorLine}${silenceLine}${optionsReference}
+
+OPENER OVERRIDE (use ONE of these patterns for the first sentence of every variant):
+- If the customer apologized for the delay → "No worries at all my man, life happens!"
+- If the customer just resumed without apology → "Hey man, good to hear back from ya!"
+- For a buy-signal resume (see DIRECT BUY SIGNAL below) → start with "Easy man, let's get you locked in." and skip the "no worries" prefix.
+
+After the opener override, pick the path that matches the message:
+
+PATH A — CUSTOMER ASKS WHICH OPTIONS / WHICH ONES / WHAT WAS THE TOTAL
+Reference the prior options without re-listing them:
+"Which ones were you leaning toward?" / "Did any of those catch your eye?" / "Which combo were you thinking?"
+If they asked about pricing/totals, still fire the pricing flag (Phase D) and use the phone-punt — but with the returning-customer opener.
+
+PATH B — DIRECT BUY SIGNAL ("I'll take them", "let's do it", "I want the X", "let's lock it in", "I'm in")
+Skip the estimate workflow entirely. Go straight to deposit setup:
+"Easy man, let's get you locked in. Send me a good phone number for ya and I'll get the deposit info over so we can lock it in ASAP!"
+Or, if the e-transfer email is configured, mention it inline as one path among the three: e-transfer to [email], call the store with a CC, or stop by in person.
+
+PATH C — CUSTOMER PROVIDES NEW INFO (vehicle update, mind change, fresh qualifier answer)
+Acknowledge the resume briefly, capture the new info, then continue qualifying as normal — but still skip the formal opener.
+
+HARD RULES IN RETURNING MODE
+- DO NOT use the resolved OPENER LINE at the top of this prompt.
+- DO NOT re-introduce yourself ("[Rep] here" / "I'd be happy to help you out today").
+- RESOLVED QUALIFIER LOCK still applies. Do not re-ask anything already captured.
+- Multi-product tracking and flag detection still apply.
+- Casual Brandon-voice throughout. Treat them like the conversation never paused — just with a "no worries on the delay" acknowledgment.
+`;
+}
+
+const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs }) => {
   const listingBlock = listingTitle && listingTitle.trim()
     ? `\nLISTING CONTEXT\nThe customer is messaging about this listing: "${listingTitle.trim()}". Use this together with the customer's message to infer ad_type (wheel / tire / accessory / lift) per the detection signals below.\n`
     : '';
 
   const locationBlock = buildLocationBlock(location);
   const existingProductsBlock = buildExistingProductsBlock(existingProductsOfInterest);
+  const returningBlock = buildReturningCustomerBlock({ conversationMode, priorStatus, silenceDurationMs });
 
   const categoryClause = categoryOverride && categoryOverride !== 'auto'
     ? `\nThe user has tagged this message as: ${categoryOverride.replace('_', ' ')}.\n`
@@ -248,7 +370,7 @@ ${openerLine}
 The line above already has the customer's first name and the sales rep's name plugged in (when available). Use the quoted string EXACTLY as written. Do not rewrite it, do not substitute names, do not omit the @ symbol if it's present. The @ before the first name uses FB's mention system and triggers a notification — preserve it character-for-character.
 
 When using an @mention anywhere in a reply, use ONLY the customer's first name (a single word). "@Glen" not "@Glen Hans" — FB's tag system only matches single-word prefixes.
-${listingBlock}${locationBlock}${overrideClause}
+${listingBlock}${locationBlock}${overrideClause}${returningBlock}
 THE STANDARD FLOW (12 principles, follow these for every reply):
 1. Introduce yourself by name (handled by the opener).
 2. Match the customer's emotional tone (casual with casual, urgent with urgent, "lol" energy with "lol" energy) — always within a friendly-professional voice. Never use slang yourself.
@@ -576,7 +698,12 @@ export async function handler(event) {
     thread_id,
     fb_thread_url,
     existing_captured_fields,
-    existing_products_of_interest
+    existing_products_of_interest,
+    existing_conversation_mode,
+    existing_last_customer_message_at,
+    existing_status,
+    existing_last_updated,
+    existing_silence_duration_ms
   } = body;
   if (!message || !context) {
     return { statusCode: 400, headers, body: 'Missing message or context' };
@@ -587,6 +714,52 @@ export async function handler(event) {
   const rep = (userName || '').trim() || null;
   const openerLine = buildOpenerLine(customerFirstName, rep);
 
+  // Phase E.2: server-authoritative returning-customer detection. Trust prev
+  // state from extension cache, run the trigger logic here, freeze
+  // silence_duration_ms + last_customer_message_at on subsequent turns inside
+  // an active returning conversation.
+  const nowMs = Date.now();
+  const trigger = detectReturningTrigger({
+    message,
+    prevMode: existing_conversation_mode,
+    prevStatus: existing_status,
+    prevLastCustomerMessageAt: existing_last_customer_message_at,
+    prevLastUpdated: existing_last_updated,
+    now: nowMs
+  });
+  const effectiveConversationMode = trigger.mode;
+  let effectiveLastCustomerMessageAt;
+  let effectiveSilenceDurationMs;
+  if (effectiveConversationMode === 'returning') {
+    if (trigger.firstTrigger) {
+      // First time entering returning. Stamp last_customer_message_at to NOW
+      // (this message arrived now). Silence is the gap that led to the return.
+      effectiveLastCustomerMessageAt = nowMs;
+      effectiveSilenceDurationMs = trigger.silenceDurationMs || 0;
+    } else {
+      // Already in returning. Freeze both — the silence + the moment they
+      // returned are historical record, not refreshed each turn.
+      effectiveLastCustomerMessageAt = toEpochMs(existing_last_customer_message_at) || nowMs;
+      effectiveSilenceDurationMs = typeof existing_silence_duration_ms === 'number'
+        ? existing_silence_duration_ms
+        : 0;
+    }
+  } else {
+    // Standard mode — always stamp the most recent customer message timestamp.
+    effectiveLastCustomerMessageAt = nowMs;
+    effectiveSilenceDurationMs = typeof existing_silence_duration_ms === 'number'
+      ? existing_silence_duration_ms
+      : 0;
+  }
+
+  console.log('[FN] returning detection:', {
+    mode: effectiveConversationMode,
+    firstTrigger: trigger.firstTrigger,
+    reason: trigger.reason,
+    silenceMs: effectiveSilenceDurationMs,
+    prevStatus: existing_status || null
+  });
+
   const systemPrompt = SYSTEM_PROMPT_TEMPLATE({
     openerLine,
     listingTitle,
@@ -594,7 +767,10 @@ export async function handler(event) {
     conversationHistory: conversation_history,
     location,
     overrideFlags,
-    existingProductsOfInterest: existing_products_of_interest
+    existingProductsOfInterest: existing_products_of_interest,
+    conversationMode: effectiveConversationMode,
+    priorStatus: existing_status,
+    silenceDurationMs: effectiveSilenceDurationMs
   });
 
   console.log('[FN] resolved opener:', openerLine);
@@ -661,7 +837,15 @@ export async function handler(event) {
     }
     parsed.ready_for_options = allProductsQualified;
 
-    console.log('[FN] products_of_interest merged:', mergedProducts.map((p) => `${p.productType}:${p.productState}`).join(', ') || 'none', '| ready_for_options:', allProductsQualified);
+    // Phase E.2: emit server-authoritative returning-customer state so the
+    // extension can mirror it locally and render the banner.
+    parsed.conversation_mode = effectiveConversationMode;
+    parsed.silence_duration_ms = effectiveSilenceDurationMs;
+    parsed.last_customer_message_at = effectiveLastCustomerMessageAt;
+    parsed.returning_first_trigger = trigger.firstTrigger;
+    parsed.returning_reason = trigger.reason;
+
+    console.log('[FN] products_of_interest merged:', mergedProducts.map((p) => `${p.productType}:${p.productState}`).join(', ') || 'none', '| ready_for_options:', allProductsQualified, '| mode:', effectiveConversationMode);
 
     console.log('[FN] supabase check: thread_id=', thread_id, 'type=', typeof thread_id);
 
@@ -678,7 +862,10 @@ export async function handler(event) {
           flags: parsed.flags,
           writeFlags: !overrideFlags,
           products_of_interest: mergedProducts,
-          ready_for_options: allProductsQualified
+          ready_for_options: allProductsQualified,
+          conversation_mode: effectiveConversationMode,
+          silence_duration_ms: effectiveSilenceDurationMs,
+          last_customer_message_at: effectiveLastCustomerMessageAt
         });
         if (error) {
           console.error('[FN] supabase upsert error full:', JSON.stringify(error));

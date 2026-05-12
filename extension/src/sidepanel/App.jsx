@@ -8,6 +8,7 @@ import TabBar from './components/TabBar.jsx';
 import LeadsTab from './components/LeadsTab.jsx';
 import FlagBanner from './components/FlagBanner.jsx';
 import MultiProductChips from './components/MultiProductChips.jsx';
+import ReturningCustomerBanner from './components/ReturningCustomerBanner.jsx';
 import { generateReply } from './lib/api.js';
 import { loadAll } from './lib/storage.js';
 import {
@@ -43,6 +44,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('reply');
   const [leadsBadgeCount, setLeadsBadgeCount] = useState(0);
   const [overrideActive, setOverrideActive] = useState(false);
+  const [priorStatusSnapshot, setPriorStatusSnapshot] = useState(null);
 
   const isManualRef = useRef(false);
   const lastAutoFilledRef = useRef('');
@@ -239,8 +241,16 @@ export default function App() {
       // Phase E.1: also send existing productsOfInterest so the server merge
       // preserves products tracked earlier in the thread (the AI sometimes
       // forgets a product mentioned many turns back).
+      // Phase E.2: send conversation mode / silence / last_customer_message_at
+      // / status / lastUpdated so the server's returning-customer detector has
+      // the full prior state to work from.
       let existingCapturedFields = null;
       let existingProductsOfInterest = null;
+      let existingConversationMode = null;
+      let existingLastCustomerMessageAt = null;
+      let existingStatus = null;
+      let existingLastUpdated = null;
+      let existingSilenceDurationMs = null;
       if (threadId) {
         try {
           const existingLead = await getLeadByThreadId(threadId);
@@ -248,10 +258,24 @@ export default function App() {
           existingProductsOfInterest = Array.isArray(existingLead?.productsOfInterest)
             ? existingLead.productsOfInterest
             : null;
+          existingConversationMode = existingLead?.conversationMode || null;
+          existingLastCustomerMessageAt = typeof existingLead?.lastCustomerMessageAt === 'number'
+            ? existingLead.lastCustomerMessageAt
+            : null;
+          existingStatus = existingLead?.status || null;
+          existingLastUpdated = typeof existingLead?.lastUpdated === 'number'
+            ? existingLead.lastUpdated
+            : null;
+          existingSilenceDurationMs = typeof existingLead?.silenceDurationMs === 'number'
+            ? existingLead.silenceDurationMs
+            : null;
         } catch (err) {
           console.warn('[FB Reply Maker SP] read existing lead failed:', err?.message);
         }
       }
+      // Capture prior status for the returning banner's subtitle (we want to
+      // show what the lead WAS before this turn potentially changed it).
+      setPriorStatusSnapshot(existingStatus);
 
       console.log('[FB Reply Maker SP] request payload:', {
         hasMessage: !!incoming,
@@ -263,6 +287,8 @@ export default function App() {
         fbThreadUrl: fbThreadUrl || null,
         hasExistingCaptured: !!existingCapturedFields,
         existingProductCount: existingProductsOfInterest?.length || 0,
+        existingConversationMode,
+        existingStatus,
         historyLength: conversationHistory?.length,
         category: categoryOverride
       });
@@ -282,7 +308,14 @@ export default function App() {
         thread_id: threadId || undefined,
         fb_thread_url: fbThreadUrl || undefined,
         existing_captured_fields: existingCapturedFields || undefined,
-        existing_products_of_interest: existingProductsOfInterest || undefined
+        existing_products_of_interest: existingProductsOfInterest || undefined,
+        existing_conversation_mode: existingConversationMode || undefined,
+        existing_last_customer_message_at: existingLastCustomerMessageAt || undefined,
+        existing_status: existingStatus || undefined,
+        existing_last_updated: existingLastUpdated || undefined,
+        existing_silence_duration_ms: typeof existingSilenceDurationMs === 'number'
+          ? existingSilenceDurationMs
+          : undefined
       });
 
       if (overrideFlags) setOverrideActive(true);
@@ -295,6 +328,10 @@ export default function App() {
         flags: res?.flags,
         extracted_fields: res?.extracted_fields,
         ready_for_options: res?.ready_for_options,
+        conversation_mode: res?.conversation_mode,
+        silence_duration_ms: res?.silence_duration_ms,
+        returning_first_trigger: res?.returning_first_trigger,
+        returning_reason: res?.returning_reason,
         products_of_interest: Array.isArray(res?.products_of_interest)
           ? res.products_of_interest.map((p) => `${p.productType}:${p.productState}`)
           : null
@@ -315,7 +352,10 @@ export default function App() {
             overrideFlags,
             customerMessage: incoming,
             productsOfInterest: Array.isArray(res?.products_of_interest) ? res.products_of_interest : null,
-            readyForOptions: typeof res?.ready_for_options === 'boolean' ? res.ready_for_options : undefined
+            readyForOptions: typeof res?.ready_for_options === 'boolean' ? res.ready_for_options : undefined,
+            conversationMode: typeof res?.conversation_mode === 'string' ? res.conversation_mode : undefined,
+            silenceDurationMs: typeof res?.silence_duration_ms === 'number' ? res.silence_duration_ms : undefined,
+            lastCustomerMessageAt: typeof res?.last_customer_message_at === 'number' ? res.last_customer_message_at : undefined
           });
           console.log('[FB Reply Maker SP] lead updated:', lead?.threadId);
         } catch (err) {
@@ -385,6 +425,13 @@ export default function App() {
                 <span className="badge">{result.category}</span>
                 <p className="intent">{result.intent_summary}</p>
               </div>
+              {result.conversation_mode === 'returning' && (
+                <ReturningCustomerBanner
+                  silenceDurationMs={result.silence_duration_ms}
+                  priorStatus={priorStatusSnapshot}
+                  reason={result.returning_reason}
+                />
+              )}
               <MultiProductChips products={result.products_of_interest} />
               {result.ready_for_options && (
                 <div className="ready-banner" role="status" aria-label="Ready for options">

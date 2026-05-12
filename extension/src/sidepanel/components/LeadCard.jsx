@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import MultiProductChips from './MultiProductChips.jsx';
+import { formatSilenceGap } from './ReturningCustomerBanner.jsx';
 
 const STATUS_LABELS = {
   new: 'New',
@@ -73,6 +74,8 @@ export default function LeadCard({ lead, onOpenThread, onStatusChange, onDelete,
   const menuRef = useRef(null);
   const openFlags = Array.isArray(lead.open_flags) ? lead.open_flags.filter((f) => FLAG_CHIP_META[f]) : [];
   const hasOpenFlags = openFlags.length > 0;
+  const isReturning = lead.conversationMode === 'returning';
+  const returningGapLabel = isReturning ? formatSilenceGap(lead.silenceDurationMs) : null;
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -108,6 +111,12 @@ export default function LeadCard({ lead, onOpenThread, onStatusChange, onDelete,
           <span className={`status-pill ${STATUS_CLASSES[lead.status] || 'status-gray'}`}>
             {STATUS_LABELS[lead.status] || lead.status}
           </span>
+          {isReturning && (
+            <span className="returning-chip" title={`${returningGapLabel} since last contact`}>
+              <span className="returning-chip-icon" aria-hidden="true">{'\u{1F501}'}</span>
+              <span className="returning-chip-label">{returningGapLabel}</span>
+            </span>
+          )}
           {openFlags.map((f) => {
             const meta = FLAG_CHIP_META[f];
             return (

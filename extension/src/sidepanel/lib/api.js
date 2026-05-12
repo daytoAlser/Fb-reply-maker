@@ -13,7 +13,12 @@ export async function generateReply({
   thread_id,
   fb_thread_url,
   existing_captured_fields,
-  existing_products_of_interest
+  existing_products_of_interest,
+  existing_conversation_mode,
+  existing_last_customer_message_at,
+  existing_status,
+  existing_last_updated,
+  existing_silence_duration_ms
 }) {
   const body = { message, context, categoryOverride };
   if (Array.isArray(conversationHistory) && conversationHistory.length > 0) {
@@ -45,6 +50,21 @@ export async function generateReply({
   }
   if (Array.isArray(existing_products_of_interest) && existing_products_of_interest.length > 0) {
     body.existing_products_of_interest = existing_products_of_interest;
+  }
+  if (typeof existing_conversation_mode === 'string' && existing_conversation_mode) {
+    body.existing_conversation_mode = existing_conversation_mode;
+  }
+  if (typeof existing_last_customer_message_at === 'number' && existing_last_customer_message_at > 0) {
+    body.existing_last_customer_message_at = existing_last_customer_message_at;
+  }
+  if (typeof existing_status === 'string' && existing_status) {
+    body.existing_status = existing_status;
+  }
+  if (typeof existing_last_updated === 'number' && existing_last_updated > 0) {
+    body.existing_last_updated = existing_last_updated;
+  }
+  if (typeof existing_silence_duration_ms === 'number' && existing_silence_duration_ms >= 0) {
+    body.existing_silence_duration_ms = existing_silence_duration_ms;
   }
 
   console.log('[FB Reply Maker API] sending body:', { ...body, secret: '[REDACTED]' });
