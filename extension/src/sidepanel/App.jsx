@@ -6,6 +6,7 @@ import ErrorBanner from './components/ErrorBanner.jsx';
 import AutoDetectCard from './components/AutoDetectCard.jsx';
 import TabBar from './components/TabBar.jsx';
 import LeadsTab from './components/LeadsTab.jsx';
+import FlagBanner from './components/FlagBanner.jsx';
 import { generateReply } from './lib/api.js';
 import { loadAll } from './lib/storage.js';
 import { getThreadIdFromUrl, createOrUpdateLead } from './lib/leads.js';
@@ -34,6 +35,7 @@ export default function App() {
   const [isManual, setIsManual] = useState(false);
   const [activeTab, setActiveTab] = useState('reply');
   const [leadsBadgeCount, setLeadsBadgeCount] = useState(0);
+  const [overrideActive, setOverrideActive] = useState(false);
 
   const isManualRef = useRef(false);
   const lastAutoFilledRef = useRef('');
@@ -149,7 +151,7 @@ export default function App() {
     });
   }
 
-  async function handleGenerate() {
+  async function handleGenerate({ overrideFlags = false } = {}) {
     setError(null);
     if (!incoming.trim()) {
       setError('Paste an incoming message first.');
@@ -159,6 +161,7 @@ export default function App() {
       setError('Configure endpoint and secret in the options page.');
       return;
     }
+    if (!overrideFlags) setOverrideActive(false);
     setLoading(true);
     setResult(null);
     try {
@@ -200,8 +203,11 @@ export default function App() {
         userName: userName || undefined,
         partnerName: partnerName || undefined,
         listingTitle: listingTitle || undefined,
-        location: settings.location || undefined
+        location: settings.location || undefined,
+        overrideFlags
       });
+
+      if (overrideFlags) setOverrideActive(true);
 
       console.log('[FB Reply Maker SP] response meta:', {
         ad_type: res?.ad_type,
@@ -278,7 +284,7 @@ export default function App() {
 
           <button
             className="btn-primary"
-            onClick={handleGenerate}
+            onClick={() => handleGenerate()}
             disabled={loading}
           >
             {loading ? 'Generating…' : 'Generate Replies'}
@@ -292,6 +298,12 @@ export default function App() {
                 <span className="badge">{result.category}</span>
                 <p className="intent">{result.intent_summary}</p>
               </div>
+              <FlagBanner
+                flags={result.flags || []}
+                overrideActive={overrideActive}
+                onOverride={() => handleGenerate({ overrideFlags: true })}
+                loading={loading}
+              />
               <p className="insert-tip">
                 Tip: click on the @name in FB's reply box to convert it to a real tag before sending.
               </p>
@@ -300,7 +312,7 @@ export default function App() {
               <VariantCard kind="detailed" text={result.variants.detailed} />
               <button
                 className="btn-secondary"
-                onClick={handleGenerate}
+                onClick={() => handleGenerate()}
                 disabled={loading}
               >
                 Regenerate

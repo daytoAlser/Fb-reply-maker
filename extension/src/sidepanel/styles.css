@@ -914,3 +914,87 @@ html, body {
   background: var(--accent-hi);
   border-color: var(--accent-hi);
 }
+
+/* --- FlagBanner --- */
+
+.flag-banner {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0;
+}
+
+.flag-banner-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.flag-banner-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.flag-banner-title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.flag-banner-body {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+.flag-banner-override-btn {
+  align-self: flex-start;
+  background: transparent;
+  border: 1px solid currentColor;
+  color: inherit;
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.flag-banner-override-btn:hover:not(:disabled) {
+  background: currentColor;
+  color: var(--bg);
+}
+
+.flag-banner-override-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.flag-banner-red {
+  border-color: var(--danger);
+  border-left-color: var(--danger);
+  background: rgba(239, 68, 68, 0.08);
+  color: var(--danger);
+}
+
+.flag-banner-yellow {
+  border-color: var(--accent);
+  border-left-color: var(--accent);
+  background: rgba(245, 158, 11, 0.08);
+  color: var(--accent);
+}
+
+.flag-banner-override {
+  border-color: var(--success);
+  border-left-color: var(--success);
+  background: rgba(16, 185, 129, 0.08);
+  color: var(--success);
+}
