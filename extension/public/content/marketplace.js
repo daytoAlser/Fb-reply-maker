@@ -29,6 +29,10 @@ const HEADER_BLACKLIST = /^(chats?|marketplace|inbox|settings|messenger|notifica
 const UI_BLOCKLIST = /^(Thread composer|Message|New message|Customize chat|Chat members|Media,? files,? (?:and|&) links|Privacy (?:and|&) support|Search in conversation|Mute notifications?|Block|Restrict|Unrestrict|Report (?:conversation|user)?|Mark as unread|Archive chat|Unarchive chat|Delete chat|Notifications?|Active now|Active status|Open photo viewer|See all|See more|Reactions?|Reply|Forward|More options?|Settings|Close|Back|Sign out|Help|Profile picture|Edit name|Change theme|Change emoji|Change nicknames?|Add people|Mark as spam|Conversation information|Thread settings)$/i;
 
 const MAX_CONTEXT_MESSAGES = 5;
+// Phase F.1: separate history limit for the full-screen UI which renders a
+// chat-bubble thread view. The sidepanel context limit stays at 5 to keep
+// the AI prompt tight; the fullscreen history is for human readability.
+const MAX_HISTORY_MESSAGES = 20;
 const MIN_TEXT_LENGTH = 4;
 const MAX_TEXT_LENGTH = 500;
 const DEBOUNCE_MS = 300;
@@ -176,17 +180,11 @@ function isConversationPage() {
   return !!document.querySelector(SELECTORS.replyTextbox);
 }
 
-function detectThread() {
-  const container = document.querySelector(SELECTORS.threadContainer);
-  if (!container) {
-    return { status: 'no_thread_detected', reason: 'no_container' };
-  }
-  if (!isConversationPage()) {
-    return { status: 'no_thread_detected', reason: 'not_conversation_page' };
-  }
-
-  const { partner: partnerName, listingTitle } = extractThreadInfo(container);
-
+// Phase F.1: scan all aria-labelled message rows in the active thread and
+// return the deduped, classified list in DOM order (oldest → newest). Shared
+// by detectThread (sidepanel broadcast) and the GET_THREAD_HISTORY RPC
+// (fullscreen thread view).
+function scanThreadMessages(container, partnerName) {
   const byText = new Map();
   let droppedCount = 0;
   for (const el of container.querySelectorAll('[aria-label]')) {
@@ -204,11 +202,23 @@ function detectThread() {
       byText.set(parsed.text, parsed);
     }
   }
-  if (byText.size > 0) {
-    console.log('[FB Reply Maker] captured', byText.size, 'messages, dropped', droppedCount, 'non-message aria-labels');
+  return { messages: [...byText.values()], droppedCount };
+}
+
+function detectThread() {
+  const container = document.querySelector(SELECTORS.threadContainer);
+  if (!container) {
+    return { status: 'no_thread_detected', reason: 'no_container' };
+  }
+  if (!isConversationPage()) {
+    return { status: 'no_thread_detected', reason: 'not_conversation_page' };
   }
 
-  const all = [...byText.values()];
+  const { partner: partnerName, listingTitle } = extractThreadInfo(container);
+  const { messages: all, droppedCount } = scanThreadMessages(container, partnerName);
+  if (all.length > 0) {
+    console.log('[FB Reply Maker] captured', all.length, 'messages, dropped', droppedCount, 'non-message aria-labels');
+  }
   if (all.length === 0) {
     return {
       status: 'no_thread_detected',
@@ -391,6 +401,32 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     lastPayloadHash = '';
     broadcast(true);
     sendResponse({ ok: true });
+    return;
+  }
+  // Phase F.1: full-history RPC for the fullscreen thread view. Returns the
+  // most recent MAX_HISTORY_MESSAGES with sender + text, plus thread metadata.
+  if (msg?.type === 'GET_THREAD_HISTORY') {
+    try {
+      const container = document.querySelector(SELECTORS.threadContainer);
+      if (!container || !isConversationPage()) {
+        sendResponse({ ok: false, reason: 'no_thread' });
+        return;
+      }
+      const { partner: partnerName, listingTitle } = extractThreadInfo(container);
+      const { messages } = scanThreadMessages(container, partnerName);
+      const tail = messages.slice(-MAX_HISTORY_MESSAGES);
+      sendResponse({
+        ok: true,
+        partnerName,
+        listingTitle,
+        url: location.href,
+        capturedAt: Date.now(),
+        messages: tail
+      });
+    } catch (err) {
+      console.warn('[FB Reply Maker] GET_THREAD_HISTORY threw:', err?.message);
+      sendResponse({ ok: false, reason: err?.message || 'scan_failed' });
+    }
     return;
   }
 });

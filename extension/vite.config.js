@@ -15,5 +15,12 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true
+  },
+  build: {
+    rollupOptions: {
+      input: {
+        fullscreen: resolve(__dirname, 'src/fullscreen/index.html')
+      }
+    }
   }
 });

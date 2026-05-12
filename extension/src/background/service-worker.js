@@ -1,6 +1,34 @@
+// Phase F.1: action icon now opens the full-screen lead center instead of
+// the side panel. Side panel is still installed (chrome://extensions side
+// panel toggle / right-click → "Open side panel") for back-compat, but the
+// icon is the primary entry point.
 chrome.sidePanel
-  .setPanelBehavior({ openPanelOnActionClick: true })
+  .setPanelBehavior({ openPanelOnActionClick: false })
   .catch((err) => console.error('sidePanel.setPanelBehavior failed', err));
+
+const FULLSCREEN_PATH = 'src/fullscreen/index.html';
+
+async function openOrFocusFullscreen() {
+  const url = chrome.runtime.getURL(FULLSCREEN_PATH);
+  try {
+    const existing = await chrome.tabs.query({ url });
+    if (existing && existing.length > 0) {
+      const tab = existing[0];
+      await chrome.tabs.update(tab.id, { active: true });
+      if (tab.windowId != null) {
+        await chrome.windows.update(tab.windowId, { focused: true });
+      }
+      return;
+    }
+    await chrome.tabs.create({ url });
+  } catch (err) {
+    console.error('[FB Reply Maker SW] openOrFocusFullscreen failed:', err?.message || err);
+  }
+}
+
+chrome.action.onClicked.addListener(() => {
+  openOrFocusFullscreen();
+});
 
 const BADGE_COLOR = '#f59e0b';
 
@@ -82,6 +110,202 @@ chrome.runtime.onStartup.addListener(() => {
 
 const tabState = new Map();
 
+// Phase F.1 — full-screen lead center plumbing
+// =============================================
+
+function getThreadIdFromUrl(url) {
+  if (!url || typeof url !== 'string') return null;
+  const m = url.match(/\/t\/([^/?#]+)/);
+  return m ? m[1] : null;
+}
+
+function findTabForThread(threadId) {
+  if (!threadId) return null;
+  for (const [tabId, payload] of tabState.entries()) {
+    const id = getThreadIdFromUrl(payload?.url || '');
+    if (id === threadId) return tabId;
+  }
+  return null;
+}
+
+const CACHE_KEY_PREFIX = 'cached_variants:';
+const AUTO_GEN_MIN_WORDS = 3;
+const AUTO_GEN_SKIP_STATUSES = new Set(['closed_won', 'closed_lost', 'stale']);
+const inFlightThreads = new Set();
+const lastSeenIncoming = new Map(); // threadId → text
+
+async function loadGenerationSettings() {
+  const sync = await chrome.storage.sync.get(['userName', 'config', 'context', 'location']);
+  return {
+    userName: typeof sync.userName === 'string' ? sync.userName : '',
+    config: sync.config || {},
+    context: sync.context || null,
+    location: sync.location || null
+  };
+}
+
+async function readCachedVariants(threadId) {
+  if (!threadId) return null;
+  const key = CACHE_KEY_PREFIX + threadId;
+  const data = await chrome.storage.local.get(key);
+  return data[key] || null;
+}
+
+async function writeCachedVariants(threadId, payload) {
+  if (!threadId) return;
+  const key = CACHE_KEY_PREFIX + threadId;
+  await chrome.storage.local.set({ [key]: payload });
+}
+
+async function clearCachedVariants(threadId) {
+  if (!threadId) return;
+  const key = CACHE_KEY_PREFIX + threadId;
+  await chrome.storage.local.remove(key);
+}
+
+function pushToFullscreen(message) {
+  // Fire-and-forget broadcast. The fullscreen page (if open) listens via
+  // chrome.runtime.onMessage; nothing else cares about these types.
+  try {
+    chrome.runtime.sendMessage(message).catch(() => {});
+  } catch {
+    // ignore
+  }
+}
+
+async function runGenerateReply({
+  threadId,
+  url,
+  message,
+  partnerName,
+  listingTitle,
+  conversationHistory
+}) {
+  const settings = await loadGenerationSettings();
+  if (!settings.config?.endpoint || !settings.config?.secret) {
+    console.warn('[FB Reply Maker SW] auto-gen skipped: missing endpoint/secret');
+    return { ok: false, reason: 'missing_config' };
+  }
+
+  // Hydrate prior state from the lead cache so the server has full context
+  // for mergeCapturedFields / merge products_of_interest / returning-mode
+  // detection. Mirrors what App.jsx does in the sidepanel.
+  const leadsData = await chrome.storage.local.get('leads');
+  const existingLead = leadsData.leads?.[threadId] || null;
+
+  const body = {
+    message,
+    context: settings.context,
+    categoryOverride: 'auto',
+    userName: settings.userName || undefined,
+    partnerName: partnerName || undefined,
+    listingTitle: listingTitle || undefined,
+    location: settings.location || undefined,
+    thread_id: threadId,
+    fb_thread_url: url
+  };
+  if (Array.isArray(conversationHistory) && conversationHistory.length > 0) {
+    body.conversation_history = conversationHistory;
+  }
+  if (existingLead?.capturedFields && typeof existingLead.capturedFields === 'object') {
+    body.existing_captured_fields = existingLead.capturedFields;
+  }
+  if (Array.isArray(existingLead?.productsOfInterest) && existingLead.productsOfInterest.length > 0) {
+    body.existing_products_of_interest = existingLead.productsOfInterest;
+  }
+  if (typeof existingLead?.conversationMode === 'string' && existingLead.conversationMode) {
+    body.existing_conversation_mode = existingLead.conversationMode;
+  }
+  if (typeof existingLead?.lastCustomerMessageAt === 'number' && existingLead.lastCustomerMessageAt > 0) {
+    body.existing_last_customer_message_at = existingLead.lastCustomerMessageAt;
+  }
+  if (typeof existingLead?.status === 'string' && existingLead.status) {
+    body.existing_status = existingLead.status;
+  }
+  if (typeof existingLead?.lastUpdated === 'number' && existingLead.lastUpdated > 0) {
+    body.existing_last_updated = existingLead.lastUpdated;
+  }
+  if (typeof existingLead?.silenceDurationMs === 'number' && existingLead.silenceDurationMs >= 0) {
+    body.existing_silence_duration_ms = existingLead.silenceDurationMs;
+  }
+
+  console.log('[FB Reply Maker SW] auto-gen → generate-reply', { threadId, msgLen: message.length });
+
+  const res = await fetch(settings.config.endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-secret': settings.config.secret },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`${res.status} ${text || res.statusText}`);
+  }
+  return res.json();
+}
+
+async function maybeAutoGenerate({ threadId, payload }) {
+  if (!threadId) return;
+  if (inFlightThreads.has(threadId)) return;
+
+  const latestIncoming = (payload?.latestIncoming || '').trim();
+  if (!latestIncoming) return;
+  const wordCount = latestIncoming.split(/\s+/).filter(Boolean).length;
+  if (wordCount < AUTO_GEN_MIN_WORDS) return;
+
+  // De-dupe against the most recent fire for the same exact incoming text.
+  const seen = lastSeenIncoming.get(threadId);
+  if (seen === latestIncoming) return;
+
+  // Closed/stale leads: skip. (Read from chrome.storage.local — same cache
+  // that leads.js writes after every generate.)
+  const leadsData = await chrome.storage.local.get('leads');
+  const lead = leadsData.leads?.[threadId];
+  if (lead && AUTO_GEN_SKIP_STATUSES.has(lead.status)) {
+    console.log('[FB Reply Maker SW] auto-gen skipped: lead status =', lead.status);
+    lastSeenIncoming.set(threadId, latestIncoming);
+    return;
+  }
+
+  // Same-message cache check: if the cache already holds variants generated
+  // from this exact message, don't burn another API call.
+  const cached = await readCachedVariants(threadId);
+  if (cached?.source_message === latestIncoming) {
+    lastSeenIncoming.set(threadId, latestIncoming);
+    return;
+  }
+
+  inFlightThreads.add(threadId);
+  pushToFullscreen({ type: 'F1_GENERATION_STARTED', thread_id: threadId });
+  try {
+    const result = await runGenerateReply({
+      threadId,
+      url: payload.url,
+      message: latestIncoming,
+      partnerName: payload.partnerName,
+      listingTitle: payload.listingTitle,
+      conversationHistory: payload.conversationHistory
+    });
+
+    const entry = {
+      thread_id: threadId,
+      partner_name: payload.partnerName || null,
+      listing_title: payload.listingTitle || null,
+      result, // full /generate-reply response
+      source_message: latestIncoming,
+      generated_at: Date.now()
+    };
+    await writeCachedVariants(threadId, entry);
+    lastSeenIncoming.set(threadId, latestIncoming);
+    console.log('[FB Reply Maker SW] auto-gen cached for', threadId);
+    pushToFullscreen({ type: 'F1_VARIANTS_UPDATED', thread_id: threadId, payload: entry });
+  } catch (err) {
+    console.error('[FB Reply Maker SW] auto-gen failed:', err?.message || err);
+    pushToFullscreen({ type: 'F1_GENERATION_FAILED', thread_id: threadId, error: err?.message || String(err) });
+  } finally {
+    inFlightThreads.delete(threadId);
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type === 'THREAD_UPDATE' && sender.tab?.id) {
     tabState.set(sender.tab.id, msg.payload);
@@ -90,6 +314,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       tabId: sender.tab.id,
       payload: msg.payload
     }).catch(() => {});
+    if (msg.payload?.status === 'ok') {
+      const threadId = getThreadIdFromUrl(msg.payload.url || '');
+      if (threadId) {
+        maybeAutoGenerate({ threadId, payload: msg.payload }).catch((err) =>
+          console.error('[FB Reply Maker SW] maybeAutoGenerate threw:', err?.message || err)
+        );
+      }
+    }
     return;
   }
 
@@ -118,6 +350,66 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ ok: true });
       } catch (err) {
         sendResponse({ ok: false, reason: err?.message || 'no_content_script' });
+      }
+    })();
+    return true;
+  }
+
+  // Phase F.1 — fullscreen → SW → FB content script: full thread history
+  if (msg?.type === 'F1_GET_THREAD_HISTORY' && typeof msg.thread_id === 'string') {
+    (async () => {
+      const tabId = findTabForThread(msg.thread_id);
+      if (!tabId) {
+        sendResponse({ ok: false, reason: 'fb_tab_not_open' });
+        return;
+      }
+      try {
+        const res = await chrome.tabs.sendMessage(tabId, { type: 'GET_THREAD_HISTORY' });
+        sendResponse(res || { ok: false, reason: 'no_response' });
+      } catch (err) {
+        sendResponse({ ok: false, reason: err?.message || 'rpc_failed' });
+      }
+    })();
+    return true;
+  }
+
+  // Phase F.1 — fullscreen manual regenerate. SW pulls fresh history from the
+  // FB tab (so the message is current) and runs the generator.
+  if (msg?.type === 'F1_REGENERATE' && typeof msg.thread_id === 'string') {
+    (async () => {
+      const tabId = findTabForThread(msg.thread_id);
+      const payload = tabId ? tabState.get(tabId) : null;
+      if (!payload || payload.status !== 'ok' || !payload.latestIncoming) {
+        sendResponse({ ok: false, reason: 'no_current_message' });
+        return;
+      }
+      // Bypass de-dupe: clear lastSeenIncoming + cache, then fire.
+      lastSeenIncoming.delete(msg.thread_id);
+      await clearCachedVariants(msg.thread_id);
+      maybeAutoGenerate({ threadId: msg.thread_id, payload })
+        .then(() => sendResponse({ ok: true }))
+        .catch((err) => sendResponse({ ok: false, reason: err?.message || 'gen_failed' }));
+    })();
+    return true;
+  }
+
+  // Phase F.1 — fullscreen requests focus on the FB tab for a given thread.
+  if (msg?.type === 'F1_FOCUS_FB_TAB' && typeof msg.thread_id === 'string') {
+    (async () => {
+      const tabId = findTabForThread(msg.thread_id);
+      if (!tabId) {
+        sendResponse({ ok: false, reason: 'fb_tab_not_open' });
+        return;
+      }
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        await chrome.tabs.update(tabId, { active: true });
+        if (tab?.windowId != null) {
+          await chrome.windows.update(tab.windowId, { focused: true });
+        }
+        sendResponse({ ok: true });
+      } catch (err) {
+        sendResponse({ ok: false, reason: err?.message || 'focus_failed' });
       }
     })();
     return true;
