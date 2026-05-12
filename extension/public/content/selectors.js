@@ -17,6 +17,12 @@
 // new comment block. Keep the old block around until the new one stabilizes.
 
 (function () {
+  // Idempotency: if the SW's executeScript fallback re-runs us alongside the
+  // registered injection, skip the second init so we don't blow away the
+  // existing FBRM_SELECTORS reference (or re-log the load banner).
+  if (globalThis.__FBRM_SELECTORS_LOADED__) return;
+  globalThis.__FBRM_SELECTORS_LOADED__ = true;
+
   const LAYOUT_VERSION = '2026-05-fb-marketplace';
 
   const SELECTORS = {

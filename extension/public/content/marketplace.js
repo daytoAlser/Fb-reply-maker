@@ -1,3 +1,16 @@
+// Idempotency guard. Chrome may run this file twice on the same page when
+// a registered injection coincides with our executeScript fallback in the
+// SW. Without this, top-level `const FBRM = ...` throws on the second run
+// ("Identifier 'FBRM' has already been declared") and kills the SW round-
+// trip. We wrap the whole body in an IIFE and bail early if a flag on
+// globalThis says we already initialized.
+(function () {
+  if (globalThis.__FBRM_CONTENT_LOADED__) {
+    console.log('[FB Reply Maker] content script already initialized on ' + location.href + ', skipping re-init');
+    return;
+  }
+  globalThis.__FBRM_CONTENT_LOADED__ = true;
+
 console.log("[FB Reply Maker] content script v2 (strict sender) loaded on " + location.href);
 
 // Pull centralized selectors if selectors.js loaded first (registered ahead
@@ -948,3 +961,5 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return;
   }
 });
+
+})(); // end idempotency-guarded IIFE
