@@ -92,6 +92,7 @@ export default function ThreadList({
   query,
   onQueryChange,
   activeThreadId,
+  openingThreadId,
   onSelect,
   cachedByThread,
   onRefresh,
@@ -232,6 +233,7 @@ export default function ThreadList({
 
         {filtered.map((r) => {
           const isActive = r.thread_id === activeThreadId;
+          const isOpening = r.thread_id === openingThreadId;
           const ready = isReady(r);
           const returning = isReturning(r);
           const unread = isUnread(r, cachedByThread[r.thread_id]);
@@ -240,12 +242,15 @@ export default function ThreadList({
             <button
               key={r.thread_id}
               type="button"
-              onClick={() => onSelect(r.thread_id)}
-              className={`thread-row ${isActive ? 'is-active' : ''} ${r.isKnownLead ? '' : 'is-unknown'}`}
+              onClick={() => onSelect(r.thread_id, r.source)}
+              disabled={isOpening}
+              className={`thread-row ${isActive ? 'is-active' : ''} ${r.isKnownLead ? '' : 'is-unknown'} ${isOpening ? 'is-opening' : ''}`}
             >
               <div className="thread-row-line1">
                 <span className="thread-row-name">{r.partner_name || 'Unknown'}</span>
-                <span className="thread-row-time">{rowDisplayTime(r)}</span>
+                <span className="thread-row-time">
+                  {isOpening ? <span className="thread-row-spinner" aria-label="Opening" /> : rowDisplayTime(r)}
+                </span>
               </div>
               <div className="thread-row-line2">
                 <span className="thread-row-listing">

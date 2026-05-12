@@ -514,6 +514,94 @@ async function scrollInboxDown() {
   };
 }
 
+// Phase F.1.5 step 4 — drive the FB tab to a given thread without the user
+// having to switch to it. Locate the row anchor by thread_id, click it,
+// wait for the thread compose pane to render, then scrape last 20.
+//
+// "Hidden" tabs in Chrome do not block JS execution — element.click()
+// fires the SPA navigation, FB renders the thread DOM, and the existing
+// scanThreadMessages picks it up. We add humanization on top so the
+// click cadence matches a normal user.
+async function waitForSelector(selector, maxMs = 3000, pollMs = 120) {
+  const start = Date.now();
+  while (Date.now() - start < maxMs) {
+    const el = document.querySelector(selector);
+    if (el) return el;
+    await sleep(pollMs);
+  }
+  return null;
+}
+
+function findThreadRowAnchor(threadId, source) {
+  if (!threadId) return null;
+  const safeId = String(threadId).replace(/[^A-Za-z0-9_-]/g, '');
+  const selectors = [];
+  if (!source || source === 'marketplace') {
+    selectors.push(`a[href*="/marketplace/t/${safeId}/"]`);
+    selectors.push(`a[href*="/marketplace/t/${safeId}?"]`);
+    selectors.push(`a[href$="/marketplace/t/${safeId}"]`);
+  }
+  if (!source || source === 'messages') {
+    selectors.push(`a[href*="/messages/t/${safeId}/"]`);
+    selectors.push(`a[href*="/messages/t/${safeId}?"]`);
+    selectors.push(`a[href$="/messages/t/${safeId}"]`);
+  }
+  for (const sel of selectors) {
+    const el = document.querySelector(sel);
+    if (el) return el;
+  }
+  return null;
+}
+
+async function openThreadByRowClick({ thread_id, source } = {}) {
+  if (!thread_id) return { ok: false, reason: 'no_thread_id' };
+
+  const anchor = findThreadRowAnchor(thread_id, source);
+  if (!anchor) {
+    return { ok: false, reason: 'row_not_in_dom', thread_id };
+  }
+
+  // Humanize: minimum 100ms gap since last FB DOM action + a random
+  // 150-400ms pre-click delay so the cadence looks human.
+  await ensureHumanGap();
+  await sleep(randomBetween(150, 400));
+
+  try {
+    anchor.click();
+    markFbAction();
+  } catch (err) {
+    return { ok: false, reason: err?.message || 'click_failed', thread_id };
+  }
+
+  // Wait for the compose box to render — that signals FB has loaded the
+  // thread into the DOM. Up to 3s.
+  const composeEl = await waitForSelector(SELECTORS.replyTextbox, 3000);
+  if (!composeEl) {
+    return { ok: false, reason: 'compose_did_not_load', thread_id, url: location.href };
+  }
+
+  // One short settle for FB to inject the last message bubbles, then scrape.
+  await sleep(250);
+
+  const container = document.querySelector(SELECTORS.threadContainer);
+  if (!container) {
+    return { ok: false, reason: 'no_thread_container', thread_id, url: location.href };
+  }
+  const { partner: partnerName, listingTitle } = extractThreadInfo(container);
+  const { messages } = scanThreadMessages(container, partnerName);
+  const tail = messages.slice(-MAX_HISTORY_MESSAGES);
+
+  return {
+    ok: true,
+    thread_id,
+    partnerName,
+    listingTitle,
+    url: location.href,
+    capturedAt: Date.now(),
+    messages: tail
+  };
+}
+
 function findInboxRowContainer(anchor) {
   const roles = new Set(INBOX_SELECTORS.rowAncestorRoles || []);
   let node = anchor;
@@ -763,6 +851,26 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     sendResponse({ ok: true });
     return;
   }
+  // Phase F.1.5 step 4 — drive the FB tab to a specific thread (silent
+  // click on the inbox row anchor), wait for the compose pane to render,
+  // then scrape last 20 messages. Lets the user click a row in the
+  // extension without their browser view leaving the extension tab.
+  if (msg?.type === 'OPEN_THREAD' && typeof msg.thread_id === 'string') {
+    (async () => {
+      try {
+        const res = await openThreadByRowClick({
+          thread_id: msg.thread_id,
+          source: msg.source
+        });
+        sendResponse(res);
+      } catch (err) {
+        console.warn('[FB Reply Maker] OPEN_THREAD threw:', err?.message);
+        sendResponse({ ok: false, reason: err?.message || 'open_failed' });
+      }
+    })();
+    return true;
+  }
+
   // Phase F.1.5 step 3 — programmatic scroll of the FB inbox list container
   // to trigger virtualized loading of older threads. Read-side; caller is
   // expected to re-issue GET_INBOX_LIST after this returns to pick up the

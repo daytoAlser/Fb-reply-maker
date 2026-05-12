@@ -11,7 +11,8 @@ import {
   readCachedVariants,
   readAllCachedVariants,
   getInboxList,
-  scrollInboxDown
+  scrollInboxDown,
+  openThread
 } from './lib/api.js';
 
 const LEADS_REFRESH_INTERVAL_MS = 30 * 1000;
@@ -81,6 +82,9 @@ export default function App() {
   const [inboxLoadingMore, setInboxLoadingMore] = useState(false);
   const [inboxAtBottom, setInboxAtBottom] = useState(false);
   const lastScrollAtRef = useRef(0);
+  // Step 4: per-row click state. openingThreadId is the row currently
+  // being driven open in the FB tab; ThreadList renders a spinner on it.
+  const [openingThreadId, setOpeningThreadId] = useState(null);
 
   const refreshLeads = useCallback(async (s) => {
     const cfg = (s || settings)?.config;
@@ -233,7 +237,9 @@ export default function App() {
     return () => chrome.runtime.onMessage.removeListener(onMsg);
   }, [activeThreadId, refreshLeads]);
 
-  // When active thread changes: load cached variants + fetch fresh history.
+  // When active thread changes: load cached variants. History is driven
+  // by the click handler (handleSelectThread) via F1_5_OPEN_THREAD so the
+  // FB tab is on the right thread before scraping.
   useEffect(() => {
     if (!activeThreadId) {
       setHistory([]);
@@ -243,32 +249,53 @@ export default function App() {
     (async () => {
       const cached = await readCachedVariants(activeThreadId);
       setActiveCached(cached);
-      await fetchHistory(activeThreadId);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeThreadId]);
 
-  async function fetchHistory(threadId) {
-    setHistoryLoading(true);
+  // Phase F.1.5 step 4 — row click drives the FB tab silently to the thread
+  // then scrapes. If OPEN_THREAD fails (row off-screen due to virtualization,
+  // compose pane didn't render, etc.) we fall back to the legacy
+  // GET_THREAD_HISTORY which works when the user manually navigates the FB
+  // tab to that thread first.
+  const handleSelectThread = useCallback(async (threadId, source) => {
+    if (!threadId) return;
+    setActiveThreadId(threadId);
+    setHistory([]);
     setHistoryError(null);
+    setHistoryLoading(true);
+    setOpeningThreadId(threadId);
     try {
-      const res = await getThreadHistory(threadId);
+      const res = await openThread(threadId, source || 'marketplace');
       if (res?.ok) {
         setHistory(Array.isArray(res.messages) ? res.messages : []);
+        setHistoryError(null);
       } else {
-        setHistory([]);
-        setHistoryError(res?.reason || 'unknown');
+        // Fallback: tab may be on this thread already, or content script is
+        // not where we expect — try the read-only history RPC.
+        const fb = await getThreadHistory(threadId);
+        if (fb?.ok) {
+          setHistory(Array.isArray(fb.messages) ? fb.messages : []);
+          setHistoryError(null);
+        } else {
+          setHistory([]);
+          setHistoryError(res?.reason || fb?.reason || 'open_failed');
+        }
       }
     } catch (err) {
       setHistory([]);
       setHistoryError(err?.message || 'rpc_failed');
     } finally {
       setHistoryLoading(false);
+      setOpeningThreadId(null);
     }
-  }
+  }, []);
 
   async function handleRefreshHistory() {
-    if (activeThreadId) await fetchHistory(activeThreadId);
+    if (!activeThreadId) return;
+    // Find current row to recover its source; default to marketplace.
+    const row = mergedRows.find((r) => r.thread_id === activeThreadId);
+    await handleSelectThread(activeThreadId, row?.source);
   }
 
   async function handleOpenInFb() {
@@ -358,7 +385,8 @@ export default function App() {
         query={query}
         onQueryChange={setQuery}
         activeThreadId={activeThreadId}
-        onSelect={setActiveThreadId}
+        openingThreadId={openingThreadId}
+        onSelect={handleSelectThread}
         cachedByThread={cachedByThread}
         onRefresh={handleManualRefreshInbox}
         onOpenInboxTab={handleOpenInboxTab}

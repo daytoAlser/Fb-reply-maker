@@ -500,6 +500,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  // Phase F.1.5 step 4 — drive the FB tab to a specific thread (silent
+  // background click) and return the scraped messages. No focus changes:
+  // the FB tab stays where it is and the user's view stays on the
+  // extension. The content script handles the click + waits for compose
+  // to render before scraping.
+  if (msg?.type === 'F1_5_OPEN_THREAD' && typeof msg.thread_id === 'string') {
+    (async () => {
+      const res = await callInboxTab({
+        type: 'OPEN_THREAD',
+        thread_id: msg.thread_id,
+        source: msg.source
+      });
+      sendResponse(res);
+    })();
+    return true;
+  }
+
   // Phase F.1 — fullscreen → SW → FB content script: full thread history
   if (msg?.type === 'F1_GET_THREAD_HISTORY' && typeof msg.thread_id === 'string') {
     (async () => {

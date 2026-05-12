@@ -82,6 +82,24 @@ export async function scrollInboxDown() {
   });
 }
 
+// Phase F.1.5 step 4 — drive the FB tab to a specific thread silently and
+// return the scraped history. Used by the row-click flow in App.jsx.
+export async function openThread(thread_id, source) {
+  if (!thread_id) return { ok: false, reason: 'no_thread_id' };
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(
+      { type: 'F1_5_OPEN_THREAD', thread_id, source },
+      (res) => {
+        if (chrome.runtime.lastError) {
+          resolve({ ok: false, reason: chrome.runtime.lastError.message });
+          return;
+        }
+        resolve(res || { ok: false, reason: 'no_response' });
+      }
+    );
+  });
+}
+
 export async function focusFbTab(threadId) {
   if (!threadId) return { ok: false, reason: 'no_thread_id' };
   return new Promise((resolve) => {

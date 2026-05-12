@@ -294,6 +294,25 @@ html, body, #root {
   font-weight: 500;
 }
 
+.thread-row.is-opening {
+  opacity: 0.8;
+  cursor: progress;
+}
+
+.thread-row-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: thread-row-spin 0.7s linear infinite;
+  vertical-align: middle;
+}
+@keyframes thread-row-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* ============================================================
    Thread view (center pane)
    ============================================================ */
