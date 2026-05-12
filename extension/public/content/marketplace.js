@@ -10,11 +10,16 @@ const SELECTORS = {
   replyTextbox: FBRM?.thread?.replyTextbox || '[contenteditable="true"][role="textbox"]'
 };
 const INBOX_SELECTORS = FBRM?.inbox || {
-  threadAnchor: 'a[href*="/marketplace/t/"]',
+  threadAnchorSelectors: ['a[href*="/marketplace/t/"]', 'a[href*="/messages/t/"]'],
+  threadAnchor: 'a[href*="/marketplace/t/"], a[href*="/messages/t/"]',
   rowAncestorRoles: ['row', 'listitem', 'link'],
-  threadIdFromHref: /\/marketplace\/t\/([^/?#]+)/,
+  threadIdExtractors: [
+    { source: 'marketplace', re: /\/marketplace\/t\/([^/?#]+)/ },
+    { source: 'messages',    re: /\/messages\/t\/([^/?#]+)/ }
+  ],
+  threadIdFromHref: /\/(?:marketplace|messages)\/t\/([^/?#]+)/,
   isInboxPathname: (p) =>
-    /\/marketplace\/(inbox|t\/)/i.test(p || '') || /\/latest\/inbox/i.test(p || '')
+    /\/marketplace\/(inbox|t\/)/i.test(p || '') || /\/messages(\/|$)/i.test(p || '')
 };
 
 // Patterns that pull (sender, text) from a message aria-label.
@@ -422,17 +427,35 @@ function findInboxRowContainer(anchor) {
   return anchor.closest('[role="row"], [role="listitem"], [role="link"]') || anchor.parentElement || anchor;
 }
 
+function classifyThreadHref(href) {
+  if (!href) return null;
+  const extractors = INBOX_SELECTORS.threadIdExtractors || [
+    { source: 'marketplace', re: /\/marketplace\/t\/([^/?#]+)/ },
+    { source: 'messages',    re: /\/messages\/t\/([^/?#]+)/ }
+  ];
+  for (const { source, re } of extractors) {
+    const m = href.match(re);
+    if (m) return { source, thread_id: m[1] };
+  }
+  return null;
+}
+
 function scrapeInboxList() {
-  const anchors = document.querySelectorAll(INBOX_SELECTORS.threadAnchor || 'a[href*="/marketplace/t/"]');
+  const selectorList = INBOX_SELECTORS.threadAnchorSelectors
+    || [INBOX_SELECTORS.threadAnchor || 'a[href*="/marketplace/t/"], a[href*="/messages/t/"]'];
+  const combined = selectorList.join(', ');
+  const anchors = document.querySelectorAll(combined);
+
+  // Dedupe by (source, thread_id) — different surfaces (marketplace vs
+  // messages) can in theory collide on raw id alone.
   const seen = new Map();
-  const idPattern = INBOX_SELECTORS.threadIdFromHref || /\/marketplace\/t\/([^/?#]+)/;
 
   for (const a of anchors) {
     const href = a.getAttribute('href') || '';
-    const m = href.match(idPattern);
-    if (!m) continue;
-    const threadId = m[1];
-    if (seen.has(threadId)) continue;
+    const classified = classifyThreadHref(href);
+    if (!classified) continue;
+    const key = classified.source + ':' + classified.thread_id;
+    if (seen.has(key)) continue;
 
     const row = findInboxRowContainer(a);
     const raw = ((row && row.innerText) || (a.innerText || '')).trim();
@@ -448,12 +471,13 @@ function scrapeInboxList() {
     ].join(' ');
     const unread = /\bunread\b/i.test(aria);
 
-    seen.set(threadId, {
-      thread_id: threadId,
+    seen.set(key, {
+      thread_id: classified.thread_id,
+      source: classified.source,
       partner_name: lines[0] || null,
-      listing_title: lines[1] || null,
-      snippet: lines[2] || null,
-      last_activity_relative: lines[3] || null,
+      listing_title: classified.source === 'marketplace' ? (lines[1] || null) : null,
+      snippet: lines[classified.source === 'marketplace' ? 2 : 1] || null,
+      last_activity_relative: lines[classified.source === 'marketplace' ? 3 : 2] || null,
       unread,
       raw_text: raw,
       href

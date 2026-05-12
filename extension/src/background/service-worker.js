@@ -133,31 +133,35 @@ function findTabForThread(threadId) {
   return null;
 }
 
-// Phase F.1.5 — locate the FB Marketplace inbox tab the user has open.
+// Phase F.1.5 — locate the FB inbox tab the user has open.
 //
-// Match patterns are intentionally broad so chrome.tabs.query returns every
-// candidate; we then rank by URL category so the real /marketplace/inbox
-// tab wins over business.facebook.com Pages Manager when the user has both
-// open. (Pages Manager is a fallback for users without a personal inbox.)
+// Two FB surfaces are supported in F.1.5: facebook.com/marketplace/inbox
+// (Marketplace) and facebook.com/messages (Messenger). business.facebook.com
+// Pages Manager is intentionally excluded — its DOM uses a different anchor
+// scheme that step 1's selectors don't recognize.
 const INBOX_TAB_URL_PATTERNS = [
   'https://*.facebook.com/marketplace/inbox*',
   'https://*.facebook.com/marketplace/inbox/*',
   'https://*.facebook.com/marketplace/t/*',
-  'https://business.facebook.com/latest/inbox*',
-  'https://business.facebook.com/latest/inbox/*',
+  'https://*.facebook.com/messages*',
+  'https://*.facebook.com/messages/*',
+  'https://*.facebook.com/messages/t/*',
   'https://*.messenger.com/marketplace/*',
   'https://*.messenger.com/t/*'
 ];
 
-// Higher score = better match. /marketplace/inbox is the canonical inbox URL
-// and always wins; business.facebook.com is last-resort.
+// Higher score = better match. Both /marketplace/inbox and /messages are
+// canonical inbox surfaces; we score /messages slightly lower so that when
+// the user has both open the marketplace tab wins (marketplace threads are
+// the primary lead source for CCAW).
 function scoreInboxTabUrl(url) {
   if (!url || typeof url !== 'string') return 0;
   if (/\/\/[^/]*facebook\.com\/marketplace\/inbox/i.test(url)) return 100;
-  if (/\/\/[^/]*facebook\.com\/marketplace\/t\//i.test(url)) return 80;
+  if (/\/\/[^/]*facebook\.com\/marketplace\/t\//i.test(url)) return 90;
+  if (/\/\/[^/]*facebook\.com\/messages\/t\//i.test(url)) return 80;
+  if (/\/\/[^/]*facebook\.com\/messages\b/i.test(url)) return 70;
   if (/\/\/[^/]*messenger\.com\/marketplace/i.test(url)) return 60;
   if (/\/\/[^/]*messenger\.com\/t\//i.test(url)) return 50;
-  if (/\/\/business\.facebook\.com\/latest\/inbox/i.test(url)) return 20;
   return 0;
 }
 
