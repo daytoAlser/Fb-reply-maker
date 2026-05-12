@@ -416,6 +416,104 @@ function fireActivationBurst() {
 //   4. Unread is detected from aria-labels on the anchor or row that contain
 //      the word "unread" (FB does this for screen readers) and as a fallback
 //      from a bold-font marker on the partner name.
+// Phase F.1.5 step 3 — humanization. FB watches for bursty automated
+// activity; randomized delays + a hard floor between any two DOM actions
+// keep our scroll/click cadence in "looks human" territory. Module-scoped
+// so it spans GET_INBOX_LIST + SCROLL_INBOX_DOWN + future OPEN_THREAD.
+const HUMAN_MIN_GAP_MS = 100;
+const SCROLL_PRE_DELAY_MIN = 300;
+const SCROLL_PRE_DELAY_MAX = 700;
+const SCROLL_SETTLE_MS = 500;
+let lastFbActionAt = 0;
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function randomBetween(min, max) {
+  return Math.floor(min + Math.random() * (max - min));
+}
+
+async function ensureHumanGap() {
+  const elapsed = Date.now() - lastFbActionAt;
+  if (elapsed < HUMAN_MIN_GAP_MS) {
+    await sleep(HUMAN_MIN_GAP_MS - elapsed);
+  }
+}
+
+function markFbAction() {
+  lastFbActionAt = Date.now();
+}
+
+// Walk up from a thread anchor to the nearest ancestor that's actually
+// scrollable (scrollHeight > clientHeight + a small fudge, AND overflow
+// allows scrolling). FB virtualizes the inbox list inside its own scroll
+// container — usually 4-8 levels up from the anchor.
+function findInboxScrollContainer() {
+  const anchorSelector = (INBOX_SELECTORS.threadAnchorSelectors || []).join(', ')
+    || INBOX_SELECTORS.threadAnchor
+    || 'a[href*="/marketplace/t/"], a[href*="/messages/t/"]';
+  const firstAnchor = document.querySelector(anchorSelector);
+  if (!firstAnchor) return null;
+
+  let node = firstAnchor.parentElement;
+  for (let depth = 0; depth < 20 && node && node !== document.body; depth++) {
+    const cs = window.getComputedStyle(node);
+    const overflowY = cs.overflowY;
+    const canScroll = overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay';
+    if (canScroll && node.scrollHeight > node.clientHeight + 4) {
+      return node;
+    }
+    node = node.parentElement;
+  }
+  // Fallback: scrollingElement (whole document). Less ideal but at least
+  // forces FB to render more thumbs if the entire inbox is a long page.
+  return document.scrollingElement || null;
+}
+
+async function scrollInboxDown() {
+  const container = findInboxScrollContainer();
+  if (!container) {
+    return { ok: false, reason: 'no_scroll_container' };
+  }
+  const before = {
+    scrollTop: container.scrollTop,
+    scrollHeight: container.scrollHeight,
+    clientHeight: container.clientHeight
+  };
+  const atBottom = before.scrollTop + before.clientHeight >= before.scrollHeight - 4;
+  if (atBottom) {
+    return { ok: true, atBottom: true, scrolledBy: 0, ...before };
+  }
+
+  // Humanize: random pre-delay + minimum gap since last DOM action.
+  await ensureHumanGap();
+  await sleep(randomBetween(SCROLL_PRE_DELAY_MIN, SCROLL_PRE_DELAY_MAX));
+
+  // Scroll ~80% of the visible viewport. FB's virtualizer kicks in on the
+  // scroll event itself; we don't need a wheel/touch event, scrollTop is
+  // enough for the chat list pane.
+  const scrollBy = Math.max(120, Math.floor(before.clientHeight * 0.8));
+  container.scrollTop = before.scrollTop + scrollBy;
+  markFbAction();
+
+  // Settle: wait for FB to inject new rows from the virtualizer.
+  await sleep(SCROLL_SETTLE_MS);
+
+  const after = {
+    scrollTop: container.scrollTop,
+    scrollHeight: container.scrollHeight,
+    clientHeight: container.clientHeight
+  };
+  return {
+    ok: true,
+    atBottom: after.scrollTop + after.clientHeight >= after.scrollHeight - 4,
+    scrolledBy: after.scrollTop - before.scrollTop,
+    before,
+    after
+  };
+}
+
 function findInboxRowContainer(anchor) {
   const roles = new Set(INBOX_SELECTORS.rowAncestorRoles || []);
   let node = anchor;
@@ -427,18 +525,31 @@ function findInboxRowContainer(anchor) {
   return anchor.closest('[role="row"], [role="listitem"], [role="link"]') || anchor.parentElement || anchor;
 }
 
-// FB Messenger renders presence indicators ("Active now", "Active 5m ago")
-// as the first text line inside each thread row. Strip those so the
-// partner-name slot doesn't get clobbered.
+// FB renders a lot of UI chrome inside each inbox row — presence dots,
+// avatar fallback initials, "Unread message:" badges, "X sent a photo"
+// system lines. Strip anything that isn't actual user-authored content so
+// the partner-name / snippet slots don't pick up junk.
 const INBOX_ROW_NOISE = [
   /^Active( now| \d+\s?[mhd] ago)?$/i,
   /^Online$/i,
   /^Offline$/i,
   /^Unread$/i,
+  /^Unread message:?$/i,
+  /^Notifications?\s*muted$/i,
+  /^Muted$/i,
+  /^Mark as (un)?read$/i,
+  /^Open (chat|conversation)$/i,
   /^Sent$/i,
   /^Delivered$/i,
   /^Seen$/i,
+  /^Read\s+\d/i,
   /^Typing\.?\.?\.?$/i,
+  /^Pinned$/i,
+  /^Archived$/i,
+  /^You$/i,
+  /^You:$/i,
+  // Single character (avatar initial fallback when FB has no group photo).
+  /^[A-Za-z0-9]$/,
   /^\s*$/
 ];
 
@@ -446,13 +557,41 @@ function stripRowNoise(lines) {
   return lines.filter((s) => !INBOX_ROW_NOISE.some((re) => re.test(s)));
 }
 
+// A line is "snippet-like" if it begins with "Sender: ..." or matches a
+// known system-event phrase. We use this to skip past it when looking for
+// a real partner name in the remaining lines.
+function isSnippetLine(s) {
+  if (!s) return false;
+  // "Name: message text" — sender-prefixed message preview
+  if (/^[^:\n]{1,40}:\s+.+/.test(s)) return true;
+  // "Andy sent a photo." / "Andy sent an attachment."
+  if (/\bsent (a|an) (photo|attachment|video|file|gif|sticker)\b/i.test(s)) return true;
+  // "Andy reacted to your message"
+  if (/\breacted to\b/i.test(s)) return true;
+  // "You replied to ..." / "You sent ..."
+  if (/^You\s+(replied|sent|reacted|liked|loved)\b/i.test(s)) return true;
+  return false;
+}
+
+// A line is a relative-time fragment ("2h", "1d", "12:34", "Jan 5"). Used
+// to recognize the last-activity slot when slot ordering is off.
+function isTimeLine(s) {
+  if (!s) return false;
+  if (/^\d{1,2}[smhdw]$/i.test(s)) return true;
+  if (/^\d{1,2}:\d{2}(\s*[AP]M)?$/i.test(s)) return true;
+  if (/^(Yesterday|Today)$/i.test(s)) return true;
+  if (/^[A-Z][a-z]{2}\s+\d{1,2}$/i.test(s)) return true;
+  return false;
+}
+
 // Pull the partner name out of an anchor's aria-label when FB provides one.
-// Common forms: "Open chat with John Doe", "Conversation with John Doe",
-// "Chat with John Doe", "John Doe · Buyer". We strip the leading verb and
-// anything past a trailing role tag.
+// FB uses many forms: "Open chat with John Doe", "Conversation with John
+// Doe", "John Doe · Buyer", "Group chat with Airdrie Shipping". On group
+// chats the aria sometimes only contains the group name verbatim — we
+// accept that as a last resort.
 const ARIA_NAME_PATTERNS = [
-  /^(?:Open\s+chat\s+with|Conversation\s+with|Chat\s+with|Message\s+from)\s+(.+?)(?:\s*[·•:-]\s*.+)?$/i,
-  /^(.+?)\s*[·•]\s*(?:Buyer|Seller|Open conversation|Unread)/i
+  /^(?:Open\s+chat\s+with|Conversation\s+with|Chat\s+with|Group\s+chat\s+with|Message\s+from)\s+(.+?)(?:\s*[·•,]\s*.+)?$/i,
+  /^(.+?)\s*[·•]\s*(?:Buyer|Seller|Open conversation|Unread|Active)/i
 ];
 
 function extractAriaName(...labels) {
@@ -463,9 +602,39 @@ function extractAriaName(...labels) {
       const m = label.match(re);
       if (m && m[1]) {
         const name = m[1].replace(/\s+/g, ' ').trim();
-        if (name.length >= 2 && name.length <= 80) return name;
+        if (name.length >= 2 && name.length <= 120) return name;
       }
     }
+    // Bare aria-label that looks like a name (no leading verb, plausible
+    // length, doesn't start with snippet-style "Sender:" prefix).
+    if (
+      label.length >= 2 &&
+      label.length <= 120 &&
+      !/^\d/.test(label) &&
+      !isSnippetLine(label) &&
+      !INBOX_ROW_NOISE.some((re) => re.test(label))
+    ) {
+      return label;
+    }
+  }
+  return null;
+}
+
+// FB group-chat rows often have the title inside a child <span> with its
+// own dir="auto" + a class — but they almost always have a [role="link"]
+// or descendant that carries the title text. As a last resort, search the
+// row for a child whose text looks more name-like than snippet-like.
+function findNameInRowSubtree(row) {
+  if (!row) return null;
+  const candidates = row.querySelectorAll('span[dir="auto"], h2, h3, h4');
+  for (const el of candidates) {
+    const txt = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!txt) continue;
+    if (txt.length < 2 || txt.length > 120) continue;
+    if (isSnippetLine(txt)) continue;
+    if (isTimeLine(txt)) continue;
+    if (INBOX_ROW_NOISE.some((re) => re.test(txt))) continue;
+    return txt;
   }
   return null;
 }
@@ -510,23 +679,58 @@ function scrapeInboxList() {
     const anchorAria = a.getAttribute('aria-label') || '';
     const rowAria = row?.getAttribute?.('aria-label') || '';
     const ariaName = extractAriaName(anchorAria, rowAria);
-    const unread = /\bunread\b/i.test(anchorAria + ' ' + rowAria);
+    // "Unread" can appear in the row's accessible chrome as well as inside
+    // the visible innerText; check both.
+    const unread =
+      /\bunread\b/i.test(anchorAria + ' ' + rowAria) ||
+      allLines.some((s) => /^Unread( message:?)?$/i.test(s));
 
-    // Slot mapping. Marketplace rows: [name, listing, snippet, time].
-    // Messenger rows: [name, snippet, time]. aria-label "Open chat with X"
-    // is the highest-confidence partner name; fall back to lines[0].
-    const partnerName = ariaName || lines[0] || null;
-    const listingTitle = classified.source === 'marketplace' ? (lines[1] || null) : null;
-    const snippetIdx = classified.source === 'marketplace' ? 2 : 1;
-    const timeIdx = classified.source === 'marketplace' ? 3 : 2;
+    // Partner name: try aria-label first (most reliable), then a DOM
+    // subtree probe for spans/headings that look name-like, then the first
+    // post-noise line that isn't a snippet/time.
+    let partnerName = ariaName || findNameInRowSubtree(row);
+    if (!partnerName) {
+      for (const candidate of lines) {
+        if (!isSnippetLine(candidate) && !isTimeLine(candidate) && candidate.length >= 2) {
+          partnerName = candidate;
+          break;
+        }
+      }
+    }
+    if (!partnerName) partnerName = lines[0] || null;
+
+    // Build snippet + time slots from whatever lines remain after the
+    // name. The slot indices the previous version used (lines[1]/[2]/[3])
+    // assumed strict ordering — they break when FB shuffles. Instead we
+    // scan lines in order, picking the first snippet-like and time-like
+    // matches.
+    let listingTitle = null;
+    let snippet = null;
+    let lastActivity = null;
+    const remaining = lines.filter((s) => s !== partnerName);
+    for (const ln of remaining) {
+      if (!snippet && isSnippetLine(ln)) {
+        snippet = ln;
+        continue;
+      }
+      if (!lastActivity && isTimeLine(ln)) {
+        lastActivity = ln;
+        continue;
+      }
+      if (classified.source === 'marketplace' && !listingTitle && !isSnippetLine(ln) && !isTimeLine(ln)) {
+        listingTitle = ln;
+        continue;
+      }
+      if (!snippet) snippet = ln;
+    }
 
     seen.set(key, {
       thread_id: classified.thread_id,
       source: classified.source,
       partner_name: partnerName,
       listing_title: listingTitle,
-      snippet: lines[snippetIdx] || null,
-      last_activity_relative: lines[timeIdx] || null,
+      snippet,
+      last_activity_relative: lastActivity,
       unread,
       raw_text: raw,
       aria_label: anchorAria || rowAria || null,
@@ -559,6 +763,23 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     sendResponse({ ok: true });
     return;
   }
+  // Phase F.1.5 step 3 — programmatic scroll of the FB inbox list container
+  // to trigger virtualized loading of older threads. Read-side; caller is
+  // expected to re-issue GET_INBOX_LIST after this returns to pick up the
+  // newly rendered rows.
+  if (msg?.type === 'SCROLL_INBOX_DOWN') {
+    (async () => {
+      try {
+        const res = await scrollInboxDown();
+        sendResponse(res);
+      } catch (err) {
+        console.warn('[FB Reply Maker] SCROLL_INBOX_DOWN threw:', err?.message);
+        sendResponse({ ok: false, reason: err?.message || 'scroll_failed' });
+      }
+    })();
+    return true;
+  }
+
   // Phase F.1.5: scrape the currently rendered FB inbox list. Read-only —
   // never clicks or scrolls. Returns whatever rows are in the DOM at scrape
   // time; SCROLL_INBOX_DOWN (step 3) handles virtualized loading.

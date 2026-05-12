@@ -261,6 +261,14 @@ html, body, #root {
   text-align: center;
   margin: 0;
 }
+.pane-list-foot-loading {
+  color: var(--text-dim);
+}
+.pane-list-foot-end {
+  color: var(--text-mute);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
 
 .thread-row-source {
   font-family: var(--font-mono);

@@ -1,4 +1,8 @@
-import { useMemo } from 'react';
+import { useCallback, useMemo, useRef } from 'react';
+
+// Trigger F1_5_SCROLL_INBOX once the user scrolls within this many px of
+// the bottom of the extension list body. App.jsx still debounces 1.5s.
+const SCROLL_NEAR_BOTTOM_PX = 100;
 
 // Phase F.1.5 step 2 — ThreadList renders from the live FB inbox scrape
 // joined to Supabase by thread_id. Each row carries an isKnownLead flag:
@@ -79,6 +83,8 @@ export default function ThreadList({
   inboxError,
   inboxTabUrl,
   inboxLastUpdated,
+  inboxLoadingMore,
+  inboxAtBottom,
   leadsLoading,
   leadsError,
   filter,
@@ -89,8 +95,23 @@ export default function ThreadList({
   onSelect,
   cachedByThread,
   onRefresh,
-  onOpenInboxTab
+  onOpenInboxTab,
+  onScrollNearBottom
 }) {
+  // Phase F.1.5 step 3 — scroll-to-load. When the pane-list-body scroll
+  // position is within SCROLL_NEAR_BOTTOM_PX of the bottom, fire the
+  // upstream handler (which debounces and dispatches F1_5_SCROLL_INBOX +
+  // a merge-mode re-scrape).
+  const bodyRef = useRef(null);
+  const handleScroll = useCallback(() => {
+    if (!onScrollNearBottom) return;
+    const el = bodyRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
+    if (distanceFromBottom <= SCROLL_NEAR_BOTTOM_PX) {
+      onScrollNearBottom();
+    }
+  }, [onScrollNearBottom]);
   const counts = useMemo(() => {
     const c = { all: rows.length, unread: 0, qualifying: 0, qualified: 0, ready: 0, returning: 0 };
     for (const r of rows) {
@@ -166,7 +187,7 @@ export default function ThreadList({
         </div>
       </header>
 
-      <div className="pane-list-body">
+      <div className="pane-list-body" ref={bodyRef} onScroll={handleScroll}>
         {showInboxLoading && <p className="pane-list-empty">Loading inbox…</p>}
 
         {showEmptyTabState && (
@@ -252,7 +273,15 @@ export default function ThreadList({
           );
         })}
 
-        {inboxStatus === 'ok' && inboxLastUpdated && (
+        {inboxLoadingMore && (
+          <p className="pane-list-foot pane-list-foot-loading">Loading more…</p>
+        )}
+
+        {!inboxLoadingMore && inboxAtBottom && filtered.length > 0 && (
+          <p className="pane-list-foot pane-list-foot-end">End of inbox</p>
+        )}
+
+        {inboxStatus === 'ok' && inboxLastUpdated && !inboxLoadingMore && !inboxAtBottom && (
           <p className="pane-list-foot" title={new Date(inboxLastUpdated).toLocaleString()}>
             Live · {rows.length} threads · updated {formatRelative(inboxLastUpdated) || 'just now'}
           </p>

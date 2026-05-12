@@ -194,6 +194,45 @@ async function findInboxTabs() {
   }
 }
 
+// Shared inbox-tab dispatcher. Walks the ranked candidate list, retries
+// once with executeScript if the content script wasn't registered on a
+// candidate tab. Used by both F1_5_GET_INBOX and F1_5_SCROLL_INBOX.
+async function callInboxTab(messageBody) {
+  const candidates = await findInboxTabs();
+  if (candidates.length === 0) return { ok: false, reason: 'tab_not_found' };
+  const attempts = [];
+  for (const tab of candidates) {
+    if (!tab.id) continue;
+    const attempt = { tabId: tab.id, tabUrl: tab.url };
+    try {
+      const res = await chrome.tabs.sendMessage(tab.id, messageBody);
+      if (res && typeof res === 'object') {
+        return { ...res, tabId: tab.id, tabUrl: tab.url, attempts };
+      }
+      attempt.reason = 'no_response';
+    } catch (err) {
+      attempt.reason = err?.message || 'rpc_failed';
+      if (/Receiving end does not exist|Could not establish connection/i.test(attempt.reason)) {
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            files: CONTENT_SCRIPT_FILES
+          });
+          const res2 = await chrome.tabs.sendMessage(tab.id, messageBody);
+          if (res2 && typeof res2 === 'object') {
+            return { ...res2, tabId: tab.id, tabUrl: tab.url, injected: true, attempts };
+          }
+          attempt.injectRetry = 'no_response';
+        } catch (e2) {
+          attempt.injectRetry = e2?.message || 'inject_failed';
+        }
+      }
+    }
+    attempts.push(attempt);
+  }
+  return { ok: false, reason: 'all_candidates_failed', attempts };
+}
+
 const CACHE_KEY_PREFIX = 'cached_variants:';
 const AUTO_GEN_MIN_WORDS = 3;
 const AUTO_GEN_SKIP_STATUSES = new Set(['closed_won', 'closed_lost', 'stale']);
@@ -429,45 +468,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // a one-shot executeScript injection and retry once before moving on.
   if (msg?.type === 'F1_5_GET_INBOX') {
     (async () => {
-      const candidates = await findInboxTabs();
-      if (candidates.length === 0) {
-        sendResponse({ ok: false, reason: 'tab_not_found' });
-        return;
-      }
-      const attempts = [];
-      for (const tab of candidates) {
-        if (!tab.id) continue;
-        const attempt = { tabId: tab.id, tabUrl: tab.url };
-        try {
-          const res = await chrome.tabs.sendMessage(tab.id, { type: 'GET_INBOX_LIST' });
-          if (res && typeof res === 'object') {
-            sendResponse({ ...res, tabId: tab.id, tabUrl: tab.url, attempts });
-            return;
-          }
-          attempt.reason = 'no_response';
-        } catch (err) {
-          attempt.reason = err?.message || 'rpc_failed';
-          // If the content script just isn't there yet, inject and retry once.
-          if (/Receiving end does not exist|Could not establish connection/i.test(attempt.reason)) {
-            try {
-              await chrome.scripting.executeScript({
-                target: { tabId: tab.id },
-                files: CONTENT_SCRIPT_FILES
-              });
-              const res2 = await chrome.tabs.sendMessage(tab.id, { type: 'GET_INBOX_LIST' });
-              if (res2 && typeof res2 === 'object') {
-                sendResponse({ ...res2, tabId: tab.id, tabUrl: tab.url, injected: true, attempts });
-                return;
-              }
-              attempt.injectRetry = 'no_response';
-            } catch (e2) {
-              attempt.injectRetry = e2?.message || 'inject_failed';
-            }
-          }
-        }
-        attempts.push(attempt);
-      }
-      sendResponse({ ok: false, reason: 'all_candidates_failed', attempts });
+      const res = await callInboxTab({ type: 'GET_INBOX_LIST' });
+      sendResponse(res);
+    })();
+    return true;
+  }
+
+  // Phase F.1.5 step 3 — programmatic scroll of the FB inbox list to trigger
+  // virtualized loading of older threads. Fullscreen re-fires
+  // F1_5_GET_INBOX after this returns to pick up new rows.
+  if (msg?.type === 'F1_5_SCROLL_INBOX') {
+    (async () => {
+      const res = await callInboxTab({ type: 'SCROLL_INBOX_DOWN' });
+      sendResponse(res);
     })();
     return true;
   }

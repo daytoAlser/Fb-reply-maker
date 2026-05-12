@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ThreadList from './components/ThreadList.jsx';
 import ThreadView from './components/ThreadView.jsx';
 import ReplyPane from './components/ReplyPane.jsx';
@@ -10,11 +10,13 @@ import {
   focusFbTab,
   readCachedVariants,
   readAllCachedVariants,
-  getInboxList
+  getInboxList,
+  scrollInboxDown
 } from './lib/api.js';
 
 const LEADS_REFRESH_INTERVAL_MS = 30 * 1000;
 const INBOX_REFRESH_INTERVAL_MS = 30 * 1000;
+const INBOX_SCROLL_DEBOUNCE_MS = 1500;
 const MIN_VIEWPORT_WIDTH = 1280;
 
 // Phase F.1.5 step 2 — build the list the ThreadList renders from. The live
@@ -75,6 +77,10 @@ export default function App() {
   const [inboxTabUrl, setInboxTabUrl] = useState(null);
   const [inboxLayoutVersion, setInboxLayoutVersion] = useState(null);
   const [inboxLastUpdated, setInboxLastUpdated] = useState(null);
+  // Step 3: scroll-to-load state. lastScrollAt drives the 1.5s debounce.
+  const [inboxLoadingMore, setInboxLoadingMore] = useState(false);
+  const [inboxAtBottom, setInboxAtBottom] = useState(false);
+  const lastScrollAtRef = useRef(0);
 
   const refreshLeads = useCallback(async (s) => {
     const cfg = (s || settings)?.config;
@@ -106,7 +112,11 @@ export default function App() {
   // Phase F.1.5 step 2 — pull the live inbox from the FB tab. Translates the
   // SW response into status+rows the pane can render. `silent` skips toggling
   // the loading flag for poll-driven refreshes that shouldn't flicker the UI.
-  const refreshInbox = useCallback(async ({ silent } = {}) => {
+  //
+  // Step 3 adds `merge`: when true, the new scrape is unioned with existing
+  // rows (keyed by source+thread_id) instead of replacing — so virtualized
+  // rows we already saw don't disappear when FB unloads them out of view.
+  const refreshInbox = useCallback(async ({ silent, merge } = {}) => {
     if (!silent) setInboxStatus((s) => (s === 'idle' ? 'loading' : s));
     try {
       const res = await getInboxList();
@@ -116,7 +126,14 @@ export default function App() {
         return;
       }
       if (res.ok) {
-        setInboxRows(Array.isArray(res.rows) ? res.rows : []);
+        const incoming = Array.isArray(res.rows) ? res.rows : [];
+        setInboxRows((prev) => {
+          if (!merge) return incoming;
+          const byKey = new Map();
+          for (const r of prev) byKey.set(`${r.source || 'marketplace'}:${r.thread_id}`, r);
+          for (const r of incoming) byKey.set(`${r.source || 'marketplace'}:${r.thread_id}`, r);
+          return [...byKey.values()];
+        });
         setInboxStatus('ok');
         setInboxError(null);
         setInboxTabUrl(res.tabUrl || null);
@@ -125,7 +142,7 @@ export default function App() {
         return;
       }
       if (res.reason === 'tab_not_found') {
-        setInboxRows([]);
+        if (!merge) setInboxRows([]);
         setInboxStatus('tab_not_found');
         setInboxError(null);
         setInboxTabUrl(null);
@@ -139,6 +156,29 @@ export default function App() {
       setInboxError(err?.message || 'rpc_failed');
     }
   }, []);
+
+  // Phase F.1.5 step 3 — fired by ThreadList when the user scrolls the
+  // extension list within 100px of its bottom. Debounce 1.5s so a quick
+  // flick doesn't queue 10 scroll RPCs. Triggers FB-side scroll, then
+  // re-fetches in merge mode so previously-visible rows stick.
+  const handleScrollNearBottom = useCallback(async () => {
+    const now = Date.now();
+    if (now - lastScrollAtRef.current < INBOX_SCROLL_DEBOUNCE_MS) return;
+    if (inboxLoadingMore) return;
+    if (inboxAtBottom) return;
+    lastScrollAtRef.current = now;
+    setInboxLoadingMore(true);
+    try {
+      const res = await scrollInboxDown();
+      if (res?.atBottom) setInboxAtBottom(true);
+      // Refire the scrape regardless of scroll result — FB may have
+      // injected rows even when the container can't scroll further (e.g.
+      // small inbox, no virtualization needed).
+      await refreshInbox({ silent: true, merge: true });
+    } finally {
+      setInboxLoadingMore(false);
+    }
+  }, [refreshInbox, inboxLoadingMore, inboxAtBottom]);
 
   // Initial mount: load settings, then list leads + cache map + first inbox.
   useEffect(() => {
@@ -245,6 +285,8 @@ export default function App() {
 
   async function handleManualRefreshInbox() {
     setInboxStatus('loading');
+    setInboxAtBottom(false);
+    lastScrollAtRef.current = 0;
     await refreshInbox();
   }
 
@@ -307,6 +349,8 @@ export default function App() {
         inboxError={inboxError}
         inboxTabUrl={inboxTabUrl}
         inboxLastUpdated={inboxLastUpdated}
+        inboxLoadingMore={inboxLoadingMore}
+        inboxAtBottom={inboxAtBottom}
         leadsLoading={leadsLoading}
         leadsError={leadsError}
         filter={filter}
@@ -318,6 +362,7 @@ export default function App() {
         cachedByThread={cachedByThread}
         onRefresh={handleManualRefreshInbox}
         onOpenInboxTab={handleOpenInboxTab}
+        onScrollNearBottom={handleScrollNearBottom}
       />
       <ThreadView
         lead={activeLead}

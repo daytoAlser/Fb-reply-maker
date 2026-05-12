@@ -57,11 +57,22 @@ export async function requestRegenerate(threadId) {
   });
 }
 
-// Phase F.1.5 step 1 — debug-only inbox scrape RPC. UI wiring (replacing the
-// Supabase-sourced left pane with this live list) happens in step 2.
+// Phase F.1.5 — live inbox RPCs. step 1: GET. step 3: SCROLL.
 export async function getInboxList() {
   return new Promise((resolve) => {
     chrome.runtime.sendMessage({ type: 'F1_5_GET_INBOX' }, (res) => {
+      if (chrome.runtime.lastError) {
+        resolve({ ok: false, reason: chrome.runtime.lastError.message });
+        return;
+      }
+      resolve(res || { ok: false, reason: 'no_response' });
+    });
+  });
+}
+
+export async function scrollInboxDown() {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'F1_5_SCROLL_INBOX' }, (res) => {
       if (chrome.runtime.lastError) {
         resolve({ ok: false, reason: chrome.runtime.lastError.message });
         return;
