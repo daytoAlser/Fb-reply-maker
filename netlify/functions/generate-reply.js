@@ -56,7 +56,7 @@ Use these naturally when referenced in conversation. When the customer asks wher
 `;
 }
 
-const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location }) => {
+const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags }) => {
   const listingBlock = listingTitle && listingTitle.trim()
     ? `\nLISTING CONTEXT\nThe customer is messaging about this listing: "${listingTitle.trim()}". Use this together with the customer's message to infer ad_type (wheel / tire / accessory / lift) per the detection signals below.\n`
     : '';
@@ -65,6 +65,10 @@ const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, co
 
   const categoryClause = categoryOverride && categoryOverride !== 'auto'
     ? `\nThe user has tagged this message as: ${categoryOverride.replace('_', ' ')}.\n`
+    : '';
+
+  const overrideClause = overrideFlags === true
+    ? `\nOVERRIDE ACTIVE: override_flags is true for this request. The user has reviewed the flag and chosen to proceed. Skip FLAG DETECTION entirely. Return flags: []. Generate normal qualifying variants per THE STANDARD FLOW.\n`
     : '';
 
   return `
@@ -79,7 +83,7 @@ ${openerLine}
 The line above already has the customer's first name and the sales rep's name plugged in (when available). Use the quoted string EXACTLY as written. Do not rewrite it, do not substitute names, do not omit the @ symbol if it's present. The @ before the first name uses FB's mention system and triggers a notification — preserve it character-for-character.
 
 When using an @mention anywhere in a reply, use ONLY the customer's first name (a single word). "@Glen" not "@Glen Hans" — FB's tag system only matches single-word prefixes.
-${listingBlock}${locationBlock}
+${listingBlock}${locationBlock}${overrideClause}
 THE STANDARD FLOW (12 principles, follow these for every reply):
 1. Introduce yourself by name (handled by the opener).
 2. Match the customer's emotional tone (casual with casual, urgent with urgent, "lol" energy with "lol" energy) — always within a friendly-professional voice. Never use slang yourself.
@@ -135,6 +139,75 @@ gift_buyer — buying for someone else (husband/dad/birthday), often doesn't kno
 Approach: match their tone. Validate the gesture briefly. Use the vehicle as the spec route ("if you're not sure just let me know the truck"). Time close to gift date.
 
 standard — none of the above. Run the normal qualifying flow.
+
+FLAG DETECTION
+
+Before generating variants, detect if the customer's message contains content requiring human review. Set the flags array in your response accordingly. If override_flags is true in the input, skip detection and generate normal qualifying variants (still return flags: []).
+
+FITMENT FLAG (flags: ["fitment"]) - HIGHEST PRIORITY
+Trigger when customer asks any of:
+- Will these fit / do these fit / will it work for [vehicle]
+- Mentions specific vehicle and asks about compatibility
+- Asks about bolt pattern, offset, PCD, hub bore, backspacing
+- Asks about clearance, rubbing, trimming, fender modification
+- Compares to friend's truck setup as proof of fit
+
+When fitment flag fires, the variants are holding replies, NOT confirmations:
+
+Quick: "Great question on fitment, let me double-check that quick and I'll be right back with ya!"
+
+Standard: "Great question on fitment, let me double-check those'll work perfectly for ya. What vehicle are we working with so I can confirm everything?"
+
+Detailed: "Hey @[Name], [YourName] here, I'd be happy to help you out today! Great question on fitment, let me confirm everything will work perfectly. Give me just a moment to double-check and I'll be right back with you on this!"
+
+NEVER confirm fitment yourself. NEVER say "yes those will fit." Even if you think they will. The holding reply pattern always wins.
+
+PRICING FLAG (flags: ["pricing"])
+Trigger when customer asks any of:
+- Total price, package price, out-the-door price
+- Installed pricing, all-in cost
+- Discount, best price, can you do better
+- Competitor price matching
+- Financing or payment plans
+- Trade-in valuation
+- "What's the damage"
+
+When pricing flag fires, the variants use the quote-in-chat punt pattern:
+
+Quick: "Send me your phone number and I'll have a full estimate ready for ya in a few!"
+
+Standard: "Send me a good phone number for ya so I can add you to the system here and I'll make you a full estimate, broken down and easy to read, and send it right here to review!"
+
+Detailed: Same as Standard plus additional warmth and timeline.
+
+EXCEPTION: If the discount ask is the SECOND one (customer already received an estimate, conversation_history shows they're pushing back on the total), use the second-discount-ask hold pattern instead of phone punt. The flag still fires, but the variants frame the price hold around the customer's stated priority.
+
+TIMELINE FLAG (flags: ["timeline"])
+Trigger when customer asks any of:
+- When can I get / how soon
+- Lead time questions
+- Specific date deadline (wedding, show, birthday, trip)
+- In-stock questions
+- Availability windows
+
+When timeline flag fires, the variants are holding replies:
+
+Quick: "Let me confirm stock on those for ya quick!"
+
+Standard: "Let me confirm lead time and stock for ya, give me just a moment and I'll have it sorted!"
+
+Detailed: "Hey @[Name], [YourName] here, I'd be happy to help you out today! Let me confirm stock and lead time on these for you and I'll have an answer right away!"
+
+MULTIPLE FLAGS
+If multiple flags fire simultaneously (e.g. customer asks "will these fit my truck and how much installed"), prioritize:
+1. Fitment > Pricing > Timeline
+
+Return ALL applicable flag strings in the flags array, in priority order. Generate a combined holding reply that addresses the highest-priority flag fully, then mentions the others briefly. Example combining fitment + pricing:
+
+"Great question on fitment, let me double-check those'll work perfectly. While I'm at it, shoot me your phone number and I'll have a full estimate ready broken down for ya as well!"
+
+CRITICAL OVERRIDE
+If override_flags is true in the input, treat the message as normal and generate qualifying variants per the standard flow. The user has reviewed the flag and chosen to proceed. In that case ALWAYS return flags: [] (empty array) regardless of message content.
 
 WORKFLOW INTEGRITY (hard rules, never violate):
 1. NEVER quote a total price in chat. Even when asked directly, even when frustrated. The answer is always "send me your phone, I'll make an estimate."
@@ -197,6 +270,7 @@ Respond ONLY with valid JSON. No markdown fencing. No preamble.
 {
   "category": "availability|fitment|price_haggle|location_hours|delivery_shipping|stock_check|install_service|trade_in|other",
   "intent_summary": "<one short sentence>",
+  "flags": [],
   "variants": {
     "quick": "<text>",
     "standard": "<text>",
@@ -214,6 +288,8 @@ Respond ONLY with valid JSON. No markdown fencing. No preamble.
   "lead_status_suggestion": "new|qualifying|qualified",
   "conversation_stage": "opener|qualifying|recommendation|quote_ask|booking|unknown"
 }
+
+flags is the array of human-review triggers detected in the LATEST customer message. Allowed values: "fitment", "pricing", "timeline". Empty array [] means no flags. When multiple apply, include all in priority order (fitment first, then pricing, then timeline). When override_flags is true in the input, ALWAYS return [].
 
 extracted_fields contains anything you can pull from the FULL conversation (history + current message). Use null (the JSON null, not the string "null") for any field you can't extract. lead_status_suggestion is your read on whether enough info is captured to hand off to sales. conversation_stage is your read on where the thread is in its lifecycle right now (based on the latest customer message + history).
 `.trim();
@@ -246,12 +322,14 @@ export async function handler(event) {
     userName,
     partnerName,
     listingTitle,
-    location
+    location,
+    override_flags
   } = body;
   if (!message || !context) {
     return { statusCode: 400, headers, body: 'Missing message or context' };
   }
 
+  const overrideFlags = override_flags === true;
   const customerFirstName = firstWord(partnerName);
   const rep = (userName || '').trim() || null;
   const openerLine = buildOpenerLine(customerFirstName, rep);
@@ -261,7 +339,8 @@ export async function handler(event) {
     listingTitle,
     categoryOverride,
     conversationHistory: conversation_history,
-    location
+    location,
+    overrideFlags
   });
 
   console.log('[FN] resolved opener:', openerLine);
@@ -274,7 +353,8 @@ export async function handler(event) {
     categoryOverride: categoryOverride || null,
     locationKeys: location && typeof location === 'object'
       ? Object.keys(location).filter((k) => (location[k] || '').toString().trim())
-      : []
+      : [],
+    overrideFlags
   });
 
   try {
@@ -293,6 +373,17 @@ export async function handler(event) {
       .trim();
 
     const parsed = JSON.parse(text);
+
+    if (!Array.isArray(parsed.flags)) {
+      parsed.flags = [];
+    } else {
+      const ALLOWED = new Set(['fitment', 'pricing', 'timeline']);
+      parsed.flags = parsed.flags.filter((f) => ALLOWED.has(f));
+    }
+    if (overrideFlags) parsed.flags = [];
+
+    console.log('[FN] detected flags:', parsed.flags, 'category:', parsed.category, 'stage:', parsed.conversation_stage);
+
     return { statusCode: 200, headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) };
   } catch (err) {
     console.error('[FN] error:', err?.message || err);
