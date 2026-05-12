@@ -563,6 +563,61 @@ async function waitForSelector(selector, maxMs = 3000, pollMs = 120) {
   return null;
 }
 
+// Snapshot the set of aria-labels under the thread container so we can
+// detect when FB has swapped in a new thread's bubbles. FB reuses the
+// compose textbox across thread switches, so waiting for it to "appear"
+// isn't enough — we'd scrape the previous thread's still-mounted bubbles.
+function snapshotThreadLabels(container) {
+  const set = new Set();
+  if (!container) return set;
+  for (const el of container.querySelectorAll('[aria-label]')) {
+    const label = el.getAttribute('aria-label');
+    if (!label) continue;
+    if (label.length < 8 || label.length > 800) continue;
+    set.add(label);
+  }
+  return set;
+}
+
+// Wait for the SPA URL to reflect the requested thread. FB navigates
+// instantly on click, so this resolves fast in the common case — but if
+// the click misses or FB defers nav, we bail after maxMs.
+async function waitForUrlToMatchThread(threadId, maxMs = 2500) {
+  const safeId = String(threadId).replace(/[^A-Za-z0-9_-]/g, '');
+  const re = new RegExp('/(?:marketplace|messages)/t/' + safeId + '(?:[/?#]|$)');
+  const start = Date.now();
+  while (Date.now() - start < maxMs) {
+    if (re.test(location.href)) return true;
+    await sleep(80);
+  }
+  return re.test(location.href);
+}
+
+// Wait for the thread container's aria-label set to substantially change
+// vs the pre-click baseline. Returns true once the new thread's bubbles
+// have replaced the old ones (or close to it).
+async function waitForThreadContentSwap(container, baseline, maxMs = 2500) {
+  const start = Date.now();
+  while (Date.now() - start < maxMs) {
+    const current = snapshotThreadLabels(container);
+    if (current.size > 0) {
+      let overlap = 0;
+      for (const lbl of baseline) if (current.has(lbl)) overlap++;
+      const baselineSize = Math.max(1, baseline.size);
+      const overlapRatio = overlap / baselineSize;
+      // Two satisfaction conditions:
+      // 1. Baseline was empty / very small (first thread ever opened) and
+      //    we now have a few labels → content arrived.
+      // 2. Most of the baseline labels are gone AND we have new ones →
+      //    FB swapped threads.
+      if (baseline.size <= 2 && current.size >= 3) return true;
+      if (overlapRatio < 0.5 && current.size >= 3) return true;
+    }
+    await sleep(120);
+  }
+  return false;
+}
+
 function findThreadRowAnchor(threadId, source) {
   if (!threadId) return null;
   const safeId = String(threadId).replace(/[^A-Za-z0-9_-]/g, '');
@@ -592,6 +647,12 @@ async function openThreadByRowClick({ thread_id, source } = {}) {
     return { ok: false, reason: 'row_not_in_dom', thread_id };
   }
 
+  // Snapshot the current thread's aria-labels BEFORE clicking — FB reuses
+  // the compose textbox and thread container across SPA navs, so without
+  // a content-diff we'd scrape the previously-loaded thread's bubbles.
+  const preContainer = document.querySelector(SELECTORS.threadContainer);
+  const baselineLabels = snapshotThreadLabels(preContainer);
+
   // Humanize: minimum 100ms gap since last FB DOM action + a random
   // 150-400ms pre-click delay so the cadence looks human.
   await ensureHumanGap();
@@ -604,20 +665,33 @@ async function openThreadByRowClick({ thread_id, source } = {}) {
     return { ok: false, reason: err?.message || 'click_failed', thread_id };
   }
 
-  // Wait for the compose box to render — that signals FB has loaded the
-  // thread into the DOM. Up to 3s.
+  // SPA nav usually completes within a few hundred ms. Soft-wait — we
+  // don't bail on mismatch because FB occasionally keeps the old URL
+  // briefly while content swaps; the content-change check is the real
+  // gate.
+  await waitForUrlToMatchThread(thread_id);
+
+  // Compose pane (often already present from prior thread, returns fast).
   const composeEl = await waitForSelector(SELECTORS.replyTextbox, 3000);
   if (!composeEl) {
     return { ok: false, reason: 'compose_did_not_load', thread_id, url: location.href };
   }
 
-  // One short settle for FB to inject the last message bubbles, then scrape.
-  await sleep(250);
-
+  // The real gate: wait for the thread container's bubble set to swap.
   const container = document.querySelector(SELECTORS.threadContainer);
   if (!container) {
     return { ok: false, reason: 'no_thread_container', thread_id, url: location.href };
   }
+  const swapped = await waitForThreadContentSwap(container, baselineLabels, 2500);
+  if (!swapped && baselineLabels.size > 2) {
+    // Soft-fail: still return what's there but flag it so the caller can
+    // surface a refresh hint instead of silently showing stale data.
+    console.warn('[FB Reply Maker] OPEN_THREAD: content swap not detected for', thread_id);
+  }
+
+  // Final settle for any trailing bubble inject after the swap signal.
+  await sleep(200);
+
   const { partner: partnerName, listingTitle } = extractThreadInfo(container);
   // UI-side scan: permissive so group chats render with sender labels.
   // Auto-gen is unaffected — it reads from THREAD_UPDATE (strict path).
@@ -631,7 +705,8 @@ async function openThreadByRowClick({ thread_id, source } = {}) {
     listingTitle,
     url: location.href,
     capturedAt: Date.now(),
-    messages: tail
+    messages: tail,
+    contentSwapDetected: swapped || baselineLabels.size <= 2
   };
 }
 
