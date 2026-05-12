@@ -37,13 +37,14 @@ async function upsertLeadToSupabase({ thread_id, partner_name, fb_thread_url, li
   if (status) row.status = status;
   if (Array.isArray(flags)) row.open_flags = flags;
 
+  console.log('[FN] supabase upsert payload:', JSON.stringify(row));
+
   const { data, error } = await supabase
     .from('leads')
     .upsert(row, { onConflict: 'thread_id', ignoreDuplicates: false })
     .select();
 
-  if (error) throw new Error(error.message);
-  return data;
+  return { data, error, row };
 }
 
 function buildHistoryBlock(history) {
@@ -202,7 +203,9 @@ Quick: "Great question on fitment, let me double-check that quick and I'll be ri
 
 Standard: "Great question on fitment, let me double-check those'll work perfectly for ya. What vehicle are we working with so I can confirm everything?"
 
-Detailed: "Hey @[Name], [YourName] here, I'd be happy to help you out today! Great question on fitment, let me confirm everything will work perfectly. Give me just a moment to double-check and I'll be right back with you on this!"
+Detailed: use the resolved OPENER LINE from the top of this prompt VERBATIM as the first sentence, then append: "Great question on fitment, let me confirm everything will work perfectly. Give me just a moment to double-check and I'll be right back with you on this!"
+
+NEVER write a literal "@[Name]" or "[YourName]" in any output. The opener line is already resolved — use it character-for-character.
 
 NEVER confirm fitment yourself. NEVER say "yes those will fit." Even if you think they will. The holding reply pattern always wins.
 
@@ -240,7 +243,7 @@ Quick: "Let me confirm stock on those for ya quick!"
 
 Standard: "Let me confirm lead time and stock for ya, give me just a moment and I'll have it sorted!"
 
-Detailed: "Hey @[Name], [YourName] here, I'd be happy to help you out today! Let me confirm stock and lead time on these for you and I'll have an answer right away!"
+Detailed: use the resolved OPENER LINE from the top of this prompt VERBATIM as the first sentence, then append: "Let me confirm stock and lead time on these for you and I'll have an answer right away!" Never write a literal "@[Name]" or "[YourName]" — the opener is already resolved.
 
 MULTIPLE FLAGS
 If multiple flags fire simultaneously (e.g. customer asks "will these fit my truck and how much installed"), prioritize:
@@ -431,10 +434,12 @@ export async function handler(event) {
 
     console.log('[FN] detected flags:', parsed.flags, 'category:', parsed.category, 'stage:', parsed.conversation_stage);
 
+    console.log('[FN] supabase check: thread_id=', thread_id, 'type=', typeof thread_id);
+
     if (thread_id) {
       try {
         const captured = mergeCapturedFields(parsed.extracted_fields, existing_captured_fields);
-        await upsertLeadToSupabase({
+        const { data, error, row } = await upsertLeadToSupabase({
           thread_id,
           partner_name: partnerName,
           fb_thread_url,
@@ -444,9 +449,15 @@ export async function handler(event) {
           status: parsed.lead_status_suggestion,
           flags: parsed.flags
         });
-        console.log('[FN] supabase lead synced:', thread_id);
+        if (error) {
+          console.error('[FN] supabase upsert error full:', JSON.stringify(error));
+          console.error('[FN] supabase upsert payload that failed:', JSON.stringify(row));
+        } else {
+          console.log('[FN] supabase lead synced:', thread_id, 'rows:', Array.isArray(data) ? data.length : 'n/a');
+        }
       } catch (err) {
-        console.error('[FN] supabase upsert failed:', err?.message || err);
+        console.error('[FN] supabase upsert threw:', err?.message || err);
+        console.error('[FN] supabase upsert err full:', JSON.stringify(err, Object.getOwnPropertyNames(err || {})));
       }
     } else {
       console.log('[FN] thread_id missing, skipping Supabase upsert');
