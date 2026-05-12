@@ -184,14 +184,22 @@ export default function App() {
     }
   }, [refreshInbox, inboxLoadingMore, inboxAtBottom]);
 
-  // Initial mount: load settings, then list leads + cache map + first inbox.
+  // Initial mount: load settings (needed for the API endpoint), then fire
+  // leads / cache / inbox refreshes IN PARALLEL — otherwise a cold Netlify
+  // /list-leads invocation (~10-15s) blocks the inbox round-trip and the
+  // user stares at an empty pane for ~20s total. Parallel: ~3-5s worst
+  // case, dominated by whichever single call is slowest.
   useEffect(() => {
     (async () => {
       const s = await loadSettings();
       setSettings(s);
-      await refreshLeads(s);
-      await refreshCacheMap();
-      await refreshInbox();
+      // allSettled so one slow/failed call can't block the others' state
+      // updates. Each refresh already handles its own error → state.
+      Promise.allSettled([
+        refreshLeads(s),
+        refreshCacheMap(),
+        refreshInbox()
+      ]);
     })();
     function onResize() { setViewportTooSmall(window.innerWidth < MIN_VIEWPORT_WIDTH); }
     window.addEventListener('resize', onResize);
