@@ -2,33 +2,65 @@
 // the side panel. Side panel is still installed (chrome://extensions side
 // panel toggle / right-click → "Open side panel") for back-compat, but the
 // icon is the primary entry point.
-chrome.sidePanel
-  .setPanelBehavior({ openPanelOnActionClick: false })
-  .catch((err) => console.error('sidePanel.setPanelBehavior failed', err));
+//
+// IMPORTANT: This block runs at the top of the SW. Anything that throws
+// synchronously here would prevent the action.onClicked listener below
+// from registering. Defensive try/catch + optional chaining to survive
+// older Chromes / unexpected API states.
+try {
+  chrome.sidePanel
+    ?.setPanelBehavior?.({ openPanelOnActionClick: false })
+    ?.catch((err) => console.error('[FB Reply Maker SW] sidePanel.setPanelBehavior rejected:', err?.message || err));
+} catch (err) {
+  console.error('[FB Reply Maker SW] sidePanel.setPanelBehavior threw:', err?.message || err);
+}
 
 const FULLSCREEN_PATH = 'src/fullscreen/index.html';
 
 async function openOrFocusFullscreen() {
+  console.log('[FB Reply Maker SW] openOrFocusFullscreen entry');
   const url = chrome.runtime.getURL(FULLSCREEN_PATH);
+  console.log('[FB Reply Maker SW] fullscreen url:', url);
   try {
-    const existing = await chrome.tabs.query({ url });
+    let existing = [];
+    try {
+      existing = await chrome.tabs.query({ url });
+    } catch (qErr) {
+      console.warn('[FB Reply Maker SW] tabs.query failed, proceeding to create:', qErr?.message || qErr);
+    }
     if (existing && existing.length > 0) {
       const tab = existing[0];
-      await chrome.tabs.update(tab.id, { active: true });
-      if (tab.windowId != null) {
-        await chrome.windows.update(tab.windowId, { focused: true });
+      console.log('[FB Reply Maker SW] focusing existing fullscreen tab', tab.id);
+      try {
+        await chrome.tabs.update(tab.id, { active: true });
+        if (tab.windowId != null) {
+          await chrome.windows.update(tab.windowId, { focused: true });
+        }
+        return;
+      } catch (focusErr) {
+        console.warn('[FB Reply Maker SW] focus existing failed, will create new:', focusErr?.message || focusErr);
       }
-      return;
     }
-    await chrome.tabs.create({ url });
+    console.log('[FB Reply Maker SW] creating new fullscreen tab');
+    const created = await chrome.tabs.create({ url });
+    console.log('[FB Reply Maker SW] created tab id:', created?.id);
   } catch (err) {
     console.error('[FB Reply Maker SW] openOrFocusFullscreen failed:', err?.message || err);
   }
 }
 
-chrome.action.onClicked.addListener(() => {
-  openOrFocusFullscreen();
-});
+// Register the action listener as early as possible so it survives any
+// downstream init failures. Wrapped in try/catch so the addListener call
+// itself can't crash the SW startup.
+try {
+  chrome.action.onClicked.addListener((tab) => {
+    console.log('[FB Reply Maker SW] action.onClicked fired from tab', tab?.id);
+    openOrFocusFullscreen();
+  });
+  console.log('[FB Reply Maker SW] action.onClicked listener registered');
+} catch (err) {
+  console.error('[FB Reply Maker SW] action.onClicked.addListener threw:', err?.message || err);
+}
 
 const BADGE_COLOR = '#f59e0b';
 
