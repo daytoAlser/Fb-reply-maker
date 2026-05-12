@@ -1,4 +1,4 @@
-console.log("[FB Reply Maker] content script loaded on " + location.href);
+console.log("[FB Reply Maker] content script v2 (strict sender) loaded on " + location.href);
 
 const SELECTORS = {
   threadContainer: '[role="main"]',
@@ -6,20 +6,46 @@ const SELECTORS = {
   replyTextbox: '[contenteditable="true"][role="textbox"]'
 };
 
-const INCOMING_PATTERNS = [
-  ['atDate', /^At .+?, (.+?): (.+)$/s],
+// Patterns that pull (sender, text) from a message aria-label.
+// "atDate" / "enterMsg" appear on both incoming and outgoing bubbles —
+// direction is determined by senderToken (matched against partner first
+// name OR configured rep first name OR the literal "you").
+// "roleDot" only fires for the partner because only they get the Buyer/
+// Seller role tag in the label.
+const MESSAGE_PATTERNS = [
+  ['atDate',   /^At .+?, (.+?): (.+)$/s],
   ['enterMsg', /^Enter, Message sent .+? by (.+?): (.+)$/s],
-  ['roleDot', /^(.+?) · (?:Buyer|Seller) (.+)$/s]
+  ['roleDot',  /^(.+?) · (?:Buyer|Seller) (.+)$/s]
 ];
 
 const SYSTEM_PATTERNS = [/started this chat\.?$/i];
 
 const HEADER_BLACKLIST = /^(chats?|marketplace|inbox|settings|messenger|notifications?|search|home)$/i;
 
+// Aria-labels that are FB UI controls, not message bubbles. These leaked
+// into conversation history as fake "me" messages under the old fallthrough
+// logic on customer-initiated threads. We drop them explicitly as a second
+// line of defense in case a future FB update adds a new sender pattern.
+const UI_BLOCKLIST = /^(Thread composer|Message|New message|Customize chat|Chat members|Media,? files,? (?:and|&) links|Privacy (?:and|&) support|Search in conversation|Mute notifications?|Block|Restrict|Unrestrict|Report (?:conversation|user)?|Mark as unread|Archive chat|Unarchive chat|Delete chat|Notifications?|Active now|Active status|Open photo viewer|See all|See more|Reactions?|Reply|Forward|More options?|Settings|Close|Back|Sign out|Help|Profile picture|Edit name|Change theme|Change emoji|Change nicknames?|Add people|Mark as spam|Conversation information|Thread settings)$/i;
+
 const MAX_CONTEXT_MESSAGES = 5;
 const MIN_TEXT_LENGTH = 4;
 const MAX_TEXT_LENGTH = 500;
 const DEBOUNCE_MS = 300;
+
+let configuredUserName = null;
+chrome.storage.sync.get('userName').then((data) => {
+  if (typeof data.userName === 'string' && data.userName.trim()) {
+    configuredUserName = data.userName.trim();
+    console.log('[FB Reply Maker] rep userName loaded:', configuredUserName);
+  }
+}).catch(() => {});
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'sync' || !changes.userName) return;
+  const next = changes.userName.newValue;
+  configuredUserName = typeof next === 'string' && next.trim() ? next.trim() : null;
+  console.log('[FB Reply Maker] rep userName updated:', configuredUserName);
+});
 
 const PARTNER_H3_PATTERNS = [
   { idx: 1, re: /^(.+?)\s+·\s+(.+)$/, listingGroup: 2 },
@@ -93,28 +119,49 @@ function extractThreadInfo(container) {
   return { partner: null, listingTitle: null };
 }
 
-function parseAriaMessage(label, partnerName) {
+function parseAriaMessage(label, partnerName, userName) {
   if (!label) return null;
   const trimmed = label.trim();
   if (trimmed.length < MIN_TEXT_LENGTH || trimmed.length > MAX_TEXT_LENGTH) return null;
   if (SYSTEM_PATTERNS.some((p) => p.test(trimmed))) return null;
+  if (UI_BLOCKLIST.test(trimmed)) return null;
 
   const partnerFirst = partnerName ? partnerName.toLowerCase().split(/\s+/)[0] : null;
+  const userFirst = userName ? userName.toLowerCase().split(/\s+/)[0] : null;
 
-  for (const [, pattern] of INCOMING_PATTERNS) {
+  for (const [name, pattern] of MESSAGE_PATTERNS) {
     const m = trimmed.match(pattern);
-    if (m) {
-      const senderToken = (m[1] || '').toLowerCase();
-      const text = (m[2] || '').trim();
-      if (!text || text.length < MIN_TEXT_LENGTH) return null;
-      if (partnerFirst && senderToken.includes(partnerFirst)) {
-        return { sender: 'them', text };
-      }
-      return null;
+    if (!m) continue;
+    const senderToken = (m[1] || '').toLowerCase().trim();
+    const text = (m[2] || '').trim();
+    if (!text || text.length < MIN_TEXT_LENGTH) return null;
+
+    // roleDot only attaches to the partner (Buyer/Seller tag is never on "you")
+    if (name === 'roleDot') {
+      return { sender: 'them', text };
     }
+
+    // "you" / "your" → me; configured rep first name → me
+    if (
+      senderToken === 'you' ||
+      senderToken.startsWith('you ') ||
+      senderToken.startsWith('your ') ||
+      (userFirst && senderToken.includes(userFirst))
+    ) {
+      return { sender: 'me', text };
+    }
+    // partner first-name match → them
+    if (partnerFirst && senderToken.includes(partnerFirst)) {
+      return { sender: 'them', text };
+    }
+
+    // Pattern matched but neither side is identified — refuse to guess.
+    // Prevents the old fallthrough from labeling random aria-labels as "me".
+    return null;
   }
 
-  return { sender: 'me', text: trimmed };
+  // No message pattern matched — not a message bubble. Drop.
+  return null;
 }
 
 let lastPayloadHash = '';
@@ -141,17 +188,24 @@ function detectThread() {
   const { partner: partnerName, listingTitle } = extractThreadInfo(container);
 
   const byText = new Map();
+  let droppedCount = 0;
   for (const el of container.querySelectorAll('[aria-label]')) {
     const label = el.getAttribute('aria-label');
     if (!(el.innerText || '').trim()) continue;
-    const parsed = parseAriaMessage(label, partnerName);
-    if (!parsed) continue;
+    const parsed = parseAriaMessage(label, partnerName, configuredUserName);
+    if (!parsed) {
+      droppedCount++;
+      continue;
+    }
     const existing = byText.get(parsed.text);
     if (!existing) {
       byText.set(parsed.text, parsed);
     } else if (parsed.sender === 'them' && existing.sender === 'me') {
       byText.set(parsed.text, parsed);
     }
+  }
+  if (byText.size > 0) {
+    console.log('[FB Reply Maker] captured', byText.size, 'messages, dropped', droppedCount, 'non-message aria-labels');
   }
 
   const all = [...byText.values()];
