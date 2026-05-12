@@ -1377,3 +1377,66 @@ select:focus-visible {
   background: rgba(245, 158, 11, 0.14);
   box-shadow: var(--glow-warning-soft);
 }
+
+/* ============================================================
+   Phase E.1 — Multi-product chip row
+   ============================================================ */
+
+.multi-product-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background:
+    radial-gradient(ellipse 60% 100% at 0% 50%, rgba(59, 130, 246, 0.12), transparent 70%),
+    rgba(59, 130, 246, 0.04);
+  box-shadow: var(--shadow-card);
+}
+
+.multi-product-label {
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--info);
+}
+
+.multi-product-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.multi-product-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+  border-radius: var(--radius-pill);
+}
+
+.mp-chip-icon { font-size: 11px; line-height: 1; }
+.mp-chip-state { opacity: 0.75; }
+
+.mp-chip-qualifying {
+  color: var(--warning);
+  background: rgba(245, 158, 11, 0.14);
+  box-shadow: var(--glow-warning-soft);
+}
+
+.mp-chip-qualified {
+  color: var(--success);
+  background: rgba(16, 185, 129, 0.14);
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.28);
+}

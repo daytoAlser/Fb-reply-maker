@@ -22,7 +22,7 @@ function mergeCapturedFields(newFields, existingFields) {
   return merged;
 }
 
-async function upsertLeadToSupabase({ thread_id, partner_name, fb_thread_url, listing_title, ad_type, captured_fields, status, flags, writeFlags }) {
+async function upsertLeadToSupabase({ thread_id, partner_name, fb_thread_url, listing_title, ad_type, captured_fields, status, flags, writeFlags, products_of_interest }) {
   const row = {
     thread_id,
     last_updated: new Date().toISOString()
@@ -36,6 +36,7 @@ async function upsertLeadToSupabase({ thread_id, partner_name, fb_thread_url, li
   }
   if (status) row.status = status;
   if (writeFlags !== false && Array.isArray(flags)) row.open_flags = flags;
+  if (Array.isArray(products_of_interest)) row.products_of_interest = products_of_interest;
 
   console.log('[FN] supabase upsert payload:', JSON.stringify(row));
 
@@ -81,6 +82,113 @@ function buildOpenerLine(customerFirstName, rep) {
   return `Opener: "Hey, happy to help you out today!"`;
 }
 
+// Phase E.1: multi-product tracking
+const ALLOWED_PRODUCT_TYPES = new Set(['wheel', 'tire', 'lift', 'accessory']);
+const PRODUCT_REQUIRED_FIELDS = {
+  wheel: ['lookPreference', 'rideHeight'],
+  tire: ['tireSize', 'usage'],
+  lift: ['heightGoal', 'useCase'],
+  accessory: []
+};
+const PRODUCT_QUALIFIER_KEYS = {
+  wheel: ['lookPreference', 'rideHeight', 'intent', 'sizeConstraint'],
+  tire: ['tireSize', 'usage', 'treadPreference'],
+  lift: ['heightGoal', 'useCase', 'budgetBand'],
+  accessory: []
+};
+
+function isProductFieldMeaningful(v) {
+  if (v === null || v === undefined) return false;
+  if (typeof v === 'string') {
+    const t = v.trim();
+    if (!t) return false;
+    if (t.toLowerCase() === 'null') return false;
+    return true;
+  }
+  return true;
+}
+
+function normalizeProductQualifiers(productType, qualifierFields) {
+  const allowed = PRODUCT_QUALIFIER_KEYS[productType] || [];
+  const out = {};
+  if (!qualifierFields || typeof qualifierFields !== 'object') return out;
+  for (const key of allowed) {
+    const v = qualifierFields[key];
+    if (isProductFieldMeaningful(v)) {
+      out[key] = typeof v === 'string' ? v.trim() : v;
+    }
+  }
+  return out;
+}
+
+function computeProductState(productType, qualifierFields, leadVehicle) {
+  const required = PRODUCT_REQUIRED_FIELDS[productType] || [];
+  const vehiclePresent = isProductFieldMeaningful(leadVehicle);
+  if (!vehiclePresent && productType !== 'accessory') return 'qualifying';
+  if (productType === 'accessory') return vehiclePresent ? 'qualified' : 'qualifying';
+  const allRequiredPresent = required.every((k) => isProductFieldMeaningful(qualifierFields?.[k]));
+  return allRequiredPresent ? 'qualified' : 'qualifying';
+}
+
+function mergeProductsOfInterest(existing, incoming, leadVehicle) {
+  const byType = new Map();
+  const order = [];
+
+  function getOrCreate(productType) {
+    if (!byType.has(productType)) {
+      byType.set(productType, {
+        productType,
+        qualifierFields: {},
+        productState: 'qualifying',
+        optionsSentManually: null,
+        selectedProduct: null
+      });
+      order.push(productType);
+    }
+    return byType.get(productType);
+  }
+
+  for (const p of (Array.isArray(existing) ? existing : [])) {
+    if (!p || !ALLOWED_PRODUCT_TYPES.has(p.productType)) continue;
+    const slot = getOrCreate(p.productType);
+    Object.assign(slot.qualifierFields, normalizeProductQualifiers(p.productType, p.qualifierFields));
+    if (p.optionsSentManually) slot.optionsSentManually = p.optionsSentManually;
+    if (p.selectedProduct) slot.selectedProduct = p.selectedProduct;
+  }
+
+  for (const p of (Array.isArray(incoming) ? incoming : [])) {
+    if (!p || !ALLOWED_PRODUCT_TYPES.has(p.productType)) continue;
+    const slot = getOrCreate(p.productType);
+    Object.assign(slot.qualifierFields, normalizeProductQualifiers(p.productType, p.qualifierFields));
+  }
+
+  return order.map((t) => {
+    const slot = byType.get(t);
+    return { ...slot, productState: computeProductState(t, slot.qualifierFields, leadVehicle) };
+  });
+}
+
+function buildExistingProductsBlock(existingProducts) {
+  if (!Array.isArray(existingProducts) || existingProducts.length === 0) return '';
+  const lines = [];
+  for (const p of existingProducts) {
+    if (!p || !p.productType) continue;
+    const keys = PRODUCT_QUALIFIER_KEYS[p.productType] || [];
+    const pairs = keys.map((k) => {
+      const v = p.qualifierFields?.[k];
+      return `${k}=${isProductFieldMeaningful(v) ? v : 'null'}`;
+    });
+    lines.push(`- ${p.productType}: ${pairs.length > 0 ? pairs.join(', ') : '(no per-product qualifiers)'}`);
+  }
+  if (lines.length === 0) return '';
+  return `
+EXISTING TRACKED PRODUCTS (this thread)
+${lines.join('\n')}
+
+Carry these forward in products_of_interest. Add new entries if the current message references new product categories. Do not drop a product already tracked.
+`;
+}
+
 function buildLocationBlock(location) {
   if (!location || typeof location !== 'object') return '';
   const name = (location.name || '').trim();
@@ -101,12 +209,13 @@ Use these naturally when referenced in conversation. When the customer asks wher
 `;
 }
 
-const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags }) => {
+const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest }) => {
   const listingBlock = listingTitle && listingTitle.trim()
     ? `\nLISTING CONTEXT\nThe customer is messaging about this listing: "${listingTitle.trim()}". Use this together with the customer's message to infer ad_type (wheel / tire / accessory / lift) per the detection signals below.\n`
     : '';
 
   const locationBlock = buildLocationBlock(location);
+  const existingProductsBlock = buildExistingProductsBlock(existingProductsOfInterest);
 
   const categoryClause = categoryOverride && categoryOverride !== 'auto'
     ? `\nThe user has tagged this message as: ${categoryOverride.replace('_', ' ')}.\n`
@@ -311,7 +420,66 @@ VARIANT LENGTH:
 - detailed: opener + full qualifier chain for the ad type, 4+ sentences.
 
 DROP THE OPENER only when conversation_history shows the customer has directly answered 2+ qualifying questions. "Yes interested" / "still got these" do NOT count.
-${categoryClause}${buildHistoryBlock(conversationHistory)}
+
+MULTI-PRODUCT TRACKING
+
+Customers often want more than one product in a single setup. Wheels + tires + lift is the canonical example. When the conversation references multiple product categories, track each independently in the products_of_interest output array.
+
+DETECTION
+Detect multi-product intent when ANY of these are true:
+- Customer mentions multiple product categories in one message ("wheels and tires", "wheels tires and a lift", "rims tires and lift kit")
+- Customer asks about a different product mid-thread ("do you do tires too", "what about a lift")
+- Customer uses full-setup language ("full setup for my truck", "deck this thing out", "the works")
+- Customer uses aspirational language implying multiple categories ("make it look sick", "want to do something with the truck")
+- Mismatch between ad and stated need (messaging on wheel ad but asks about a lift "to go with it")
+
+PRODUCT TYPES
+- wheel — rims/wheels
+- tire — tires
+- lift — lift kit / level kit
+- accessory — anything else (running boards, light bars, fender flares)
+
+PRODUCT-SPECIFIC QUALIFIERS (these go INSIDE each entry's qualifierFields)
+- wheel: lookPreference (poke|flush), rideHeight (lifted|leveled|factory), intent (looks|performance|function), sizeConstraint (optional, free-form like "20")
+- tire: tireSize, usage (year-round|seasonal), treadPreference (optional, e.g. mud|all-terrain|highway)
+- lift: heightGoal (e.g. "2 inch", "6 inch"), useCase (street|off-road|towing|jumps|cruising), budgetBand (optional)
+- accessory: no per-product qualifiers — only the lead-level vehicle
+
+SHARED LEAD-LEVEL QUALIFIER
+- vehicle applies to ALL products. Ask vehicle ONCE. Do not re-ask per product. Vehicle lives in extracted_fields, never inside a per-product qualifierFields object.
+
+VOICE PATTERNS FOR MULTI-PRODUCT
+
+Initial multi-product acknowledgment when customer signals more than one category:
+"We can hook it up for sure, what kind of truck are we working on?"
+
+After vehicle captured, transition between products with light positive reinforcement (canonical Brandon-style voice):
+"Wicked man nice truck. Now on the wheels, you thinking poke or flush?"
+"Wicked truck man. For the lift side of it, what kind of driving are you doing with the truck, any jumping or just cruising?"
+
+USE-CASE QUALIFIER FOR LIFT — CANONICAL FRAMING, USE THIS EXACT QUESTION OR VERY CLOSE TO IT:
+"What kind of driving are you doing with the truck, any jumping or just cruising?"
+
+HONEST-RECOMMENDATION PATTERN (CRITICAL — recommend based on use case, not margin):
+- If the customer answers along the lines of "just cruising" / "highway" / "daily" → recommend the value-tier lift (e.g. Rough Country style). Say something like: "For just cruising and highway, the value kit at the lower price is gonna be perfect for ya. Save the extra cash for tires or wheels you really love."
+- If the customer answers along the lines of "off-road" / "jumping" / "hard use" → recommend the premium tier (e.g. Carli style). Acknowledge it's pricier but the use case earns it.
+- NEVER default to the most expensive option when the use case doesn't justify it.
+
+PICK-ONE-VARIABLE-AT-A-TIME PROGRESSION (defers total-price questions naturally and keeps the conversation forward):
+"Let's pick the [unqualified product] first my man, would you need something [next qualifier for that product]?"
+
+PRIORITY ORDER FOR MISSING QUALIFIERS — ask in this order across all tracked products:
+1. vehicle (lead-level — only if not yet captured)
+2. wheel: lookPreference → rideHeight
+3. tire: tireSize → usage
+4. lift: heightGoal → useCase
+
+HARD RULES
+- DO NOT ask for tire-specific qualifiers if tire is not in products_of_interest.
+- DO NOT ask for lift-specific qualifiers if lift is not in products_of_interest.
+- DO NOT ask vehicle twice. If vehicle is already captured from history, move to the next missing per-product qualifier.
+- ad_type reflects the ORIGINAL listing the customer messaged from. products_of_interest can be broader. ad_type stays the same even when the customer asks about additional categories.
+${existingProductsBlock}${categoryClause}${buildHistoryBlock(conversationHistory)}
 OUTPUT
 Respond ONLY with valid JSON. No markdown fencing. No preamble.
 {
@@ -332,6 +500,12 @@ Respond ONLY with valid JSON. No markdown fencing. No preamble.
     "customerType": "standard|tire_kicker|researched|urgent|gift_buyer|unknown"
   },
   "ad_type": "wheel|tire|accessory|lift|unknown",
+  "products_of_interest": [
+    {
+      "productType": "wheel|tire|lift|accessory",
+      "qualifierFields": {}
+    }
+  ],
   "lead_status_suggestion": "new|qualifying|qualified",
   "conversation_stage": "opener|qualifying|recommendation|quote_ask|booking|unknown"
 }
@@ -339,6 +513,12 @@ Respond ONLY with valid JSON. No markdown fencing. No preamble.
 flags is the array of human-review triggers detected in the LATEST customer message. Allowed values: "fitment", "pricing", "timeline". Empty array [] means no flags. When multiple apply, include all in priority order (fitment first, then pricing, then timeline). When override_flags is true in the input, ALWAYS return [].
 
 extracted_fields contains anything you can pull from the FULL conversation (history + current message). Use null (the JSON null, not the string "null") for any field you can't extract. lead_status_suggestion is your read on whether enough info is captured to hand off to sales. conversation_stage is your read on where the thread is in its lifecycle right now (based on the latest customer message + history).
+
+products_of_interest is the per-product breakdown:
+- ALWAYS include at least one entry. If only one category is in play, return a single-element array matching ad_type (or "accessory" if ad_type is unknown).
+- Include every product type that has been mentioned across the FULL conversation (history + current). Carry forward anything in EXISTING TRACKED PRODUCTS above.
+- qualifierFields contains ONLY that product's specific qualifiers from the list above. Do not put wheel fields inside a tire entry. Do not put "vehicle" inside qualifierFields — vehicle lives at the lead level inside extracted_fields.
+- Use the captured value as a string when known; omit the key (or set null) when not yet captured. The server computes qualifying vs qualified state from these fields, so you do not need to emit productState.
 `.trim();
 };
 
@@ -373,7 +553,8 @@ export async function handler(event) {
     override_flags,
     thread_id,
     fb_thread_url,
-    existing_captured_fields
+    existing_captured_fields,
+    existing_products_of_interest
   } = body;
   if (!message || !context) {
     return { statusCode: 400, headers, body: 'Missing message or context' };
@@ -390,7 +571,8 @@ export async function handler(event) {
     categoryOverride,
     conversationHistory: conversation_history,
     location,
-    overrideFlags
+    overrideFlags,
+    existingProductsOfInterest: existing_products_of_interest
   });
 
   console.log('[FN] resolved opener:', openerLine);
@@ -434,11 +616,23 @@ export async function handler(event) {
 
     console.log('[FN] detected flags:', parsed.flags, 'category:', parsed.category, 'stage:', parsed.conversation_stage);
 
+    // Phase E.1: merge products_of_interest with prior state, compute productState
+    // using the merged vehicle (so adding a new product on a thread that already
+    // has vehicle captured can immediately resolve to qualified).
+    const captured = mergeCapturedFields(parsed.extracted_fields, existing_captured_fields);
+    const mergedProducts = mergeProductsOfInterest(
+      existing_products_of_interest,
+      parsed.products_of_interest,
+      captured?.vehicle
+    );
+    parsed.products_of_interest = mergedProducts;
+
+    console.log('[FN] products_of_interest merged:', mergedProducts.map((p) => `${p.productType}:${p.productState}`).join(', ') || 'none');
+
     console.log('[FN] supabase check: thread_id=', thread_id, 'type=', typeof thread_id);
 
     if (thread_id) {
       try {
-        const captured = mergeCapturedFields(parsed.extracted_fields, existing_captured_fields);
         const { data, error, row } = await upsertLeadToSupabase({
           thread_id,
           partner_name: partnerName,
@@ -448,7 +642,8 @@ export async function handler(event) {
           captured_fields: captured,
           status: parsed.lead_status_suggestion,
           flags: parsed.flags,
-          writeFlags: !overrideFlags
+          writeFlags: !overrideFlags,
+          products_of_interest: mergedProducts
         });
         if (error) {
           console.error('[FN] supabase upsert error full:', JSON.stringify(error));

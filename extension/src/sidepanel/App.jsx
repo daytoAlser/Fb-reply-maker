@@ -7,6 +7,7 @@ import AutoDetectCard from './components/AutoDetectCard.jsx';
 import TabBar from './components/TabBar.jsx';
 import LeadsTab from './components/LeadsTab.jsx';
 import FlagBanner from './components/FlagBanner.jsx';
+import MultiProductChips from './components/MultiProductChips.jsx';
 import { generateReply } from './lib/api.js';
 import { loadAll } from './lib/storage.js';
 import {
@@ -235,11 +236,18 @@ export default function App() {
       // Server-side mergeCapturedFields needs the lead's existing capture so
       // we never overwrite a known vehicle / look / height with a null from
       // a later turn that did not re-extract them.
+      // Phase E.1: also send existing productsOfInterest so the server merge
+      // preserves products tracked earlier in the thread (the AI sometimes
+      // forgets a product mentioned many turns back).
       let existingCapturedFields = null;
+      let existingProductsOfInterest = null;
       if (threadId) {
         try {
           const existingLead = await getLeadByThreadId(threadId);
           existingCapturedFields = existingLead?.capturedFields || null;
+          existingProductsOfInterest = Array.isArray(existingLead?.productsOfInterest)
+            ? existingLead.productsOfInterest
+            : null;
         } catch (err) {
           console.warn('[FB Reply Maker SP] read existing lead failed:', err?.message);
         }
@@ -254,6 +262,7 @@ export default function App() {
         threadId: threadId || null,
         fbThreadUrl: fbThreadUrl || null,
         hasExistingCaptured: !!existingCapturedFields,
+        existingProductCount: existingProductsOfInterest?.length || 0,
         historyLength: conversationHistory?.length,
         category: categoryOverride
       });
@@ -272,7 +281,8 @@ export default function App() {
         overrideFlags,
         thread_id: threadId || undefined,
         fb_thread_url: fbThreadUrl || undefined,
-        existing_captured_fields: existingCapturedFields || undefined
+        existing_captured_fields: existingCapturedFields || undefined,
+        existing_products_of_interest: existingProductsOfInterest || undefined
       });
 
       if (overrideFlags) setOverrideActive(true);
@@ -283,7 +293,10 @@ export default function App() {
         conversation_stage: res?.conversation_stage,
         customerType: res?.extracted_fields?.customerType,
         flags: res?.flags,
-        extracted_fields: res?.extracted_fields
+        extracted_fields: res?.extracted_fields,
+        products_of_interest: Array.isArray(res?.products_of_interest)
+          ? res.products_of_interest.map((p) => `${p.productType}:${p.productState}`)
+          : null
       });
 
       if (threadId) {
@@ -299,7 +312,8 @@ export default function App() {
             conversationStage: res?.conversation_stage || null,
             flags: Array.isArray(res?.flags) ? res.flags : [],
             overrideFlags,
-            customerMessage: incoming
+            customerMessage: incoming,
+            productsOfInterest: Array.isArray(res?.products_of_interest) ? res.products_of_interest : null
           });
           console.log('[FB Reply Maker SP] lead updated:', lead?.threadId);
         } catch (err) {
@@ -369,6 +383,7 @@ export default function App() {
                 <span className="badge">{result.category}</span>
                 <p className="intent">{result.intent_summary}</p>
               </div>
+              <MultiProductChips products={result.products_of_interest} />
               <FlagBanner
                 flags={result.flags || []}
                 overrideActive={overrideActive}

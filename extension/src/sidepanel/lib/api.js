@@ -12,7 +12,8 @@ export async function generateReply({
   overrideFlags,
   thread_id,
   fb_thread_url,
-  existing_captured_fields
+  existing_captured_fields,
+  existing_products_of_interest
 }) {
   const body = { message, context, categoryOverride };
   if (Array.isArray(conversationHistory) && conversationHistory.length > 0) {
@@ -41,6 +42,9 @@ export async function generateReply({
   }
   if (existing_captured_fields && typeof existing_captured_fields === 'object') {
     body.existing_captured_fields = existing_captured_fields;
+  }
+  if (Array.isArray(existing_products_of_interest) && existing_products_of_interest.length > 0) {
+    body.existing_products_of_interest = existing_products_of_interest;
   }
 
   console.log('[FB Reply Maker API] sending body:', { ...body, secret: '[REDACTED]' });

@@ -68,7 +68,13 @@ function mergeFields(existing, incoming) {
   return base;
 }
 
-function meetsQualificationThreshold(adType, fields) {
+function meetsQualificationThreshold(adType, fields, productsOfInterest) {
+  // Phase E.1: when the lead has tracked products, qualification gates on
+  // ALL products being qualified (state computed server-side based on
+  // per-product required fields + lead-level vehicle).
+  if (Array.isArray(productsOfInterest) && productsOfInterest.length > 0) {
+    return productsOfInterest.every((p) => p && p.productState === 'qualified');
+  }
   const f = fields || {};
   switch (adType) {
     case 'wheel':
@@ -263,7 +269,8 @@ export async function createOrUpdateLead({
   conversationStage,
   flags,
   overrideFlags,
-  customerMessage
+  customerMessage,
+  productsOfInterest
 }) {
   if (!threadId) {
     console.warn('[FB Reply Maker leads] createOrUpdateLead: missing threadId, skipping');
@@ -281,10 +288,22 @@ export async function createOrUpdateLead({
     ? adType
     : (existing?.adType && existing.adType !== 'unknown' ? existing.adType : (adType || 'unknown'));
 
-  const localQualified = meetsQualificationThreshold(effectiveAdType, mergedFields);
+  // Phase E.1: server returns the merged products_of_interest with productState
+  // computed. Trust it as authoritative; fall back to prior local copy if the
+  // server omitted it (older deploy or AI returned empty).
+  const effectiveProducts = Array.isArray(productsOfInterest) && productsOfInterest.length > 0
+    ? productsOfInterest
+    : (Array.isArray(existing?.productsOfInterest) ? existing.productsOfInterest : []);
+
+  const localQualified = meetsQualificationThreshold(effectiveAdType, mergedFields, effectiveProducts);
   const apiSuggestsQualified = leadStatusSuggestion === 'qualified';
-  const qualified = localQualified || apiSuggestsQualified;
-  const hasField = hasAnyCapturedField(mergedFields);
+  // Phase E.1: when products_of_interest is in play, the array's per-product
+  // state is the source of truth. Ignore the model's bulk lead_status_suggestion
+  // if it claims qualified but the products aren't all qualified yet.
+  const qualified = effectiveProducts.length > 0
+    ? localQualified
+    : (localQualified || apiSuggestsQualified);
+  const hasField = hasAnyCapturedField(mergedFields) || effectiveProducts.length > 0;
 
   const newStatus = pickAutoStatus(prevStatus, qualified, hasField);
 
@@ -315,10 +334,10 @@ export async function createOrUpdateLead({
     status: newStatus,
     open_flags: openFlags,
     flag_history: history,
-    // Phase E.0: state-aware fields. Carry-forward existing values when present.
-    productsOfInterest: Array.isArray(existing?.productsOfInterest)
-      ? existing.productsOfInterest
-      : phaseEDefaults.productsOfInterest,
+    // Phase E.0/E.1: state-aware fields. productsOfInterest is overwritten by
+    // the server-merged array when present (server is authoritative); carry
+    // forward existing otherwise.
+    productsOfInterest: effectiveProducts,
     conversationMode: existing?.conversationMode || phaseEDefaults.conversationMode,
     lastCustomerMessageAt: existing?.lastCustomerMessageAt ?? phaseEDefaults.lastCustomerMessageAt,
     silenceDurationMs: typeof existing?.silenceDurationMs === 'number'

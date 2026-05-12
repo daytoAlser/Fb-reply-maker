@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import MultiProductChips from './MultiProductChips.jsx';
 
 const STATUS_LABELS = {
   new: 'New',
@@ -178,6 +179,8 @@ export default function LeadCard({ lead, onOpenThread, onStatusChange, onDelete,
           ))}
         </div>
       )}
+
+      <MultiProductChips products={lead.productsOfInterest} />
 
       <div className="lead-card-foot">
         <span className="lead-timestamp">Captured: {formatRelative(lead.lastUpdated)}</span>
