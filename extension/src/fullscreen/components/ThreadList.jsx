@@ -1,5 +1,10 @@
 import { useMemo } from 'react';
 
+// Phase F.1.5 step 2 — ThreadList renders from the live FB inbox scrape
+// joined to Supabase by thread_id. Each row carries an isKnownLead flag:
+// joined rows get status pills + chips, unjoined ones (team chats, brand-
+// new buyers we haven't generated for yet) render plain.
+
 const FILTERS = [
   { id: 'all',         label: 'All'              },
   { id: 'unread',      label: 'Unread'           },
@@ -45,70 +50,97 @@ function formatRelative(ts) {
   return new Date(t).toLocaleDateString();
 }
 
-function isReady(lead) {
-  return Array.isArray(lead.open_flags) && lead.open_flags.includes('ready_for_options');
+function isReady(row) {
+  return Array.isArray(row.open_flags) && row.open_flags.includes('ready_for_options');
 }
 
-function isReturning(lead) {
-  return lead.conversation_mode === 'returning';
+function isReturning(row) {
+  return row.conversation_mode === 'returning';
 }
 
-function isUnread(lead, cached) {
-  // Heuristic for F.1: a thread is "unread" when there are cached variants
-  // ready (auto-gen fired since last interaction) but the lead wasn't yet
-  // marked contacted. Future F.x can promote this to a real read/unread bit.
+function isUnread(row, cached) {
+  // Live scrape's unread flag wins when present (FB aria-label said so).
+  if (row.unread) return true;
+  // Legacy heuristic: cached variants present and we haven't replied yet.
   if (!cached) return false;
-  if (lead.status === 'contacted' || lead.status === 'closed_won' || lead.status === 'closed_lost') return false;
-  return true;
+  if (row.status === 'contacted' || row.status === 'closed_won' || row.status === 'closed_lost') return false;
+  return row.isKnownLead;
+}
+
+function rowDisplayTime(row) {
+  // Prefer the relative string from the live scrape when present (e.g. "5m").
+  if (row.last_activity_relative) return row.last_activity_relative;
+  return formatRelative(row.last_updated);
 }
 
 export default function ThreadList({
-  leads,
-  loading,
-  error,
+  rows,
+  inboxStatus,
+  inboxError,
+  inboxTabUrl,
+  inboxLastUpdated,
+  leadsLoading,
+  leadsError,
   filter,
   onFilterChange,
   query,
   onQueryChange,
   activeThreadId,
   onSelect,
-  cachedByThread
+  cachedByThread,
+  onRefresh,
+  onOpenInboxTab
 }) {
   const counts = useMemo(() => {
-    const c = { all: leads.length, unread: 0, qualifying: 0, qualified: 0, ready: 0, returning: 0 };
-    for (const l of leads) {
-      if (l.status === 'qualifying' || l.status === 'new') c.qualifying++;
-      if (l.status === 'qualified') c.qualified++;
-      if (isReady(l)) c.ready++;
-      if (isReturning(l)) c.returning++;
-      if (isUnread(l, cachedByThread[l.thread_id])) c.unread++;
+    const c = { all: rows.length, unread: 0, qualifying: 0, qualified: 0, ready: 0, returning: 0 };
+    for (const r of rows) {
+      if (r.status === 'qualifying' || r.status === 'new') c.qualifying++;
+      if (r.status === 'qualified') c.qualified++;
+      if (isReady(r)) c.ready++;
+      if (isReturning(r)) c.returning++;
+      if (isUnread(r, cachedByThread[r.thread_id])) c.unread++;
     }
     return c;
-  }, [leads, cachedByThread]);
+  }, [rows, cachedByThread]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return leads.filter((l) => {
+    return rows.filter((r) => {
       switch (filter) {
-        case 'unread':     if (!isUnread(l, cachedByThread[l.thread_id])) return false; break;
-        case 'qualifying': if (l.status !== 'qualifying' && l.status !== 'new') return false; break;
-        case 'qualified':  if (l.status !== 'qualified') return false; break;
-        case 'ready':      if (!isReady(l)) return false; break;
-        case 'returning':  if (!isReturning(l)) return false; break;
+        case 'unread':     if (!isUnread(r, cachedByThread[r.thread_id])) return false; break;
+        case 'qualifying': if (r.status !== 'qualifying' && r.status !== 'new') return false; break;
+        case 'qualified':  if (r.status !== 'qualified') return false; break;
+        case 'ready':      if (!isReady(r)) return false; break;
+        case 'returning':  if (!isReturning(r)) return false; break;
         default: break;
       }
       if (q) {
-        const hay = `${l.partner_name || ''} ${l.listing_title || ''}`.toLowerCase();
+        const hay = `${r.partner_name || ''} ${r.listing_title || ''}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
     });
-  }, [leads, filter, query, cachedByThread]);
+  }, [rows, filter, query, cachedByThread]);
+
+  const showEmptyTabState = inboxStatus === 'tab_not_found';
+  const showInboxError = inboxStatus === 'error';
+  const showInboxLoading = inboxStatus === 'loading' && rows.length === 0;
 
   return (
     <aside className="pane-list">
       <header className="pane-list-head">
-        <h2 className="pane-list-title">LEADS</h2>
+        <div className="pane-list-title-row">
+          <h2 className="pane-list-title">FB INBOX</h2>
+          <button
+            type="button"
+            className="pane-list-refresh"
+            onClick={onRefresh}
+            title="Refresh now"
+            aria-label="Refresh inbox"
+          >
+            ↻
+          </button>
+        </div>
         <input
           type="search"
           className="pane-list-search"
@@ -135,41 +167,96 @@ export default function ThreadList({
       </header>
 
       <div className="pane-list-body">
-        {loading && <p className="pane-list-empty">Loading…</p>}
-        {error && <p className="pane-list-error">{error}</p>}
-        {!loading && !error && filtered.length === 0 && (
-          <p className="pane-list-empty">No leads match.</p>
+        {showInboxLoading && <p className="pane-list-empty">Loading inbox…</p>}
+
+        {showEmptyTabState && (
+          <div className="pane-list-empty-block">
+            <p className="pane-list-empty">
+              No FB inbox tab open.
+            </p>
+            <p className="pane-list-empty-sub">
+              Open Facebook Marketplace inbox to see threads here.
+            </p>
+            <button
+              type="button"
+              className="pane-list-cta"
+              onClick={onOpenInboxTab}
+            >
+              Open FB Inbox
+            </button>
+          </div>
         )}
-        {filtered.map((l) => {
-          const isActive = l.thread_id === activeThreadId;
-          const ready = isReady(l);
-          const returning = isReturning(l);
-          const unread = isUnread(l, cachedByThread[l.thread_id]);
+
+        {showInboxError && (
+          <div className="pane-list-empty-block">
+            <p className="pane-list-error">Inbox scrape failed: {inboxError}</p>
+            {inboxTabUrl && (
+              <p className="pane-list-empty-sub" title={inboxTabUrl}>
+                Tab: {inboxTabUrl}
+              </p>
+            )}
+            <button type="button" className="pane-list-cta" onClick={onRefresh}>
+              Try again
+            </button>
+          </div>
+        )}
+
+        {leadsError && !showEmptyTabState && !showInboxError && (
+          <p className="pane-list-error">Supabase: {leadsError}</p>
+        )}
+
+        {!showEmptyTabState && !showInboxError && !showInboxLoading && filtered.length === 0 && (
+          <p className="pane-list-empty">No threads match.</p>
+        )}
+
+        {filtered.map((r) => {
+          const isActive = r.thread_id === activeThreadId;
+          const ready = isReady(r);
+          const returning = isReturning(r);
+          const unread = isUnread(r, cachedByThread[r.thread_id]);
+          const sourceTag = r.source === 'messages' ? 'MSG' : 'MKT';
           return (
             <button
-              key={l.thread_id}
+              key={r.thread_id}
               type="button"
-              onClick={() => onSelect(l.thread_id)}
-              className={`thread-row ${isActive ? 'is-active' : ''}`}
+              onClick={() => onSelect(r.thread_id)}
+              className={`thread-row ${isActive ? 'is-active' : ''} ${r.isKnownLead ? '' : 'is-unknown'}`}
             >
               <div className="thread-row-line1">
-                <span className="thread-row-name">{l.partner_name || 'Unknown'}</span>
-                <span className="thread-row-time">{formatRelative(l.last_updated)}</span>
+                <span className="thread-row-name">{r.partner_name || 'Unknown'}</span>
+                <span className="thread-row-time">{rowDisplayTime(r)}</span>
               </div>
               <div className="thread-row-line2">
-                <span className="thread-row-listing">{l.listing_title || '—'}</span>
+                <span className="thread-row-listing">
+                  {r.listing_title || r.snippet || '—'}
+                </span>
               </div>
               <div className="thread-row-meta">
-                <span className={`status-pill ${STATUS_CLASSES[l.status] || 'status-gray'}`}>
-                  {STATUS_LABELS[l.status] || l.status || '—'}
+                <span className={`thread-row-source thread-row-source-${r.source || 'marketplace'}`}>
+                  {sourceTag}
                 </span>
+                {r.isKnownLead ? (
+                  <span className={`status-pill ${STATUS_CLASSES[r.status] || 'status-gray'}`}>
+                    {STATUS_LABELS[r.status] || r.status || '—'}
+                  </span>
+                ) : (
+                  <span className="status-pill status-slate" title="Not yet a Supabase lead">
+                    New
+                  </span>
+                )}
                 {ready && <span className="thread-row-dot thread-row-dot-ready" title="Ready for options" />}
                 {returning && <span className="thread-row-dot thread-row-dot-returning" title="Returning customer" />}
-                {unread && <span className="thread-row-dot thread-row-dot-unread" title="Fresh variants cached" />}
+                {unread && <span className="thread-row-dot thread-row-dot-unread" title="Unread" />}
               </div>
             </button>
           );
         })}
+
+        {inboxStatus === 'ok' && inboxLastUpdated && (
+          <p className="pane-list-foot" title={new Date(inboxLastUpdated).toLocaleString()}>
+            Live · {rows.length} threads · updated {formatRelative(inboxLastUpdated) || 'just now'}
+          </p>
+        )}
       </div>
     </aside>
   );

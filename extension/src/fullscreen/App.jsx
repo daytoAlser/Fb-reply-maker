@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import ThreadList from './components/ThreadList.jsx';
 import ThreadView from './components/ThreadView.jsx';
 import ReplyPane from './components/ReplyPane.jsx';
@@ -14,7 +14,41 @@ import {
 } from './lib/api.js';
 
 const LEADS_REFRESH_INTERVAL_MS = 30 * 1000;
+const INBOX_REFRESH_INTERVAL_MS = 30 * 1000;
 const MIN_VIEWPORT_WIDTH = 1280;
+
+// Phase F.1.5 step 2 — build the list the ThreadList renders from. The live
+// FB inbox scrape is the source of truth for which rows exist; Supabase
+// state (status, flags, conversation_mode, last_updated, listing) is joined
+// in by thread_id so known leads light up with chips and pills. Unknown
+// rows (e.g. team chats from Messenger, or brand-new buyer threads we've
+// never generated a reply for) render plain.
+function mergeInboxWithLeads(inboxRows, leads) {
+  const leadByThread = new Map();
+  for (const l of leads || []) {
+    if (l?.thread_id) leadByThread.set(l.thread_id, l);
+  }
+  return (inboxRows || []).map((row) => {
+    const lead = leadByThread.get(row.thread_id) || null;
+    return {
+      thread_id: row.thread_id,
+      source: row.source || 'marketplace',
+      partner_name: row.partner_name || lead?.partner_name || 'Unknown',
+      listing_title: lead?.listing_title || row.listing_title || null,
+      snippet: row.snippet || null,
+      last_activity_relative: row.last_activity_relative || null,
+      unread: !!row.unread,
+      isKnownLead: !!lead,
+      status: lead?.status || null,
+      open_flags: lead?.open_flags || null,
+      conversation_mode: lead?.conversation_mode || null,
+      last_updated: lead?.last_updated || null,
+      fb_thread_url: lead?.fb_thread_url || null,
+      // raw row kept on the side so future debugging can see the scrape input
+      _raw: row
+    };
+  });
+}
 
 export default function App() {
   const [settings, setSettings] = useState(null);
@@ -32,10 +66,15 @@ export default function App() {
   const [query, setQuery] = useState('');
   const [viewportTooSmall, setViewportTooSmall] = useState(window.innerWidth < MIN_VIEWPORT_WIDTH);
 
-  // Phase F.1.5 step 1 — temporary debug state for inbox scrape verification.
-  // Removed in step 2 when the live inbox replaces the Supabase-sourced list.
-  const [inboxProbe, setInboxProbe] = useState(null);
-  const [inboxProbing, setInboxProbing] = useState(false);
+  // Phase F.1.5 step 2 — live FB inbox state. Polled every 30s and on
+  // mount; merged with Supabase leads by thread_id for the ThreadList.
+  // inboxStatus is one of: 'idle' | 'loading' | 'ok' | 'tab_not_found' | 'error'.
+  const [inboxRows, setInboxRows] = useState([]);
+  const [inboxStatus, setInboxStatus] = useState('idle');
+  const [inboxError, setInboxError] = useState(null);
+  const [inboxTabUrl, setInboxTabUrl] = useState(null);
+  const [inboxLayoutVersion, setInboxLayoutVersion] = useState(null);
+  const [inboxLastUpdated, setInboxLastUpdated] = useState(null);
 
   const refreshLeads = useCallback(async (s) => {
     const cfg = (s || settings)?.config;
@@ -64,13 +103,51 @@ export default function App() {
     setCachedByThread(all);
   }, []);
 
-  // Initial mount: load settings, then list leads + cache map.
+  // Phase F.1.5 step 2 — pull the live inbox from the FB tab. Translates the
+  // SW response into status+rows the pane can render. `silent` skips toggling
+  // the loading flag for poll-driven refreshes that shouldn't flicker the UI.
+  const refreshInbox = useCallback(async ({ silent } = {}) => {
+    if (!silent) setInboxStatus((s) => (s === 'idle' ? 'loading' : s));
+    try {
+      const res = await getInboxList();
+      if (!res) {
+        setInboxStatus('error');
+        setInboxError('no_response');
+        return;
+      }
+      if (res.ok) {
+        setInboxRows(Array.isArray(res.rows) ? res.rows : []);
+        setInboxStatus('ok');
+        setInboxError(null);
+        setInboxTabUrl(res.tabUrl || null);
+        setInboxLayoutVersion(res.layoutVersion || null);
+        setInboxLastUpdated(Date.now());
+        return;
+      }
+      if (res.reason === 'tab_not_found') {
+        setInboxRows([]);
+        setInboxStatus('tab_not_found');
+        setInboxError(null);
+        setInboxTabUrl(null);
+        return;
+      }
+      setInboxStatus('error');
+      setInboxError(res.reason || 'unknown');
+      setInboxTabUrl(res.tabUrl || null);
+    } catch (err) {
+      setInboxStatus('error');
+      setInboxError(err?.message || 'rpc_failed');
+    }
+  }, []);
+
+  // Initial mount: load settings, then list leads + cache map + first inbox.
   useEffect(() => {
     (async () => {
       const s = await loadSettings();
       setSettings(s);
       await refreshLeads(s);
       await refreshCacheMap();
+      await refreshInbox();
     })();
     function onResize() { setViewportTooSmall(window.innerWidth < MIN_VIEWPORT_WIDTH); }
     window.addEventListener('resize', onResize);
@@ -78,12 +155,18 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Periodic refresh of the lead list (cheap GET).
+  // Periodic refresh of the Supabase lead list (cheap GET).
   useEffect(() => {
     if (!settings) return;
     const id = setInterval(() => refreshLeads(), LEADS_REFRESH_INTERVAL_MS);
     return () => clearInterval(id);
   }, [settings, refreshLeads]);
+
+  // Periodic refresh of the live FB inbox. Silent so UI doesn't flicker.
+  useEffect(() => {
+    const id = setInterval(() => refreshInbox({ silent: true }), INBOX_REFRESH_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [refreshInbox]);
 
   // Listen for SW pushes: variants updated/started/failed.
   useEffect(() => {
@@ -160,13 +243,13 @@ export default function App() {
     }
   }
 
-  async function handleProbeInbox() {
-    setInboxProbing(true);
-    setInboxProbe(null);
-    const res = await getInboxList();
-    console.log('[FB Reply Maker FS] F1_5_GET_INBOX result:', res);
-    setInboxProbe(res);
-    setInboxProbing(false);
+  async function handleManualRefreshInbox() {
+    setInboxStatus('loading');
+    await refreshInbox();
+  }
+
+  function handleOpenInboxTab() {
+    chrome.tabs.create({ url: 'https://www.facebook.com/marketplace/inbox' });
   }
 
   async function handleRegenerate(threadId) {
@@ -179,7 +262,33 @@ export default function App() {
     }
   }
 
-  const activeLead = leads.find((l) => l.thread_id === activeThreadId) || null;
+  // Phase F.1.5 step 2 — the left-pane data source is now the live inbox
+  // joined to Supabase. Memoized so ThreadList only re-renders when one of
+  // the inputs actually changes.
+  const mergedRows = useMemo(
+    () => mergeInboxWithLeads(inboxRows, leads),
+    [inboxRows, leads]
+  );
+
+  // ThreadView still wants a Supabase lead shape. If the active thread is
+  // in the live inbox but has no Supabase row yet, synthesize a minimal
+  // lead-like object from the merged row so the center pane renders cleanly.
+  const activeLead = useMemo(() => {
+    if (!activeThreadId) return null;
+    const fromSupabase = leads.find((l) => l.thread_id === activeThreadId);
+    if (fromSupabase) return fromSupabase;
+    const fromInbox = mergedRows.find((r) => r.thread_id === activeThreadId);
+    if (!fromInbox) return null;
+    return {
+      thread_id: fromInbox.thread_id,
+      partner_name: fromInbox.partner_name,
+      listing_title: fromInbox.listing_title,
+      status: null,
+      fb_thread_url: null,
+      open_flags: [],
+      captured_fields: null
+    };
+  }, [activeThreadId, leads, mergedRows]);
 
   if (viewportTooSmall) {
     return (
@@ -192,15 +301,14 @@ export default function App() {
 
   return (
     <div className="lead-center">
-      <InboxProbeBar
-        result={inboxProbe}
-        loading={inboxProbing}
-        onProbe={handleProbeInbox}
-      />
       <ThreadList
-        leads={leads}
-        loading={leadsLoading}
-        error={leadsError}
+        rows={mergedRows}
+        inboxStatus={inboxStatus}
+        inboxError={inboxError}
+        inboxTabUrl={inboxTabUrl}
+        inboxLastUpdated={inboxLastUpdated}
+        leadsLoading={leadsLoading}
+        leadsError={leadsError}
         filter={filter}
         onFilterChange={setFilter}
         query={query}
@@ -208,6 +316,8 @@ export default function App() {
         activeThreadId={activeThreadId}
         onSelect={setActiveThreadId}
         cachedByThread={cachedByThread}
+        onRefresh={handleManualRefreshInbox}
+        onOpenInboxTab={handleOpenInboxTab}
       />
       <ThreadView
         lead={activeLead}
@@ -227,87 +337,3 @@ export default function App() {
   );
 }
 
-// Phase F.1.5 step 1 — floating overlay. Verifies GET_INBOX_LIST returns
-// sensible rows before we wire it into the left pane. Removed in step 2.
-function InboxProbeBar({ result, loading, onProbe }) {
-  const rows = result?.rows || [];
-  const tone = !result
-    ? 'idle'
-    : result.ok
-      ? 'ok'
-      : 'err';
-  return (
-    <div
-      style={{
-        position: 'fixed',
-        top: 12,
-        right: 12,
-        zIndex: 9999,
-        maxWidth: 380,
-        padding: '10px 12px',
-        background: 'rgba(15, 17, 21, 0.96)',
-        border: '1px solid ' + (tone === 'ok' ? '#3a7d3a' : tone === 'err' ? '#9b3a3a' : '#3a3f4a'),
-        borderRadius: 10,
-        boxShadow: '0 6px 18px rgba(0,0,0,0.45)',
-        color: '#e7e9ee',
-        font: '12px/1.4 "JetBrains Mono", ui-monospace, Menlo, monospace'
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-        <strong style={{ letterSpacing: 0.5 }}>F.1.5 · inbox probe</strong>
-        <button
-          type="button"
-          onClick={onProbe}
-          disabled={loading}
-          style={{
-            marginLeft: 'auto',
-            padding: '4px 10px',
-            background: '#c8312b',
-            color: '#fff',
-            border: 'none',
-            borderRadius: 6,
-            cursor: loading ? 'wait' : 'pointer',
-            font: 'inherit',
-            opacity: loading ? 0.6 : 1
-          }}
-        >
-          {loading ? 'scraping…' : 'show inbox'}
-        </button>
-      </div>
-      {!result && (
-        <div style={{ color: '#8a8f99' }}>
-          Open the FB Marketplace inbox tab, then click "show inbox".
-        </div>
-      )}
-      {result && !result.ok && (
-        <div style={{ color: '#f5a3a3' }}>
-          <div>error: {result.reason || 'unknown'}</div>
-          {result.tabUrl && <div style={{ color: '#8a8f99', marginTop: 4 }}>tab: {result.tabUrl}</div>}
-        </div>
-      )}
-      {result && result.ok && (
-        <div>
-          <div style={{ color: '#8a8f99', marginBottom: 6 }}>
-            {rows.length} rows · {result.layoutVersion || '—'} · {result.pathname}
-          </div>
-          <ol style={{ margin: 0, padding: '0 0 0 18px', maxHeight: 220, overflowY: 'auto' }}>
-            {rows.slice(0, 12).map((r) => (
-              <li key={r.thread_id} style={{ marginBottom: 4 }}>
-                <span style={{ color: '#e7e9ee' }}>{r.partner_name || '(no name)'}</span>
-                {r.listing_title && (
-                  <span style={{ color: '#8a8f99' }}> — {r.listing_title}</span>
-                )}
-                {r.unread && <span style={{ color: '#f5b04a' }}> ●</span>}
-              </li>
-            ))}
-            {rows.length > 12 && (
-              <li style={{ color: '#8a8f99', listStyle: 'none' }}>
-                …and {rows.length - 12} more (full payload in console)
-              </li>
-            )}
-          </ol>
-        </div>
-      )}
-    </div>
-  );
-}
