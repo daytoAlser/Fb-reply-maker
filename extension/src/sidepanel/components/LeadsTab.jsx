@@ -3,12 +3,15 @@ import LeadCard from './LeadCard.jsx';
 import {
   getAllLeads,
   clearUnviewedQualified,
+  clearUnviewedFlagged,
   updateLeadStatus,
-  deleteLead
+  deleteLead,
+  resolveAllFlags
 } from '../lib/leads.js';
 
 const FILTERS = [
   { id: 'qualified', label: 'New Qualified', match: (l) => l.status === 'qualified' },
+  { id: 'flagged', label: 'Flagged', match: (l) => Array.isArray(l.open_flags) && l.open_flags.length > 0 },
   { id: 'all', label: 'All', match: () => true },
   { id: 'contacted', label: 'Contacted', match: (l) => l.status === 'contacted' },
   {
@@ -45,6 +48,10 @@ export default function LeadsTab() {
       clearUnviewedQualified().catch((err) =>
         console.warn('[FB Reply Maker SP] clearUnviewedQualified failed:', err)
       );
+    } else if (filter === 'flagged') {
+      clearUnviewedFlagged().catch((err) =>
+        console.warn('[FB Reply Maker SP] clearUnviewedFlagged failed:', err)
+      );
     }
   }, [filter]);
 
@@ -57,6 +64,11 @@ export default function LeadsTab() {
     // eslint-disable-next-line no-alert
     if (!window.confirm('Delete this lead? This cannot be undone.')) return;
     await deleteLead(threadId);
+    await refresh();
+  }
+
+  async function handleResolveFlags(threadId) {
+    await resolveAllFlags(threadId);
     await refresh();
   }
 
@@ -76,6 +88,9 @@ export default function LeadsTab() {
     if (filter === 'qualified') {
       emptyMessage =
         "No qualified leads yet. Keep chatting with customers and they'll show up here once enough info is captured.";
+    } else if (filter === 'flagged') {
+      emptyMessage =
+        'No flagged leads right now. Flags fire on fitment, pricing, and timeline questions and clear when the customer moves on.';
     } else if (filter === 'all') {
       emptyMessage =
         'No leads tracked yet. Generate a reply on a Marketplace thread to start tracking.';
@@ -91,7 +106,7 @@ export default function LeadsTab() {
           <button
             key={f.id}
             type="button"
-            className={`filter-chip ${filter === f.id ? 'filter-chip-active' : ''}`}
+            className={`filter-chip ${filter === f.id ? 'filter-chip-active' : ''} ${f.id === 'flagged' && counts[f.id] > 0 ? 'filter-chip-flagged' : ''}`}
             onClick={() => setFilter(f.id)}
           >
             <span className="filter-chip-label">{f.label}</span>
@@ -113,6 +128,7 @@ export default function LeadsTab() {
               onOpenThread={() => openThread(lead.fbThreadUrl)}
               onStatusChange={(s) => handleStatusChange(lead.threadId, s)}
               onDelete={() => handleDelete(lead.threadId)}
+              onResolveFlags={() => handleResolveFlags(lead.threadId)}
             />
           ))}
         </div>

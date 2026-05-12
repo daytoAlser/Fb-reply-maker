@@ -666,6 +666,8 @@ html, body {
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .status-pill {
@@ -997,4 +999,40 @@ html, body {
   border-left-color: var(--success);
   background: rgba(16, 185, 129, 0.08);
   color: var(--success);
+}
+
+/* --- Flag chips on lead cards --- */
+
+.flag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+}
+
+.flag-chip-icon {
+  font-size: 10px;
+  line-height: 1;
+}
+
+.flag-chip-red {
+  color: var(--danger);
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.flag-chip-yellow {
+  color: var(--accent);
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.filter-chip-flagged:not(.filter-chip-active) {
+  color: var(--danger);
+  border-color: var(--danger);
 }

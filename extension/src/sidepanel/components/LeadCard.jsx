@@ -42,6 +42,12 @@ const CUSTOMER_TYPE_CLASSES = {
   gift_buyer: 'customer-chip customer-chip-success'
 };
 
+const FLAG_CHIP_META = {
+  fitment:  { label: 'FITMENT',  icon: '\u{1F6A8}', color: 'red'    },
+  pricing:  { label: 'PRICING',  icon: '\u{1F4B0}', color: 'yellow' },
+  timeline: { label: 'TIMELINE', icon: '\u{1F4C5}', color: 'yellow' }
+};
+
 function formatRelative(ts) {
   if (!ts) return '';
   const diff = Date.now() - ts;
@@ -60,9 +66,11 @@ function isMeaningful(v) {
   return v !== null && v !== undefined && v !== '';
 }
 
-export default function LeadCard({ lead, onOpenThread, onStatusChange, onDelete }) {
+export default function LeadCard({ lead, onOpenThread, onStatusChange, onDelete, onResolveFlags }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef(null);
+  const openFlags = Array.isArray(lead.open_flags) ? lead.open_flags.filter((f) => FLAG_CHIP_META[f]) : [];
+  const hasOpenFlags = openFlags.length > 0;
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -86,6 +94,7 @@ export default function LeadCard({ lead, onOpenThread, onStatusChange, onDelete 
   function handleMenuAction(action) {
     setMenuOpen(false);
     if (action === 'delete') onDelete();
+    else if (action === 'resolve_flags') onResolveFlags && onResolveFlags();
     else onStatusChange(action);
   }
 
@@ -97,6 +106,15 @@ export default function LeadCard({ lead, onOpenThread, onStatusChange, onDelete 
           <span className={`status-pill ${STATUS_CLASSES[lead.status] || 'status-gray'}`}>
             {STATUS_LABELS[lead.status] || lead.status}
           </span>
+          {openFlags.map((f) => {
+            const meta = FLAG_CHIP_META[f];
+            return (
+              <span key={f} className={`flag-chip flag-chip-${meta.color}`}>
+                <span className="flag-chip-icon" aria-hidden="true">{meta.icon}</span>
+                <span className="flag-chip-label">{meta.label}</span>
+              </span>
+            );
+          })}
           <div className="lead-menu" ref={menuRef}>
             <button
               type="button"
@@ -110,6 +128,11 @@ export default function LeadCard({ lead, onOpenThread, onStatusChange, onDelete 
             </button>
             {menuOpen && (
               <div className="lead-menu-dropdown" role="menu">
+                {hasOpenFlags && (
+                  <button type="button" role="menuitem" onClick={() => handleMenuAction('resolve_flags')}>
+                    Mark Flags Resolved
+                  </button>
+                )}
                 <button type="button" role="menuitem" onClick={() => handleMenuAction('closed_won')}>
                   Mark Closed Won
                 </button>

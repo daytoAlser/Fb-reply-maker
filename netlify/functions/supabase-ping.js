@@ -1,11 +1,6 @@
 import { supabase } from './_shared/supabaseClient.js';
 
 export async function handler(event) {
-  console.log('[FN DEBUG supabase-ping] SUPABASE_URL:', process.env.SUPABASE_URL);
-  console.log('[FN DEBUG supabase-ping] SUPABASE_URL length:', process.env.SUPABASE_URL?.length);
-  console.log('[FN DEBUG supabase-ping] SUPABASE_SERVICE_KEY length:', process.env.SUPABASE_SERVICE_KEY?.length);
-  console.log('[FN DEBUG supabase-ping] SUPABASE_SERVICE_KEY tail:', process.env.SUPABASE_SERVICE_KEY?.slice(-6));
-
   const headers = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type, x-api-secret',

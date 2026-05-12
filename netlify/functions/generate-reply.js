@@ -22,7 +22,7 @@ function mergeCapturedFields(newFields, existingFields) {
   return merged;
 }
 
-async function upsertLeadToSupabase({ thread_id, partner_name, fb_thread_url, listing_title, ad_type, captured_fields, status, flags }) {
+async function upsertLeadToSupabase({ thread_id, partner_name, fb_thread_url, listing_title, ad_type, captured_fields, status, flags, writeFlags }) {
   const row = {
     thread_id,
     last_updated: new Date().toISOString()
@@ -35,7 +35,7 @@ async function upsertLeadToSupabase({ thread_id, partner_name, fb_thread_url, li
     row.captured_fields = captured_fields;
   }
   if (status) row.status = status;
-  if (Array.isArray(flags)) row.open_flags = flags;
+  if (writeFlags !== false && Array.isArray(flags)) row.open_flags = flags;
 
   console.log('[FN] supabase upsert payload:', JSON.stringify(row));
 
@@ -343,11 +343,6 @@ extracted_fields contains anything you can pull from the FULL conversation (hist
 };
 
 export async function handler(event) {
-  console.log('[FN DEBUG generate-reply] SUPABASE_URL:', process.env.SUPABASE_URL);
-  console.log('[FN DEBUG generate-reply] SUPABASE_URL length:', process.env.SUPABASE_URL?.length);
-  console.log('[FN DEBUG generate-reply] SUPABASE_SERVICE_KEY length:', process.env.SUPABASE_SERVICE_KEY?.length);
-  console.log('[FN DEBUG generate-reply] SUPABASE_SERVICE_KEY tail:', process.env.SUPABASE_SERVICE_KEY?.slice(-6));
-
   const headers = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type, x-api-secret',
@@ -452,7 +447,8 @@ export async function handler(event) {
           ad_type: parsed.ad_type,
           captured_fields: captured,
           status: parsed.lead_status_suggestion,
-          flags: parsed.flags
+          flags: parsed.flags,
+          writeFlags: !overrideFlags
         });
         if (error) {
           console.error('[FN] supabase upsert error full:', JSON.stringify(error));

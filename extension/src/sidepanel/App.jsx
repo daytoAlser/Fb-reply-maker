@@ -9,7 +9,12 @@ import LeadsTab from './components/LeadsTab.jsx';
 import FlagBanner from './components/FlagBanner.jsx';
 import { generateReply } from './lib/api.js';
 import { loadAll } from './lib/storage.js';
-import { getThreadIdFromUrl, createOrUpdateLead } from './lib/leads.js';
+import {
+  getThreadIdFromUrl,
+  createOrUpdateLead,
+  migrateLeadsToSupabase,
+  retrySyncPending
+} from './lib/leads.js';
 
 const CATEGORIES = [
   'auto',
@@ -70,17 +75,32 @@ export default function App() {
       setSettings(data);
       setCategoryOverride(data.preferences?.defaultCategory || 'auto');
     });
+    migrateLeadsToSupabase().catch((err) =>
+      console.warn('[FB Reply Maker SP] migration error:', err?.message)
+    );
+    retrySyncPending().catch((err) =>
+      console.warn('[FB Reply Maker SP] retry sweep error:', err?.message)
+    );
   }, []);
 
   useEffect(() => {
-    chrome.storage.local.get(['activeTab', 'unviewedQualifiedCount']).then((d) => {
+    let q = 0;
+    let f = 0;
+    chrome.storage.local.get(['activeTab', 'unviewedQualifiedCount', 'unviewedFlaggedCount']).then((d) => {
       if (d.activeTab === 'reply' || d.activeTab === 'leads') setActiveTab(d.activeTab);
-      if (typeof d.unviewedQualifiedCount === 'number') setLeadsBadgeCount(d.unviewedQualifiedCount);
+      if (typeof d.unviewedQualifiedCount === 'number') q = d.unviewedQualifiedCount;
+      if (typeof d.unviewedFlaggedCount === 'number') f = d.unviewedFlaggedCount;
+      setLeadsBadgeCount(q + f);
     });
     function onChanged(changes, area) {
       if (area !== 'local') return;
       if (changes.unviewedQualifiedCount) {
-        setLeadsBadgeCount(changes.unviewedQualifiedCount.newValue || 0);
+        q = changes.unviewedQualifiedCount.newValue || 0;
+        setLeadsBadgeCount(q + f);
+      }
+      if (changes.unviewedFlaggedCount) {
+        f = changes.unviewedFlaggedCount.newValue || 0;
+        setLeadsBadgeCount(q + f);
       }
     }
     chrome.storage.onChanged.addListener(onChanged);
@@ -228,7 +248,10 @@ export default function App() {
             adType: res?.ad_type || 'unknown',
             extractedFields: res?.extracted_fields || {},
             leadStatusSuggestion: res?.lead_status_suggestion || null,
-            conversationStage: res?.conversation_stage || null
+            conversationStage: res?.conversation_stage || null,
+            flags: Array.isArray(res?.flags) ? res.flags : [],
+            overrideFlags,
+            customerMessage: incoming
           });
           console.log('[FB Reply Maker SP] lead updated:', lead);
         } catch (err) {
