@@ -95,14 +95,25 @@ export default function ThreadView({
         {!historyLoading && !historyError && history.length === 0 && (
           <p className="pane-thread-empty-msg">No messages captured yet.</p>
         )}
-        {history.map((m, i) => (
-          <div
-            key={`${i}-${m.text.slice(0, 24)}`}
-            className={`bubble bubble-${m.sender === 'me' ? 'me' : 'them'}`}
-          >
-            <span className="bubble-text">{m.text}</span>
-          </div>
-        ))}
+        {history.map((m, i) => {
+          // Show sender label only on "them" bubbles when we have a name
+          // and it isn't already the partner first name (avoids redundant
+          // "John: ..." in a 2-party chat). For group chats the senderName
+          // varies per bubble and is genuinely useful.
+          const showSender =
+            m.sender !== 'me' &&
+            m.senderName &&
+            (!lead.partner_name || !m.senderName.toLowerCase().includes(lead.partner_name.toLowerCase().split(/\s+/)[0]));
+          return (
+            <div
+              key={`${i}-${m.text.slice(0, 24)}`}
+              className={`bubble bubble-${m.sender === 'me' ? 'me' : 'them'}`}
+            >
+              {showSender && <span className="bubble-sender">{m.senderName}</span>}
+              <span className="bubble-text">{m.text}</span>
+            </div>
+          );
+        })}
       </div>
     </section>
   );

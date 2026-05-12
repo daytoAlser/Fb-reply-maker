@@ -152,7 +152,16 @@ function extractThreadInfo(container) {
   return { partner: null, listingTitle: null };
 }
 
-function parseAriaMessage(label, partnerName, userName) {
+// `opts.permissive` = true relaxes the unknown-sender rule. With strict mode
+// (default), an ambiguous sender (not "you", not the configured rep, not
+// the partner first-name) returns null — this protects auto-gen from being
+// triggered by a misclassified outgoing message in a 2-party Marketplace
+// thread. Permissive mode is used by the UI-only OPEN_THREAD path, where
+// we want group-chat bubbles to render with the actual sender label even
+// though auto-gen should still treat them as ambiguous (which it does,
+// because auto-gen reads from THREAD_UPDATE which uses strict mode).
+function parseAriaMessage(label, partnerName, userName, opts) {
+  const permissive = !!(opts && opts.permissive);
   if (!label) return null;
   const trimmed = label.trim();
   if (trimmed.length < MIN_TEXT_LENGTH || trimmed.length > MAX_TEXT_LENGTH) return null;
@@ -165,13 +174,14 @@ function parseAriaMessage(label, partnerName, userName) {
   for (const [name, pattern] of MESSAGE_PATTERNS) {
     const m = trimmed.match(pattern);
     if (!m) continue;
-    const senderToken = (m[1] || '').toLowerCase().trim();
+    const rawSender = (m[1] || '').trim();
+    const senderToken = rawSender.toLowerCase();
     const text = (m[2] || '').trim();
     if (!text || text.length < MIN_TEXT_LENGTH) return null;
 
     // roleDot only attaches to the partner (Buyer/Seller tag is never on "you")
     if (name === 'roleDot') {
-      return { sender: 'them', text };
+      return { sender: 'them', text, senderName: rawSender };
     }
 
     // "you" / "your" → me; configured rep first name → me
@@ -185,11 +195,17 @@ function parseAriaMessage(label, partnerName, userName) {
     }
     // partner first-name match → them
     if (partnerFirst && senderToken.includes(partnerFirst)) {
-      return { sender: 'them', text };
+      return { sender: 'them', text, senderName: rawSender };
     }
 
-    // Pattern matched but neither side is identified — refuse to guess.
-    // Prevents the old fallthrough from labeling random aria-labels as "me".
+    // Pattern matched but sender isn't "you" and isn't the named partner.
+    // Strict mode (default) refuses to guess so auto-gen doesn't fire on
+    // a misclassified bubble. Permissive mode (UI-only) accepts it as a
+    // group-chat-style "them" bubble and preserves the sender label so
+    // the UI can render "John: hey everyone".
+    if (permissive && rawSender) {
+      return { sender: 'them', text, senderName: rawSender };
+    }
     return null;
   }
 
@@ -211,15 +227,17 @@ function isConversationPage() {
 
 // Phase F.1: scan all aria-labelled message rows in the active thread and
 // return the deduped, classified list in DOM order (oldest → newest). Shared
-// by detectThread (sidepanel broadcast) and the GET_THREAD_HISTORY RPC
-// (fullscreen thread view).
-function scanThreadMessages(container, partnerName) {
+// by detectThread (sidepanel broadcast — STRICT, drives auto-gen safety),
+// the GET_THREAD_HISTORY RPC (fullscreen thread view), and OPEN_THREAD
+// (passes opts.permissive: true so group chats render).
+function scanThreadMessages(container, partnerName, opts) {
+  const permissive = !!(opts && opts.permissive);
   const byText = new Map();
   let droppedCount = 0;
   for (const el of container.querySelectorAll('[aria-label]')) {
     const label = el.getAttribute('aria-label');
     if (!(el.innerText || '').trim()) continue;
-    const parsed = parseAriaMessage(label, partnerName, configuredUserName);
+    const parsed = parseAriaMessage(label, partnerName, configuredUserName, { permissive });
     if (!parsed) {
       droppedCount++;
       continue;
@@ -601,7 +619,9 @@ async function openThreadByRowClick({ thread_id, source } = {}) {
     return { ok: false, reason: 'no_thread_container', thread_id, url: location.href };
   }
   const { partner: partnerName, listingTitle } = extractThreadInfo(container);
-  const { messages } = scanThreadMessages(container, partnerName);
+  // UI-side scan: permissive so group chats render with sender labels.
+  // Auto-gen is unaffected — it reads from THREAD_UPDATE (strict path).
+  const { messages } = scanThreadMessages(container, partnerName, { permissive: true });
   const tail = messages.slice(-MAX_HISTORY_MESSAGES);
 
   return {
@@ -944,7 +964,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         return;
       }
       const { partner: partnerName, listingTitle } = extractThreadInfo(container);
-      const { messages } = scanThreadMessages(container, partnerName);
+      // UI-side scan: permissive so group chats render with sender labels.
+      const { messages } = scanThreadMessages(container, partnerName, { permissive: true });
       const tail = messages.slice(-MAX_HISTORY_MESSAGES);
       sendResponse({
         ok: true,
