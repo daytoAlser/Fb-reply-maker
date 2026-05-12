@@ -294,6 +294,7 @@ export default function App() {
         customerType: res?.extracted_fields?.customerType,
         flags: res?.flags,
         extracted_fields: res?.extracted_fields,
+        ready_for_options: res?.ready_for_options,
         products_of_interest: Array.isArray(res?.products_of_interest)
           ? res.products_of_interest.map((p) => `${p.productType}:${p.productState}`)
           : null
@@ -313,7 +314,8 @@ export default function App() {
             flags: Array.isArray(res?.flags) ? res.flags : [],
             overrideFlags,
             customerMessage: incoming,
-            productsOfInterest: Array.isArray(res?.products_of_interest) ? res.products_of_interest : null
+            productsOfInterest: Array.isArray(res?.products_of_interest) ? res.products_of_interest : null,
+            readyForOptions: typeof res?.ready_for_options === 'boolean' ? res.ready_for_options : undefined
           });
           console.log('[FB Reply Maker SP] lead updated:', lead?.threadId);
         } catch (err) {
@@ -384,6 +386,13 @@ export default function App() {
                 <p className="intent">{result.intent_summary}</p>
               </div>
               <MultiProductChips products={result.products_of_interest} />
+              {result.ready_for_options && (
+                <div className="ready-banner" role="status" aria-label="Ready for options">
+                  <span className="ready-banner-icon" aria-hidden="true">{'\u{1F3AF}'}</span>
+                  <span className="ready-banner-title">READY FOR OPTIONS</span>
+                  <span className="ready-banner-body">All tracked products are qualified. Time to pull options for this customer.</span>
+                </div>
+              )}
               <FlagBanner
                 flags={result.flags || []}
                 overrideActive={overrideActive}

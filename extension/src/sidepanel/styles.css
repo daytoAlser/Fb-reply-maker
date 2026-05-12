@@ -1378,6 +1378,51 @@ select:focus-visible {
   box-shadow: var(--glow-warning-soft);
 }
 
+.flag-chip-green {
+  color: var(--success);
+  background: rgba(16, 185, 129, 0.16);
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.32);
+}
+
+/* ============================================================
+   Phase E.1 — Ready-for-options banner (in reply view)
+   ============================================================ */
+
+.ready-banner {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  gap: 8px 10px;
+  padding: 10px 14px;
+  margin: 2px 0;
+  background: var(--bg-elev);
+  border: 1px solid var(--success);
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  color: var(--success);
+  box-shadow: var(--glow-success), var(--shadow-card);
+  animation: slideDown var(--dur-base) var(--ease-out-quint);
+}
+
+.ready-banner-icon { font-size: 14px; line-height: 1; }
+
+.ready-banner-title {
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.ready-banner-body {
+  grid-column: 1 / -1;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+}
+
 /* ============================================================
    Phase E.1 — Multi-product chip row
    ============================================================ */
@@ -1387,12 +1432,12 @@ select:focus-visible {
   flex-direction: column;
   gap: 6px;
   padding: 10px 12px;
-  margin-top: 8px;
+  margin: 2px 0;
   border: 1px solid var(--border);
-  border-radius: var(--radius-card);
+  border-radius: var(--radius-md);
   background:
     radial-gradient(ellipse 60% 100% at 0% 50%, rgba(59, 130, 246, 0.12), transparent 70%),
-    rgba(59, 130, 246, 0.04);
+    var(--bg-elev);
   box-shadow: var(--shadow-card);
 }
 

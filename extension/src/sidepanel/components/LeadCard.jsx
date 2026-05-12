@@ -44,9 +44,10 @@ const CUSTOMER_TYPE_CLASSES = {
 };
 
 const FLAG_CHIP_META = {
-  fitment:  { label: 'FITMENT',  icon: '\u{1F6A8}', color: 'red'    },
-  pricing:  { label: 'PRICING',  icon: '\u{1F4B0}', color: 'yellow' },
-  timeline: { label: 'TIMELINE', icon: '\u{1F4C5}', color: 'yellow' }
+  fitment:           { label: 'FITMENT',           icon: '\u{1F6A8}', color: 'red'    },
+  pricing:           { label: 'PRICING',           icon: '\u{1F4B0}', color: 'yellow' },
+  timeline:          { label: 'TIMELINE',          icon: '\u{1F4C5}', color: 'yellow' },
+  ready_for_options: { label: 'READY FOR OPTIONS', icon: '\u{1F3AF}', color: 'green'  }
 };
 
 function formatRelative(ts) {

@@ -22,7 +22,7 @@ function mergeCapturedFields(newFields, existingFields) {
   return merged;
 }
 
-async function upsertLeadToSupabase({ thread_id, partner_name, fb_thread_url, listing_title, ad_type, captured_fields, status, flags, writeFlags, products_of_interest }) {
+async function upsertLeadToSupabase({ thread_id, partner_name, fb_thread_url, listing_title, ad_type, captured_fields, status, flags, writeFlags, products_of_interest, ready_for_options }) {
   const row = {
     thread_id,
     last_updated: new Date().toISOString()
@@ -35,7 +35,16 @@ async function upsertLeadToSupabase({ thread_id, partner_name, fb_thread_url, li
     row.captured_fields = captured_fields;
   }
   if (status) row.status = status;
-  if (writeFlags !== false && Array.isArray(flags)) row.open_flags = flags;
+  // Phase E.1 bug-A fix: open_flags is the union of human-review flags
+  // (fitment/pricing/timeline from this message) and the lead-state flag
+  // 'ready_for_options' (set when all tracked products are qualified).
+  if (writeFlags !== false && Array.isArray(flags)) {
+    const combined = [...flags];
+    if (ready_for_options && !combined.includes('ready_for_options')) {
+      combined.push('ready_for_options');
+    }
+    row.open_flags = combined;
+  }
   if (Array.isArray(products_of_interest)) row.products_of_interest = products_of_interest;
 
   console.log('[FN] supabase upsert payload:', JSON.stringify(row));
@@ -186,6 +195,8 @@ EXISTING TRACKED PRODUCTS (this thread)
 ${lines.join('\n')}
 
 Carry these forward in products_of_interest. Add new entries if the current message references new product categories. Do not drop a product already tracked.
+
+Every per-product field listed above as anything other than "null" is RESOLVED. Per the RESOLVED QUALIFIER LOCK rule below, do not re-ask about any of these resolved values in QUICK, STANDARD, or DETAILED. Use them as established context only.
 `;
 }
 
@@ -479,6 +490,17 @@ HARD RULES
 - DO NOT ask for lift-specific qualifiers if lift is not in products_of_interest.
 - DO NOT ask vehicle twice. If vehicle is already captured from history, move to the next missing per-product qualifier.
 - ad_type reflects the ORIGINAL listing the customer messaged from. products_of_interest can be broader. ad_type stays the same even when the customer asks about additional categories.
+
+RESOLVED QUALIFIER LOCK (HIGHEST PRIORITY — OVERRIDES VOICE CANON)
+For any product in EXISTING TRACKED PRODUCTS, if a qualifier field is already populated (non-null, non-empty string), do NOT ask about that qualifier in ANY variant — not in QUICK, not in STANDARD, not in DETAILED. This applies even when the canonical voice pattern (e.g. the Brandon use-case framing "what kind of driving are you doing with the truck, any jumping or just cruising") would normally include that question. The canonical framings are RESERVED for the FIRST time a qualifier is asked. Once captured, the value is established context.
+
+Apply the same rule to extracted_fields: any field already captured at the lead level (vehicle, lookPreference, rideHeight, tireSize, intent) MUST NOT be re-asked in any variant.
+
+When all qualifiers for a product are captured, MOVE FORWARD:
+- If other tracked products still have missing qualifiers, ask the next missing one for the unqualified product.
+- If ALL tracked products are fully qualified, transition into recommendation / quote-punt voice. Reference the captured spec ("for cruising and highway with the 6-inch goal, the value kit will be perfect…") rather than re-asking.
+
+Re-asking a resolved qualifier is a hard error. Every variant must respect the lock.
 ${existingProductsBlock}${categoryClause}${buildHistoryBlock(conversationHistory)}
 OUTPUT
 Respond ONLY with valid JSON. No markdown fencing. No preamble.
@@ -627,7 +649,19 @@ export async function handler(event) {
     );
     parsed.products_of_interest = mergedProducts;
 
-    console.log('[FN] products_of_interest merged:', mergedProducts.map((p) => `${p.productType}:${p.productState}`).join(', ') || 'none');
+    // Phase E.1 bug-A fix: the AI's lead_status_suggestion is unreliable for
+    // multi-product threads (it returned "qualifying" on the Brandon thread
+    // even when all 3 products had productState "qualified"). When the
+    // product array exists and every entry is qualified, the lead IS
+    // qualified — server is authoritative on the rollup, not the model.
+    const allProductsQualified = mergedProducts.length > 0
+      && mergedProducts.every((p) => p && p.productState === 'qualified');
+    if (allProductsQualified) {
+      parsed.lead_status_suggestion = 'qualified';
+    }
+    parsed.ready_for_options = allProductsQualified;
+
+    console.log('[FN] products_of_interest merged:', mergedProducts.map((p) => `${p.productType}:${p.productState}`).join(', ') || 'none', '| ready_for_options:', allProductsQualified);
 
     console.log('[FN] supabase check: thread_id=', thread_id, 'type=', typeof thread_id);
 
@@ -643,7 +677,8 @@ export async function handler(event) {
           status: parsed.lead_status_suggestion,
           flags: parsed.flags,
           writeFlags: !overrideFlags,
-          products_of_interest: mergedProducts
+          products_of_interest: mergedProducts,
+          ready_for_options: allProductsQualified
         });
         if (error) {
           console.error('[FN] supabase upsert error full:', JSON.stringify(error));

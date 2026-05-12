@@ -3,7 +3,13 @@ const QUALIFIED_BADGE_KEY = 'unviewedQualifiedCount';
 const FLAGGED_BADGE_KEY = 'unviewedFlaggedCount';
 const BADGE_COLOR = '#f59e0b';
 const FLAG_HISTORY_CAP = 20;
-const ALLOWED_FLAGS = new Set(['fitment', 'pricing', 'timeline']);
+// Phase D human-review flags: detected from customer message, auto-clear on
+// next clean message.
+const HUMAN_REVIEW_FLAGS = new Set(['fitment', 'pricing', 'timeline']);
+// Phase E.1 lead-state flags: derived from lead/product state, persist until
+// the underlying state changes or the user resolves manually.
+const LEAD_STATE_FLAGS = new Set(['ready_for_options']);
+const ALLOWED_FLAGS = new Set([...HUMAN_REVIEW_FLAGS, ...LEAD_STATE_FLAGS]);
 const MIGRATION_FLAG_KEY = 'supabase_migration_v1';
 
 const AUTO_STATUS_RANK = { new: 1, qualifying: 2, qualified: 3 };
@@ -152,8 +158,15 @@ export async function clearUnviewedFlagged() {
 // ----- Flag lifecycle -----
 
 function applyFlagLifecycle({ prevOpenFlags, prevHistory, newFlags, overrideFlags, customerMessage, now }) {
-  const safeNewFlags = Array.isArray(newFlags) ? newFlags.filter((f) => ALLOWED_FLAGS.has(f)) : [];
-  let openFlags = prevOpenFlags || [];
+  // Phase E.1 bug-A: operate only on Phase D human-review flags. Lead-state
+  // flags (ready_for_options) live in the same open_flags array but follow a
+  // different lifecycle: they are added/removed by createOrUpdateLead based
+  // on product qualification state, not by message-driven auto-clear.
+  const prevReview = (prevOpenFlags || []).filter((f) => HUMAN_REVIEW_FLAGS.has(f));
+  const carriedLeadState = (prevOpenFlags || []).filter((f) => LEAD_STATE_FLAGS.has(f));
+
+  const safeNewFlags = Array.isArray(newFlags) ? newFlags.filter((f) => HUMAN_REVIEW_FLAGS.has(f)) : [];
+  let reviewOpen = prevReview;
   let history = Array.isArray(prevHistory) ? [...prevHistory] : [];
 
   function markLatestUnresolved(flag, mutator) {
@@ -168,12 +181,12 @@ function applyFlagLifecycle({ prevOpenFlags, prevHistory, newFlags, overrideFlag
   }
 
   if (overrideFlags) {
-    for (const flag of openFlags) {
+    for (const flag of reviewOpen) {
       markLatestUnresolved(flag, (e) => ({ ...e, overridden: true }));
     }
   } else if (safeNewFlags.length > 0) {
     for (const flag of safeNewFlags) {
-      if (!openFlags.includes(flag)) {
+      if (!reviewOpen.includes(flag)) {
         history.push({
           flag_type: flag,
           fired_at: now,
@@ -183,19 +196,23 @@ function applyFlagLifecycle({ prevOpenFlags, prevHistory, newFlags, overrideFlag
         });
       }
     }
-    openFlags = safeNewFlags;
-  } else if (openFlags.length > 0) {
-    for (const flag of openFlags) {
+    reviewOpen = safeNewFlags;
+  } else if (reviewOpen.length > 0) {
+    for (const flag of reviewOpen) {
       markLatestUnresolved(flag, (e) => ({ ...e, resolved_at: now }));
     }
-    openFlags = [];
+    reviewOpen = [];
   }
 
   if (history.length > FLAG_HISTORY_CAP) {
     history = history.slice(-FLAG_HISTORY_CAP);
   }
 
-  return { openFlags, history };
+  // Caller (createOrUpdateLead) layers ready_for_options on top based on
+  // product state. We carry forward any previously-set lead-state flags so
+  // a clean message doesn't drop them; caller is responsible for the final
+  // truth based on current product qualification.
+  return { openFlags: reviewOpen, history, carriedLeadState };
 }
 
 // ----- Cloud sync -----
@@ -270,7 +287,8 @@ export async function createOrUpdateLead({
   flags,
   overrideFlags,
   customerMessage,
-  productsOfInterest
+  productsOfInterest,
+  readyForOptions
 }) {
   if (!threadId) {
     console.warn('[FB Reply Maker leads] createOrUpdateLead: missing threadId, skipping');
@@ -310,7 +328,7 @@ export async function createOrUpdateLead({
   const prevOpenFlags = Array.isArray(existing?.open_flags) ? existing.open_flags : [];
   const prevHistory = Array.isArray(existing?.flag_history) ? existing.flag_history : [];
 
-  const { openFlags, history } = applyFlagLifecycle({
+  const { openFlags: reviewOpenFlags, history } = applyFlagLifecycle({
     prevOpenFlags,
     prevHistory,
     newFlags: flags,
@@ -318,6 +336,39 @@ export async function createOrUpdateLead({
     customerMessage,
     now
   });
+
+  // Phase E.1 bug-A: derive ready_for_options from product state. Server
+  // sends readyForOptions explicitly; for older responses we also infer
+  // it locally from the products array.
+  const inferredReady = effectiveProducts.length > 0
+    && effectiveProducts.every((p) => p && p.productState === 'qualified');
+  const showReady = typeof readyForOptions === 'boolean' ? readyForOptions : inferredReady;
+  const hadReadyBefore = prevOpenFlags.includes('ready_for_options');
+  let openFlags = [...reviewOpenFlags];
+  if (showReady) {
+    openFlags.push('ready_for_options');
+    if (!hadReadyBefore) {
+      history.push({
+        flag_type: 'ready_for_options',
+        fired_at: now,
+        overridden: false,
+        resolved_at: null,
+        customer_message: ''
+      });
+    }
+  } else if (hadReadyBefore) {
+    // Products went back to qualifying — mark the latest ready entry resolved.
+    for (let i = history.length - 1; i >= 0; i--) {
+      const e = history[i];
+      if (e && e.flag_type === 'ready_for_options' && e.resolved_at == null) {
+        history[i] = { ...e, resolved_at: now };
+        break;
+      }
+    }
+  }
+  if (history.length > FLAG_HISTORY_CAP) {
+    history.splice(0, history.length - FLAG_HISTORY_CAP);
+  }
 
   const phaseEDefaults = defaultPhaseEFields();
 
