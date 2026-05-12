@@ -1,6 +1,50 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { supabase } from './_shared/supabaseClient.js';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+function mergeCapturedFields(newFields, existingFields) {
+  const merged = (existingFields && typeof existingFields === 'object' && !Array.isArray(existingFields))
+    ? { ...existingFields }
+    : {};
+  if (!newFields || typeof newFields !== 'object') return merged;
+  for (const [key, value] of Object.entries(newFields)) {
+    if (value === null || value === undefined) continue;
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed) continue;
+      if (trimmed.toLowerCase() === 'null') continue;
+      merged[key] = trimmed;
+      continue;
+    }
+    merged[key] = value;
+  }
+  return merged;
+}
+
+async function upsertLeadToSupabase({ thread_id, partner_name, fb_thread_url, listing_title, ad_type, captured_fields, status, flags }) {
+  const row = {
+    thread_id,
+    last_updated: new Date().toISOString()
+  };
+  if (partner_name) row.partner_name = partner_name;
+  if (fb_thread_url) row.fb_thread_url = fb_thread_url;
+  if (listing_title) row.listing_title = listing_title;
+  if (ad_type) row.ad_type = ad_type;
+  if (captured_fields && Object.keys(captured_fields).length > 0) {
+    row.captured_fields = captured_fields;
+  }
+  if (status) row.status = status;
+  if (Array.isArray(flags)) row.open_flags = flags;
+
+  const { data, error } = await supabase
+    .from('leads')
+    .upsert(row, { onConflict: 'thread_id', ignoreDuplicates: false })
+    .select();
+
+  if (error) throw new Error(error.message);
+  return data;
+}
 
 function buildHistoryBlock(history) {
   if (!Array.isArray(history) || history.length === 0) return '';
@@ -323,7 +367,10 @@ export async function handler(event) {
     partnerName,
     listingTitle,
     location,
-    override_flags
+    override_flags,
+    thread_id,
+    fb_thread_url,
+    existing_captured_fields
   } = body;
   if (!message || !context) {
     return { statusCode: 400, headers, body: 'Missing message or context' };
@@ -383,6 +430,27 @@ export async function handler(event) {
     if (overrideFlags) parsed.flags = [];
 
     console.log('[FN] detected flags:', parsed.flags, 'category:', parsed.category, 'stage:', parsed.conversation_stage);
+
+    if (thread_id) {
+      try {
+        const captured = mergeCapturedFields(parsed.extracted_fields, existing_captured_fields);
+        await upsertLeadToSupabase({
+          thread_id,
+          partner_name: partnerName,
+          fb_thread_url,
+          listing_title: listingTitle,
+          ad_type: parsed.ad_type,
+          captured_fields: captured,
+          status: parsed.lead_status_suggestion,
+          flags: parsed.flags
+        });
+        console.log('[FN] supabase lead synced:', thread_id);
+      } catch (err) {
+        console.error('[FN] supabase upsert failed:', err?.message || err);
+      }
+    } else {
+      console.log('[FN] thread_id missing, skipping Supabase upsert');
+    }
 
     return { statusCode: 200, headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) };
   } catch (err) {
