@@ -66,28 +66,43 @@ const CONTENT_SCRIPT_MATCHES = [
   'https://*.messenger.com/*'
 ];
 
+// onStartup, onInstalled, and the startup IIFE all call this; if any two
+// race we get "Duplicate script ID 'marketplace'" which leaves the SW in
+// a partially-initialized state. Module-level promise serializes them, and
+// we update-in-place when an existing registration is found instead of
+// the unregister-then-register dance.
+let registerInFlight = null;
+const CONTENT_SCRIPT_DEF = {
+  id: CONTENT_SCRIPT_ID,
+  matches: CONTENT_SCRIPT_MATCHES,
+  js: CONTENT_SCRIPT_FILES,
+  runAt: 'document_idle',
+  world: 'ISOLATED'
+};
+
 async function registerContentScripts() {
-  try {
+  if (registerInFlight) return registerInFlight;
+  registerInFlight = (async () => {
     try {
-      await chrome.scripting.unregisterContentScripts({ ids: [CONTENT_SCRIPT_ID] });
-    } catch {
-      // no prior registration; ignore
-    }
-    await chrome.scripting.registerContentScripts([
-      {
-        id: CONTENT_SCRIPT_ID,
-        matches: CONTENT_SCRIPT_MATCHES,
-        js: CONTENT_SCRIPT_FILES,
-        runAt: 'document_idle',
-        world: 'ISOLATED',
-        persistAcrossSessions: true
+      const existing = await chrome.scripting
+        .getRegisteredContentScripts({ ids: [CONTENT_SCRIPT_ID] })
+        .catch(() => []);
+      if (existing && existing.length > 0) {
+        await chrome.scripting.updateContentScripts([CONTENT_SCRIPT_DEF]);
+        console.log('[FB Reply Maker SW] content script updated in place');
+      } else {
+        await chrome.scripting.registerContentScripts([
+          { ...CONTENT_SCRIPT_DEF, persistAcrossSessions: true }
+        ]);
+        console.log('[FB Reply Maker SW] content script registered fresh');
       }
-    ]);
-    const after = await chrome.scripting.getRegisteredContentScripts();
-    console.log('[FB Reply Maker SW] registered scripts:', after);
-  } catch (err) {
-    console.error('[FB Reply Maker SW] registerContentScripts failed:', err);
-  }
+    } catch (err) {
+      console.error('[FB Reply Maker SW] registerContentScripts failed:', err?.message || err);
+    } finally {
+      registerInFlight = null;
+    }
+  })();
+  return registerInFlight;
 }
 
 (async () => {
