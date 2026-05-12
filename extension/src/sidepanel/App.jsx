@@ -4,6 +4,8 @@ import CategoryPicker from './components/CategoryPicker.jsx';
 import VariantCard from './components/VariantCard.jsx';
 import ErrorBanner from './components/ErrorBanner.jsx';
 import AutoDetectCard from './components/AutoDetectCard.jsx';
+import TabBar from './components/TabBar.jsx';
+import LeadsTab from './components/LeadsTab.jsx';
 import { generateReply } from './lib/api.js';
 import { loadAll } from './lib/storage.js';
 import { getThreadIdFromUrl, createOrUpdateLead } from './lib/leads.js';
@@ -30,6 +32,8 @@ export default function App() {
   const [settings, setSettings] = useState(null);
   const [autoDetect, setAutoDetect] = useState(null);
   const [isManual, setIsManual] = useState(false);
+  const [activeTab, setActiveTab] = useState('reply');
+  const [leadsBadgeCount, setLeadsBadgeCount] = useState(0);
 
   const isManualRef = useRef(false);
   const lastAutoFilledRef = useRef('');
@@ -65,6 +69,26 @@ export default function App() {
       setCategoryOverride(data.preferences?.defaultCategory || 'auto');
     });
   }, []);
+
+  useEffect(() => {
+    chrome.storage.local.get(['activeTab', 'unviewedQualifiedCount']).then((d) => {
+      if (d.activeTab === 'reply' || d.activeTab === 'leads') setActiveTab(d.activeTab);
+      if (typeof d.unviewedQualifiedCount === 'number') setLeadsBadgeCount(d.unviewedQualifiedCount);
+    });
+    function onChanged(changes, area) {
+      if (area !== 'local') return;
+      if (changes.unviewedQualifiedCount) {
+        setLeadsBadgeCount(changes.unviewedQualifiedCount.newValue || 0);
+      }
+    }
+    chrome.storage.onChanged.addListener(onChanged);
+    return () => chrome.storage.onChanged.removeListener(onChanged);
+  }, []);
+
+  function handleTabChange(tab) {
+    setActiveTab(tab);
+    chrome.storage.local.set({ activeTab: tab }).catch(() => {});
+  }
 
   useEffect(() => {
     requestCurrentThread();
@@ -225,51 +249,63 @@ export default function App() {
         </button>
       </header>
 
-      <AutoDetectCard
-        autoDetect={autoDetect}
-        isManual={isManual}
-        onUseThis={handleUseThis}
-        onRefresh={handleRefresh}
+      <TabBar
+        activeTab={activeTab}
+        onChange={handleTabChange}
+        leadsBadgeCount={leadsBadgeCount}
       />
 
-      <IncomingPanel value={incoming} onChange={handleIncomingChange} />
+      {activeTab === 'reply' ? (
+        <>
+          <AutoDetectCard
+            autoDetect={autoDetect}
+            isManual={isManual}
+            onUseThis={handleUseThis}
+            onRefresh={handleRefresh}
+          />
 
-      <CategoryPicker
-        categories={CATEGORIES}
-        value={categoryOverride}
-        onChange={setCategoryOverride}
-      />
+          <IncomingPanel value={incoming} onChange={handleIncomingChange} />
 
-      <button
-        className="btn-primary"
-        onClick={handleGenerate}
-        disabled={loading}
-      >
-        {loading ? 'Generating…' : 'Generate Replies'}
-      </button>
+          <CategoryPicker
+            categories={CATEGORIES}
+            value={categoryOverride}
+            onChange={setCategoryOverride}
+          />
 
-      {error && <ErrorBanner message={error} />}
-
-      {result && (
-        <section className="results">
-          <div className="result-header">
-            <span className="badge">{result.category}</span>
-            <p className="intent">{result.intent_summary}</p>
-          </div>
-          <p className="insert-tip">
-            Tip: click on the @name in FB's reply box to convert it to a real tag before sending.
-          </p>
-          <VariantCard kind="quick" text={result.variants.quick} />
-          <VariantCard kind="standard" text={result.variants.standard} />
-          <VariantCard kind="detailed" text={result.variants.detailed} />
           <button
-            className="btn-secondary"
+            className="btn-primary"
             onClick={handleGenerate}
             disabled={loading}
           >
-            Regenerate
+            {loading ? 'Generating…' : 'Generate Replies'}
           </button>
-        </section>
+
+          {error && <ErrorBanner message={error} />}
+
+          {result && (
+            <section className="results">
+              <div className="result-header">
+                <span className="badge">{result.category}</span>
+                <p className="intent">{result.intent_summary}</p>
+              </div>
+              <p className="insert-tip">
+                Tip: click on the @name in FB's reply box to convert it to a real tag before sending.
+              </p>
+              <VariantCard kind="quick" text={result.variants.quick} />
+              <VariantCard kind="standard" text={result.variants.standard} />
+              <VariantCard kind="detailed" text={result.variants.detailed} />
+              <button
+                className="btn-secondary"
+                onClick={handleGenerate}
+                disabled={loading}
+              >
+                Regenerate
+              </button>
+            </section>
+          )}
+        </>
+      ) : (
+        <LeadsTab />
       )}
     </div>
   );
