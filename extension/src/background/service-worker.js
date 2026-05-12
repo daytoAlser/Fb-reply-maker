@@ -134,9 +134,11 @@ function findTabForThread(threadId) {
 }
 
 // Phase F.1.5 — locate the FB Marketplace inbox tab the user has open.
-// Heuristic: any tab whose URL matches one of the inbox patterns, sorted by
-// lastAccessed desc (Chrome 121+ exposes this; we fall back to active/index).
-// Returns the chrome.tabs.Tab object or null.
+//
+// Match patterns are intentionally broad so chrome.tabs.query returns every
+// candidate; we then rank by URL category so the real /marketplace/inbox
+// tab wins over business.facebook.com Pages Manager when the user has both
+// open. (Pages Manager is a fallback for users without a personal inbox.)
 const INBOX_TAB_URL_PATTERNS = [
   'https://*.facebook.com/marketplace/inbox*',
   'https://*.facebook.com/marketplace/inbox/*',
@@ -147,23 +149,44 @@ const INBOX_TAB_URL_PATTERNS = [
   'https://*.messenger.com/t/*'
 ];
 
-async function findInboxTab() {
+// Higher score = better match. /marketplace/inbox is the canonical inbox URL
+// and always wins; business.facebook.com is last-resort.
+function scoreInboxTabUrl(url) {
+  if (!url || typeof url !== 'string') return 0;
+  if (/\/\/[^/]*facebook\.com\/marketplace\/inbox/i.test(url)) return 100;
+  if (/\/\/[^/]*facebook\.com\/marketplace\/t\//i.test(url)) return 80;
+  if (/\/\/[^/]*messenger\.com\/marketplace/i.test(url)) return 60;
+  if (/\/\/[^/]*messenger\.com\/t\//i.test(url)) return 50;
+  if (/\/\/business\.facebook\.com\/latest\/inbox/i.test(url)) return 20;
+  return 0;
+}
+
+function rankInboxTabs(tabs) {
+  return tabs.slice().sort((a, b) => {
+    const sa = scoreInboxTabUrl(a.url);
+    const sb = scoreInboxTabUrl(b.url);
+    if (sb !== sa) return sb - sa;
+    const la = typeof a.lastAccessed === 'number' ? a.lastAccessed : 0;
+    const lb = typeof b.lastAccessed === 'number' ? b.lastAccessed : 0;
+    if (lb !== la) return lb - la;
+    if ((b.active ? 1 : 0) !== (a.active ? 1 : 0)) return (b.active ? 1 : 0) - (a.active ? 1 : 0);
+    return (b.id || 0) - (a.id || 0);
+  });
+}
+
+async function findInboxTabs() {
   try {
     const tabs = await chrome.tabs.query({ url: INBOX_TAB_URL_PATTERNS });
-    if (!tabs || tabs.length === 0) return null;
-    const ranked = tabs.slice().sort((a, b) => {
-      const la = typeof a.lastAccessed === 'number' ? a.lastAccessed : 0;
-      const lb = typeof b.lastAccessed === 'number' ? b.lastAccessed : 0;
-      if (lb !== la) return lb - la;
-      if ((b.active ? 1 : 0) !== (a.active ? 1 : 0)) return (b.active ? 1 : 0) - (a.active ? 1 : 0);
-      return (b.id || 0) - (a.id || 0);
-    });
-    const picked = ranked[0];
-    console.log('[FB Reply Maker SW] inbox tab pick:', picked?.id, picked?.url, '(of', tabs.length, 'candidates)');
-    return picked;
+    if (!tabs || tabs.length === 0) return [];
+    const ranked = rankInboxTabs(tabs);
+    console.log(
+      '[FB Reply Maker SW] inbox candidates:',
+      ranked.map((t) => ({ id: t.id, score: scoreInboxTabUrl(t.url), url: t.url }))
+    );
+    return ranked;
   } catch (err) {
-    console.warn('[FB Reply Maker SW] findInboxTab failed:', err?.message || err);
-    return null;
+    console.warn('[FB Reply Maker SW] findInboxTabs failed:', err?.message || err);
+    return [];
   }
 }
 
@@ -395,29 +418,52 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   // Phase F.1.5 — fullscreen → SW → FB content script: scrape inbox list.
-  // Returns { ok, rows, tabId, tabUrl, ... } or { ok: false, reason }.
+  //
+  // Walks the ranked candidate list so the real /marketplace/inbox tab wins
+  // over Pages Manager. If a candidate returns "Receiving end does not
+  // exist" (content script was registered after the tab loaded), we attempt
+  // a one-shot executeScript injection and retry once before moving on.
   if (msg?.type === 'F1_5_GET_INBOX') {
     (async () => {
-      const tab = await findInboxTab();
-      if (!tab || !tab.id) {
+      const candidates = await findInboxTabs();
+      if (candidates.length === 0) {
         sendResponse({ ok: false, reason: 'tab_not_found' });
         return;
       }
-      try {
-        const res = await chrome.tabs.sendMessage(tab.id, { type: 'GET_INBOX_LIST' });
-        if (!res || typeof res !== 'object') {
-          sendResponse({ ok: false, reason: 'no_response', tabId: tab.id, tabUrl: tab.url });
-          return;
+      const attempts = [];
+      for (const tab of candidates) {
+        if (!tab.id) continue;
+        const attempt = { tabId: tab.id, tabUrl: tab.url };
+        try {
+          const res = await chrome.tabs.sendMessage(tab.id, { type: 'GET_INBOX_LIST' });
+          if (res && typeof res === 'object') {
+            sendResponse({ ...res, tabId: tab.id, tabUrl: tab.url, attempts });
+            return;
+          }
+          attempt.reason = 'no_response';
+        } catch (err) {
+          attempt.reason = err?.message || 'rpc_failed';
+          // If the content script just isn't there yet, inject and retry once.
+          if (/Receiving end does not exist|Could not establish connection/i.test(attempt.reason)) {
+            try {
+              await chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                files: CONTENT_SCRIPT_FILES
+              });
+              const res2 = await chrome.tabs.sendMessage(tab.id, { type: 'GET_INBOX_LIST' });
+              if (res2 && typeof res2 === 'object') {
+                sendResponse({ ...res2, tabId: tab.id, tabUrl: tab.url, injected: true, attempts });
+                return;
+              }
+              attempt.injectRetry = 'no_response';
+            } catch (e2) {
+              attempt.injectRetry = e2?.message || 'inject_failed';
+            }
+          }
         }
-        sendResponse({ ...res, tabId: tab.id, tabUrl: tab.url });
-      } catch (err) {
-        sendResponse({
-          ok: false,
-          reason: err?.message || 'rpc_failed',
-          tabId: tab.id,
-          tabUrl: tab.url
-        });
+        attempts.push(attempt);
       }
+      sendResponse({ ok: false, reason: 'all_candidates_failed', attempts });
     })();
     return true;
   }
