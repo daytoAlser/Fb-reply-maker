@@ -12,6 +12,7 @@ import { loadAll } from './lib/storage.js';
 import {
   getThreadIdFromUrl,
   createOrUpdateLead,
+  getLeadByThreadId,
   migrateLeadsToSupabase,
   retrySyncPending
 } from './lib/leads.js';
@@ -51,7 +52,14 @@ export default function App() {
   }
 
   function applyAutoDetect(payload) {
-    setAutoDetect(payload);
+    setAutoDetect((prev) => {
+      // Never let a placeholder (no_cache / no_thread_detected / no_active_tab)
+      // overwrite a previously successful scrape. The SW loses its tabState
+      // when it sleeps, so GET_CURRENT_THREAD can briefly return empty while
+      // the content script catches up.
+      if (payload?.status !== 'ok' && prev?.status === 'ok') return prev;
+      return payload;
+    });
     if (
       payload?.status === 'ok' &&
       payload.latestIncoming &&
@@ -68,6 +76,17 @@ export default function App() {
       if (chrome.runtime.lastError) return;
       applyAutoDetect(res);
     });
+  }
+
+  function rescanAndRefresh() {
+    // Forces the content script to rebroadcast its current scrape, then
+    // re-queries the SW. Used on mount and on tab change so an idled SW
+    // does not leave us looking at stale or empty autoDetect state.
+    chrome.runtime.sendMessage({ type: 'REQUEST_RESCAN' }, () => {
+      if (chrome.runtime.lastError) return;
+      setTimeout(requestCurrentThread, 250);
+    });
+    requestCurrentThread();
   }
 
   useEffect(() => {
@@ -113,7 +132,7 @@ export default function App() {
   }
 
   useEffect(() => {
-    requestCurrentThread();
+    rescanAndRefresh();
 
     function onMessage(msg) {
       if (msg?.type !== 'THREAD_BROADCAST') return;
@@ -127,13 +146,13 @@ export default function App() {
     chrome.runtime.onMessage.addListener(onMessage);
 
     function onActivated() {
-      requestCurrentThread();
+      rescanAndRefresh();
     }
     chrome.tabs.onActivated.addListener(onActivated);
 
     function onUpdated(_tabId, changeInfo) {
       if (changeInfo.status === 'complete' || changeInfo.url) {
-        requestCurrentThread();
+        rescanAndRefresh();
       }
     }
     chrome.tabs.onUpdated.addListener(onUpdated);
@@ -196,19 +215,45 @@ export default function App() {
       const listingTitle = (autoDetect?.listingTitle || '').trim();
       const userName = (settings.userName || '').trim();
 
-      if (!partnerName) {
-        console.warn('[FB Reply Maker SP] WARNING: partnerName missing, opener will degrade');
-      }
       if (!userName) {
         console.warn('[FB Reply Maker SP] WARNING: userName missing — set it in Options to personalize opener');
+      }
+
+      // Pull the FB thread URL from the active tab first; this is the most
+      // reliable source for thread_id. Fall back to autoDetect.url if the
+      // tab query fails for any reason.
+      let activeTabUrl = null;
+      try {
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        activeTabUrl = activeTab?.url || null;
+      } catch {
+        // ignore; falls through to autoDetect.url
+      }
+      const fbThreadUrl = activeTabUrl || autoDetect?.url || null;
+      const threadId = getThreadIdFromUrl(fbThreadUrl);
+
+      // Server-side mergeCapturedFields needs the lead's existing capture so
+      // we never overwrite a known vehicle / look / height with a null from
+      // a later turn that did not re-extract them.
+      let existingCapturedFields = null;
+      if (threadId) {
+        try {
+          const existingLead = await getLeadByThreadId(threadId);
+          existingCapturedFields = existingLead?.capturedFields || null;
+        } catch (err) {
+          console.warn('[FB Reply Maker SP] read existing lead failed:', err?.message);
+        }
       }
 
       console.log('[FB Reply Maker SP] request payload:', {
         hasMessage: !!incoming,
         messageLength: incoming?.length,
         userName: settings?.userName,
-        partnerName: autoDetect?.partnerName,
-        listingTitle: autoDetect?.listingTitle,
+        partnerName: partnerName || null,
+        listingTitle: listingTitle || null,
+        threadId: threadId || null,
+        fbThreadUrl: fbThreadUrl || null,
+        hasExistingCaptured: !!existingCapturedFields,
         historyLength: conversationHistory?.length,
         category: categoryOverride
       });
@@ -224,7 +269,10 @@ export default function App() {
         partnerName: partnerName || undefined,
         listingTitle: listingTitle || undefined,
         location: settings.location || undefined,
-        overrideFlags
+        overrideFlags,
+        thread_id: threadId || undefined,
+        fb_thread_url: fbThreadUrl || undefined,
+        existing_captured_fields: existingCapturedFields || undefined
       });
 
       if (overrideFlags) setOverrideActive(true);
@@ -234,16 +282,16 @@ export default function App() {
         lead_status_suggestion: res?.lead_status_suggestion,
         conversation_stage: res?.conversation_stage,
         customerType: res?.extracted_fields?.customerType,
+        flags: res?.flags,
         extracted_fields: res?.extracted_fields
       });
 
-      const threadId = getThreadIdFromUrl(autoDetect?.url);
       if (threadId) {
         try {
           const lead = await createOrUpdateLead({
             threadId,
             partnerName: autoDetect?.partnerName || null,
-            fbThreadUrl: autoDetect?.url || null,
+            fbThreadUrl,
             listingTitle: autoDetect?.listingTitle || null,
             adType: res?.ad_type || 'unknown',
             extractedFields: res?.extracted_fields || {},
@@ -253,12 +301,12 @@ export default function App() {
             overrideFlags,
             customerMessage: incoming
           });
-          console.log('[FB Reply Maker SP] lead updated:', lead);
+          console.log('[FB Reply Maker SP] lead updated:', lead?.threadId);
         } catch (err) {
           console.error('[FB Reply Maker SP] lead update failed:', err);
         }
       } else {
-        console.log('[FB Reply Maker SP] no threadId in autoDetect.url, skipping lead update — url:', autoDetect?.url);
+        console.log('[FB Reply Maker SP] no threadId on active tab URL, skipping lead update — url:', fbThreadUrl);
       }
 
       setResult(res);

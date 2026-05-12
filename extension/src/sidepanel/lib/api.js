@@ -9,7 +9,10 @@ export async function generateReply({
   partnerName,
   listingTitle,
   location,
-  overrideFlags
+  overrideFlags,
+  thread_id,
+  fb_thread_url,
+  existing_captured_fields
 }) {
   const body = { message, context, categoryOverride };
   if (Array.isArray(conversationHistory) && conversationHistory.length > 0) {
@@ -29,6 +32,15 @@ export async function generateReply({
   }
   if (overrideFlags === true) {
     body.override_flags = true;
+  }
+  if (typeof thread_id === 'string' && thread_id) {
+    body.thread_id = thread_id;
+  }
+  if (typeof fb_thread_url === 'string' && fb_thread_url) {
+    body.fb_thread_url = fb_thread_url;
+  }
+  if (existing_captured_fields && typeof existing_captured_fields === 'object') {
+    body.existing_captured_fields = existing_captured_fields;
   }
 
   console.log('[FB Reply Maker API] sending body:', { ...body, secret: '[REDACTED]' });
