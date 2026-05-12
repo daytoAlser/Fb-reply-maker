@@ -205,6 +205,8 @@ export default function App() {
       console.log('[FB Reply Maker SP] response meta:', {
         ad_type: res?.ad_type,
         lead_status_suggestion: res?.lead_status_suggestion,
+        conversation_stage: res?.conversation_stage,
+        customerType: res?.extracted_fields?.customerType,
         extracted_fields: res?.extracted_fields
       });
 
@@ -218,7 +220,8 @@ export default function App() {
             listingTitle: autoDetect?.listingTitle || null,
             adType: res?.ad_type || 'unknown',
             extractedFields: res?.extracted_fields || {},
-            leadStatusSuggestion: res?.lead_status_suggestion || null
+            leadStatusSuggestion: res?.lead_status_suggestion || null,
+            conversationStage: res?.conversation_stage || null
           });
           console.log('[FB Reply Maker SP] lead updated:', lead);
         } catch (err) {

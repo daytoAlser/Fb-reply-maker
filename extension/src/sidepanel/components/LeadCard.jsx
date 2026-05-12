@@ -28,6 +28,20 @@ const FIELD_LABELS = {
   intent: 'INTENT'
 };
 
+const CUSTOMER_TYPE_LABELS = {
+  tire_kicker: 'TIRE KICKER',
+  researched: 'RESEARCHED',
+  urgent: 'URGENT',
+  gift_buyer: 'GIFT BUYER'
+};
+
+const CUSTOMER_TYPE_CLASSES = {
+  tire_kicker: 'customer-chip customer-chip-warn',
+  researched: 'customer-chip customer-chip-info',
+  urgent: 'customer-chip customer-chip-amber',
+  gift_buyer: 'customer-chip customer-chip-success'
+};
+
 function formatRelative(ts) {
   if (!ts) return '';
   const diff = Date.now() - ts;
@@ -62,7 +76,12 @@ export default function LeadCard({ lead, onOpenThread, onStatusChange, onDelete 
   }, [menuOpen]);
 
   const captured = lead.capturedFields || {};
-  const fieldEntries = Object.entries(captured).filter(([, v]) => isMeaningful(v));
+  const customerType = captured.customerType;
+  const showCustomerChip =
+    isMeaningful(customerType) && customerType !== 'standard' && customerType !== 'unknown';
+  const fieldEntries = Object.entries(captured).filter(
+    ([k, v]) => k !== 'customerType' && isMeaningful(v)
+  );
 
   function handleMenuAction(action) {
     setMenuOpen(false);
@@ -116,6 +135,14 @@ export default function LeadCard({ lead, onOpenThread, onStatusChange, onDelete 
 
       {lead.listingTitle && (
         <p className="lead-listing">{lead.listingTitle}</p>
+      )}
+
+      {showCustomerChip && (
+        <div className="lead-fields">
+          <span className={CUSTOMER_TYPE_CLASSES[customerType] || 'customer-chip'}>
+            {CUSTOMER_TYPE_LABELS[customerType] || String(customerType).toUpperCase()}
+          </span>
+        </div>
       )}
 
       {fieldEntries.length > 0 && (

@@ -30,7 +30,8 @@ function emptyCapturedFields() {
     lookPreference: null,
     rideHeight: null,
     tireSize: null,
-    intent: null
+    intent: null,
+    customerType: null
   };
 }
 
@@ -111,7 +112,8 @@ export async function createOrUpdateLead({
   listingTitle,
   adType,
   extractedFields,
-  leadStatusSuggestion
+  leadStatusSuggestion,
+  conversationStage
 }) {
   if (!threadId) {
     console.warn('[FB Reply Maker leads] createOrUpdateLead: missing threadId, skipping');
@@ -144,6 +146,9 @@ export async function createOrUpdateLead({
     listingTitle: listingTitle || existing?.listingTitle || null,
     adType: effectiveAdType,
     capturedFields: mergedFields,
+    conversationStage: (isMeaningful(conversationStage) && conversationStage !== 'unknown')
+      ? conversationStage
+      : (existing?.conversationStage || null),
     status: newStatus,
     createdAt: existing?.createdAt || now,
     lastUpdated: now,

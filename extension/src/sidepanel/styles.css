@@ -820,6 +820,41 @@ html, body {
   word-break: break-word;
 }
 
+.customer-chip {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  padding: 3px 8px;
+  border: 1px solid;
+  text-transform: uppercase;
+  display: inline-block;
+}
+
+.customer-chip-warn {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.customer-chip-info {
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--info);
+  border-color: var(--info);
+}
+
+.customer-chip-amber {
+  background: rgba(245, 158, 11, 0.14);
+  color: var(--accent);
+  border-color: var(--accent-dim);
+}
+
+.customer-chip-success {
+  background: rgba(16, 185, 129, 0.12);
+  color: var(--success);
+  border-color: var(--success);
+}
+
 .lead-card-foot {
   display: flex;
   justify-content: flex-start;
