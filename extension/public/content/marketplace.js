@@ -427,6 +427,49 @@ function findInboxRowContainer(anchor) {
   return anchor.closest('[role="row"], [role="listitem"], [role="link"]') || anchor.parentElement || anchor;
 }
 
+// FB Messenger renders presence indicators ("Active now", "Active 5m ago")
+// as the first text line inside each thread row. Strip those so the
+// partner-name slot doesn't get clobbered.
+const INBOX_ROW_NOISE = [
+  /^Active( now| \d+\s?[mhd] ago)?$/i,
+  /^Online$/i,
+  /^Offline$/i,
+  /^Unread$/i,
+  /^Sent$/i,
+  /^Delivered$/i,
+  /^Seen$/i,
+  /^Typing\.?\.?\.?$/i,
+  /^\s*$/
+];
+
+function stripRowNoise(lines) {
+  return lines.filter((s) => !INBOX_ROW_NOISE.some((re) => re.test(s)));
+}
+
+// Pull the partner name out of an anchor's aria-label when FB provides one.
+// Common forms: "Open chat with John Doe", "Conversation with John Doe",
+// "Chat with John Doe", "John Doe · Buyer". We strip the leading verb and
+// anything past a trailing role tag.
+const ARIA_NAME_PATTERNS = [
+  /^(?:Open\s+chat\s+with|Conversation\s+with|Chat\s+with|Message\s+from)\s+(.+?)(?:\s*[·•:-]\s*.+)?$/i,
+  /^(.+?)\s*[·•]\s*(?:Buyer|Seller|Open conversation|Unread)/i
+];
+
+function extractAriaName(...labels) {
+  for (const raw of labels) {
+    const label = (raw || '').replace(/\s+/g, ' ').trim();
+    if (!label) continue;
+    for (const re of ARIA_NAME_PATTERNS) {
+      const m = label.match(re);
+      if (m && m[1]) {
+        const name = m[1].replace(/\s+/g, ' ').trim();
+        if (name.length >= 2 && name.length <= 80) return name;
+      }
+    }
+  }
+  return null;
+}
+
 function classifyThreadHref(href) {
   if (!href) return null;
   const extractors = INBOX_SELECTORS.threadIdExtractors || [
@@ -461,25 +504,32 @@ function scrapeInboxList() {
     const raw = ((row && row.innerText) || (a.innerText || '')).trim();
     if (!raw) continue;
 
-    const lines = raw.split('\n').map((s) => s.trim()).filter(Boolean);
+    const allLines = raw.split('\n').map((s) => s.trim()).filter(Boolean);
+    const lines = stripRowNoise(allLines);
 
-    // Aria-label-based unread detection: FB sometimes annotates the row or
-    // anchor with "Unread" for screen readers.
-    const aria = [
-      a.getAttribute('aria-label') || '',
-      row?.getAttribute?.('aria-label') || ''
-    ].join(' ');
-    const unread = /\bunread\b/i.test(aria);
+    const anchorAria = a.getAttribute('aria-label') || '';
+    const rowAria = row?.getAttribute?.('aria-label') || '';
+    const ariaName = extractAriaName(anchorAria, rowAria);
+    const unread = /\bunread\b/i.test(anchorAria + ' ' + rowAria);
+
+    // Slot mapping. Marketplace rows: [name, listing, snippet, time].
+    // Messenger rows: [name, snippet, time]. aria-label "Open chat with X"
+    // is the highest-confidence partner name; fall back to lines[0].
+    const partnerName = ariaName || lines[0] || null;
+    const listingTitle = classified.source === 'marketplace' ? (lines[1] || null) : null;
+    const snippetIdx = classified.source === 'marketplace' ? 2 : 1;
+    const timeIdx = classified.source === 'marketplace' ? 3 : 2;
 
     seen.set(key, {
       thread_id: classified.thread_id,
       source: classified.source,
-      partner_name: lines[0] || null,
-      listing_title: classified.source === 'marketplace' ? (lines[1] || null) : null,
-      snippet: lines[classified.source === 'marketplace' ? 2 : 1] || null,
-      last_activity_relative: lines[classified.source === 'marketplace' ? 3 : 2] || null,
+      partner_name: partnerName,
+      listing_title: listingTitle,
+      snippet: lines[snippetIdx] || null,
+      last_activity_relative: lines[timeIdx] || null,
       unread,
       raw_text: raw,
+      aria_label: anchorAria || rowAria || null,
       href
     });
   }
