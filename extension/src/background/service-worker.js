@@ -55,7 +55,12 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 const CONTENT_SCRIPT_ID = 'marketplace';
-const CONTENT_SCRIPT_FILE = 'content/marketplace.js';
+// Phase F.1.5: selectors.js MUST come first so globalThis.FBRM_SELECTORS
+// exists before marketplace.js runs. Same isolated world, sequential execution.
+const CONTENT_SCRIPT_FILES = [
+  'content/selectors.js',
+  'content/marketplace.js'
+];
 const CONTENT_SCRIPT_MATCHES = [
   'https://*.facebook.com/*',
   'https://*.messenger.com/*'
@@ -72,7 +77,7 @@ async function registerContentScripts() {
       {
         id: CONTENT_SCRIPT_ID,
         matches: CONTENT_SCRIPT_MATCHES,
-        js: [CONTENT_SCRIPT_FILE],
+        js: CONTENT_SCRIPT_FILES,
         runAt: 'document_idle',
         world: 'ISOLATED',
         persistAcrossSessions: true
@@ -126,6 +131,40 @@ function findTabForThread(threadId) {
     if (id === threadId) return tabId;
   }
   return null;
+}
+
+// Phase F.1.5 — locate the FB Marketplace inbox tab the user has open.
+// Heuristic: any tab whose URL matches one of the inbox patterns, sorted by
+// lastAccessed desc (Chrome 121+ exposes this; we fall back to active/index).
+// Returns the chrome.tabs.Tab object or null.
+const INBOX_TAB_URL_PATTERNS = [
+  'https://*.facebook.com/marketplace/inbox*',
+  'https://*.facebook.com/marketplace/inbox/*',
+  'https://*.facebook.com/marketplace/t/*',
+  'https://business.facebook.com/latest/inbox*',
+  'https://business.facebook.com/latest/inbox/*',
+  'https://*.messenger.com/marketplace/*',
+  'https://*.messenger.com/t/*'
+];
+
+async function findInboxTab() {
+  try {
+    const tabs = await chrome.tabs.query({ url: INBOX_TAB_URL_PATTERNS });
+    if (!tabs || tabs.length === 0) return null;
+    const ranked = tabs.slice().sort((a, b) => {
+      const la = typeof a.lastAccessed === 'number' ? a.lastAccessed : 0;
+      const lb = typeof b.lastAccessed === 'number' ? b.lastAccessed : 0;
+      if (lb !== la) return lb - la;
+      if ((b.active ? 1 : 0) !== (a.active ? 1 : 0)) return (b.active ? 1 : 0) - (a.active ? 1 : 0);
+      return (b.id || 0) - (a.id || 0);
+    });
+    const picked = ranked[0];
+    console.log('[FB Reply Maker SW] inbox tab pick:', picked?.id, picked?.url, '(of', tabs.length, 'candidates)');
+    return picked;
+  } catch (err) {
+    console.warn('[FB Reply Maker SW] findInboxTab failed:', err?.message || err);
+    return null;
+  }
 }
 
 const CACHE_KEY_PREFIX = 'cached_variants:';
@@ -350,6 +389,34 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ ok: true });
       } catch (err) {
         sendResponse({ ok: false, reason: err?.message || 'no_content_script' });
+      }
+    })();
+    return true;
+  }
+
+  // Phase F.1.5 — fullscreen → SW → FB content script: scrape inbox list.
+  // Returns { ok, rows, tabId, tabUrl, ... } or { ok: false, reason }.
+  if (msg?.type === 'F1_5_GET_INBOX') {
+    (async () => {
+      const tab = await findInboxTab();
+      if (!tab || !tab.id) {
+        sendResponse({ ok: false, reason: 'tab_not_found' });
+        return;
+      }
+      try {
+        const res = await chrome.tabs.sendMessage(tab.id, { type: 'GET_INBOX_LIST' });
+        if (!res || typeof res !== 'object') {
+          sendResponse({ ok: false, reason: 'no_response', tabId: tab.id, tabUrl: tab.url });
+          return;
+        }
+        sendResponse({ ...res, tabId: tab.id, tabUrl: tab.url });
+      } catch (err) {
+        sendResponse({
+          ok: false,
+          reason: err?.message || 'rpc_failed',
+          tabId: tab.id,
+          tabUrl: tab.url
+        });
       }
     })();
     return true;

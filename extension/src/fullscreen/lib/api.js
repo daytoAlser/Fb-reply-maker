@@ -57,6 +57,20 @@ export async function requestRegenerate(threadId) {
   });
 }
 
+// Phase F.1.5 step 1 — debug-only inbox scrape RPC. UI wiring (replacing the
+// Supabase-sourced left pane with this live list) happens in step 2.
+export async function getInboxList() {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'F1_5_GET_INBOX' }, (res) => {
+      if (chrome.runtime.lastError) {
+        resolve({ ok: false, reason: chrome.runtime.lastError.message });
+        return;
+      }
+      resolve(res || { ok: false, reason: 'no_response' });
+    });
+  });
+}
+
 export async function focusFbTab(threadId) {
   if (!threadId) return { ok: false, reason: 'no_thread_id' };
   return new Promise((resolve) => {

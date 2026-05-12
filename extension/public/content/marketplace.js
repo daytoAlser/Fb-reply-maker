@@ -1,9 +1,20 @@
 console.log("[FB Reply Maker] content script v2 (strict sender) loaded on " + location.href);
 
+// Pull centralized selectors if selectors.js loaded first (registered ahead
+// of this file in the SW).  Fall back to inline defaults so a stale install
+// without selectors.js still works for the existing thread-scrape path.
+const FBRM = globalThis.FBRM_SELECTORS || null;
 const SELECTORS = {
-  threadContainer: '[role="main"]',
-  threadHeader: 'h1, h2',
-  replyTextbox: '[contenteditable="true"][role="textbox"]'
+  threadContainer: FBRM?.thread?.container || '[role="main"]',
+  threadHeader: FBRM?.thread?.header || 'h1, h2',
+  replyTextbox: FBRM?.thread?.replyTextbox || '[contenteditable="true"][role="textbox"]'
+};
+const INBOX_SELECTORS = FBRM?.inbox || {
+  threadAnchor: 'a[href*="/marketplace/t/"]',
+  rowAncestorRoles: ['row', 'listitem', 'link'],
+  threadIdFromHref: /\/marketplace\/t\/([^/?#]+)/,
+  isInboxPathname: (p) =>
+    /\/marketplace\/(inbox|t\/)/i.test(p || '') || /\/latest\/inbox/i.test(p || '')
 };
 
 // Patterns that pull (sender, text) from a message aria-label.
@@ -381,6 +392,77 @@ function fireActivationBurst() {
   );
 }
 
+// Phase F.1.5 — inbox list scrape.
+//
+// Walks every <a href="/marketplace/t/<id>/..."> in the DOM, finds its
+// nearest row container, and pulls out partner / listing / snippet / time /
+// unread from the row's text + aria-labels.  Returns only what is currently
+// rendered — does NOT force a scroll.  Step 3 (SCROLL_INBOX_DOWN) handles
+// virtualized loading.
+//
+// FB does not put stable class names on the rows, so the strategy is:
+//   1. Anchor on the thread-id href (stable: it is the routing primitive).
+//   2. Walk up to the nearest `role="row"` / `role="listitem"` / `role="link"`
+//      ancestor — that is the clickable row container.
+//   3. innerText of the row, split on newlines, gives 2-4 useful lines.
+//      Heuristic mapping: line0 = partner, line1 = listing, line2 = snippet,
+//      line3 = time.  Real FB layouts vary; we capture raw_text too so we
+//      can refine the parse without redeploying selectors.
+//   4. Unread is detected from aria-labels on the anchor or row that contain
+//      the word "unread" (FB does this for screen readers) and as a fallback
+//      from a bold-font marker on the partner name.
+function findInboxRowContainer(anchor) {
+  const roles = new Set(INBOX_SELECTORS.rowAncestorRoles || []);
+  let node = anchor;
+  for (let depth = 0; depth < 10 && node && node.parentElement; depth++) {
+    const role = (node.getAttribute && node.getAttribute('role')) || '';
+    if (roles.has(role)) return node;
+    node = node.parentElement;
+  }
+  return anchor.closest('[role="row"], [role="listitem"], [role="link"]') || anchor.parentElement || anchor;
+}
+
+function scrapeInboxList() {
+  const anchors = document.querySelectorAll(INBOX_SELECTORS.threadAnchor || 'a[href*="/marketplace/t/"]');
+  const seen = new Map();
+  const idPattern = INBOX_SELECTORS.threadIdFromHref || /\/marketplace\/t\/([^/?#]+)/;
+
+  for (const a of anchors) {
+    const href = a.getAttribute('href') || '';
+    const m = href.match(idPattern);
+    if (!m) continue;
+    const threadId = m[1];
+    if (seen.has(threadId)) continue;
+
+    const row = findInboxRowContainer(a);
+    const raw = ((row && row.innerText) || (a.innerText || '')).trim();
+    if (!raw) continue;
+
+    const lines = raw.split('\n').map((s) => s.trim()).filter(Boolean);
+
+    // Aria-label-based unread detection: FB sometimes annotates the row or
+    // anchor with "Unread" for screen readers.
+    const aria = [
+      a.getAttribute('aria-label') || '',
+      row?.getAttribute?.('aria-label') || ''
+    ].join(' ');
+    const unread = /\bunread\b/i.test(aria);
+
+    seen.set(threadId, {
+      thread_id: threadId,
+      partner_name: lines[0] || null,
+      listing_title: lines[1] || null,
+      snippet: lines[2] || null,
+      last_activity_relative: lines[3] || null,
+      unread,
+      raw_text: raw,
+      href
+    });
+  }
+
+  return [...seen.values()];
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'INSERT_REPLY') {
     const text = msg.text || '';
@@ -403,6 +485,39 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     sendResponse({ ok: true });
     return;
   }
+  // Phase F.1.5: scrape the currently rendered FB inbox list. Read-only —
+  // never clicks or scrolls. Returns whatever rows are in the DOM at scrape
+  // time; SCROLL_INBOX_DOWN (step 3) handles virtualized loading.
+  if (msg?.type === 'GET_INBOX_LIST') {
+    try {
+      const pathname = location.pathname || '';
+      const isInbox = (INBOX_SELECTORS.isInboxPathname || (() => true))(pathname);
+      const rows = scrapeInboxList();
+      if (rows.length === 0 && !isInbox) {
+        sendResponse({
+          ok: false,
+          reason: 'not_inbox',
+          url: location.href,
+          pathname
+        });
+        return;
+      }
+      console.log('[FB Reply Maker] GET_INBOX_LIST scraped', rows.length, 'rows from', pathname);
+      sendResponse({
+        ok: true,
+        rows,
+        url: location.href,
+        pathname,
+        layoutVersion: FBRM?.layoutVersion || 'inline-default',
+        capturedAt: Date.now()
+      });
+    } catch (err) {
+      console.warn('[FB Reply Maker] GET_INBOX_LIST threw:', err?.message);
+      sendResponse({ ok: false, reason: err?.message || 'scrape_failed' });
+    }
+    return;
+  }
+
   // Phase F.1: full-history RPC for the fullscreen thread view. Returns the
   // most recent MAX_HISTORY_MESSAGES with sender + text, plus thread metadata.
   if (msg?.type === 'GET_THREAD_HISTORY') {
