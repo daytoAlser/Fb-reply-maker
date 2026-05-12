@@ -42,6 +42,19 @@ function emptyCapturedFields() {
   };
 }
 
+// Phase E.0: default shape for new state-aware fields. Existing leads that
+// pre-date Phase E read these as undefined and the UI/sync layers treat
+// undefined and the defaults below as equivalent.
+function defaultPhaseEFields() {
+  return {
+    productsOfInterest: [],
+    conversationMode: 'standard',
+    lastCustomerMessageAt: null,
+    silenceDurationMs: 0,
+    manualOptionsLog: []
+  };
+}
+
 function isMeaningful(v) {
   return v !== null && v !== undefined && v !== '' && v !== 'null';
 }
@@ -287,6 +300,8 @@ export async function createOrUpdateLead({
     now
   });
 
+  const phaseEDefaults = defaultPhaseEFields();
+
   const lead = {
     threadId,
     partnerName: partnerName || existing?.partnerName || null,
@@ -300,6 +315,18 @@ export async function createOrUpdateLead({
     status: newStatus,
     open_flags: openFlags,
     flag_history: history,
+    // Phase E.0: state-aware fields. Carry-forward existing values when present.
+    productsOfInterest: Array.isArray(existing?.productsOfInterest)
+      ? existing.productsOfInterest
+      : phaseEDefaults.productsOfInterest,
+    conversationMode: existing?.conversationMode || phaseEDefaults.conversationMode,
+    lastCustomerMessageAt: existing?.lastCustomerMessageAt ?? phaseEDefaults.lastCustomerMessageAt,
+    silenceDurationMs: typeof existing?.silenceDurationMs === 'number'
+      ? existing.silenceDurationMs
+      : phaseEDefaults.silenceDurationMs,
+    manualOptionsLog: Array.isArray(existing?.manualOptionsLog)
+      ? existing.manualOptionsLog
+      : phaseEDefaults.manualOptionsLog,
     createdAt: existing?.createdAt || now,
     lastUpdated: now,
     notes: existing?.notes || '',

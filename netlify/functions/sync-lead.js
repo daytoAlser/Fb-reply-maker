@@ -17,6 +17,27 @@ function mapLeadToRow(lead, threadId) {
   if (Array.isArray(lead.flag_history)) row.flag_history = lead.flag_history;
   if (typeof lead.notes === 'string') row.notes = lead.notes;
   if (lead.createdAt) row.created_at = new Date(lead.createdAt).toISOString();
+
+  // Phase E.0: state-aware fields. Only write when the local lead actually
+  // carries a value so we don't clobber a Supabase-side update with an
+  // undefined client field. Pre-Phase-E leads simply omit these and the
+  // Supabase column defaults take over.
+  if (Array.isArray(lead.productsOfInterest)) {
+    row.products_of_interest = lead.productsOfInterest;
+  }
+  if (typeof lead.conversationMode === 'string' && lead.conversationMode) {
+    row.conversation_mode = lead.conversationMode;
+  }
+  if (lead.lastCustomerMessageAt) {
+    row.last_customer_message_at = new Date(lead.lastCustomerMessageAt).toISOString();
+  }
+  if (typeof lead.silenceDurationMs === 'number') {
+    row.silence_duration_ms = lead.silenceDurationMs;
+  }
+  if (Array.isArray(lead.manualOptionsLog)) {
+    row.manual_options_log = lead.manualOptionsLog;
+  }
+
   return row;
 }
 
