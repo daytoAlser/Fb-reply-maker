@@ -7,7 +7,8 @@ export async function generateReply({
   conversationHistory,
   userName,
   partnerName,
-  listingTitle
+  listingTitle,
+  location
 }) {
   const body = { message, context, categoryOverride };
   if (Array.isArray(conversationHistory) && conversationHistory.length > 0) {
@@ -21,6 +22,9 @@ export async function generateReply({
   }
   if (typeof listingTitle === 'string' && listingTitle.trim()) {
     body.listingTitle = listingTitle.trim();
+  }
+  if (location && typeof location === 'object') {
+    body.location = location;
   }
 
   console.log('[FB Reply Maker API] sending body:', { ...body, secret: '[REDACTED]' });

@@ -36,10 +36,32 @@ function buildOpenerLine(customerFirstName, rep) {
   return `Opener: "Hey, happy to help you out today!"`;
 }
 
-const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory }) => {
+function buildLocationBlock(location) {
+  if (!location || typeof location !== 'object') return '';
+  const name = (location.name || '').trim();
+  const address = (location.address || '').trim();
+  const phone = (location.phone || '').trim();
+  const etransferEmail = (location.etransferEmail || '').trim();
+  if (!name && !address && !phone && !etransferEmail) return '';
+  const lines = [];
+  if (name) lines.push(`- Location: ${name}`);
+  if (address) lines.push(`- Address: ${address}`);
+  if (phone) lines.push(`- Phone: ${phone}`);
+  if (etransferEmail) lines.push(`- E-Transfer Email: ${etransferEmail}`);
+  return `
+LOCATION CONTEXT
+${lines.join('\n')}
+
+Use these naturally when referenced in conversation. When the customer asks where you are, give the address. When closing with payment paths, use the actual e-transfer email. When reframing missed calls, name the actual location.
+`;
+}
+
+const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location }) => {
   const listingBlock = listingTitle && listingTitle.trim()
     ? `\nLISTING CONTEXT\nThe customer is messaging about this listing: "${listingTitle.trim()}". Use this together with the customer's message to infer ad_type (wheel / tire / accessory / lift) per the detection signals below.\n`
     : '';
+
+  const locationBlock = buildLocationBlock(location);
 
   const categoryClause = categoryOverride && categoryOverride !== 'auto'
     ? `\nThe user has tagged this message as: ${categoryOverride.replace('_', ' ')}.\n`
@@ -57,7 +79,7 @@ ${openerLine}
 The line above already has the customer's first name and the sales rep's name plugged in (when available). Use the quoted string EXACTLY as written. Do not rewrite it, do not substitute names, do not omit the @ symbol if it's present. The @ before the first name uses FB's mention system and triggers a notification — preserve it character-for-character.
 
 When using an @mention anywhere in a reply, use ONLY the customer's first name (a single word). "@Glen" not "@Glen Hans" — FB's tag system only matches single-word prefixes.
-${listingBlock}
+${listingBlock}${locationBlock}
 THE STANDARD FLOW (12 principles, follow these for every reply):
 1. Introduce yourself by name (handled by the opener).
 2. Match the customer's emotional tone (casual with casual, urgent with urgent, "lol" energy with "lol" energy) — always within a friendly-professional voice. Never use slang yourself.
@@ -223,7 +245,8 @@ export async function handler(event) {
     conversation_history,
     userName,
     partnerName,
-    listingTitle
+    listingTitle,
+    location
   } = body;
   if (!message || !context) {
     return { statusCode: 400, headers, body: 'Missing message or context' };
@@ -237,7 +260,8 @@ export async function handler(event) {
     openerLine,
     listingTitle,
     categoryOverride,
-    conversationHistory: conversation_history
+    conversationHistory: conversation_history,
+    location
   });
 
   console.log('[FN] resolved opener:', openerLine);
@@ -247,7 +271,10 @@ export async function handler(event) {
     rep,
     listingTitle: listingTitle || null,
     historyLength: Array.isArray(conversation_history) ? conversation_history.length : 0,
-    categoryOverride: categoryOverride || null
+    categoryOverride: categoryOverride || null,
+    locationKeys: location && typeof location === 'object'
+      ? Object.keys(location).filter((k) => (location[k] || '').toString().trim())
+      : []
   });
 
   try {

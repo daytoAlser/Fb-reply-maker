@@ -82,6 +82,63 @@ function Options() {
       </section>
 
       <section className="card">
+        <h2>Location</h2>
+        <label className="field">
+          <span className="mono">LOCATION NAME</span>
+          <input
+            type="text"
+            value={state.location?.name || ''}
+            onChange={(e) => update('location', 'name', e.target.value)}
+            placeholder="e.g. Calgary"
+            spellCheck={false}
+          />
+          <span className="field-hint">
+            Used in the missed-call reframe ("The Calgary store gets busy").
+          </span>
+        </label>
+        <label className="field">
+          <span className="mono">ADDRESS</span>
+          <input
+            type="text"
+            value={state.location?.address || ''}
+            onChange={(e) => update('location', 'address', e.target.value)}
+            placeholder="e.g. 1234 Macleod Trail SE, Calgary AB"
+            spellCheck={false}
+          />
+          <span className="field-hint">
+            Used when a customer asks where you are or you invite them in.
+          </span>
+        </label>
+        <label className="field">
+          <span className="mono">PHONE</span>
+          <input
+            type="tel"
+            value={state.location?.phone || ''}
+            onChange={(e) => update('location', 'phone', e.target.value)}
+            placeholder="e.g. 403-555-0100"
+            spellCheck={false}
+          />
+          <span className="field-hint">
+            Used in "give us a call with a CC" closes.
+          </span>
+        </label>
+        <label className="field">
+          <span className="mono">E-TRANSFER EMAIL</span>
+          <input
+            type="email"
+            value={state.location?.etransferEmail || ''}
+            onChange={(e) => update('location', 'etransferEmail', e.target.value)}
+            placeholder="e.g. deposits@ccaw.ca"
+            spellCheck={false}
+            autoComplete="off"
+          />
+          <span className="field-hint">
+            Used when closing with payment paths (deposit / final).
+          </span>
+        </label>
+      </section>
+
+      <section className="card">
         <h2>API</h2>
         <label className="field">
           <span className="mono">ENDPOINT</span>

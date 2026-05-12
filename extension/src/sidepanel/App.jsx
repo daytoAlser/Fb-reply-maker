@@ -199,7 +199,8 @@ export default function App() {
         conversationHistory,
         userName: userName || undefined,
         partnerName: partnerName || undefined,
-        listingTitle: listingTitle || undefined
+        listingTitle: listingTitle || undefined,
+        location: settings.location || undefined
       });
 
       console.log('[FB Reply Maker SP] response meta:', {

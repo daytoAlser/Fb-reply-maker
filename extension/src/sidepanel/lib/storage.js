@@ -12,26 +12,34 @@ export const DEFAULTS = {
     customNotes:
       'We specialize in wheels, tires, lifts, and accessories. We install everything we sell.'
   },
+  location: {
+    name: '',
+    address: '',
+    phone: '',
+    etransferEmail: ''
+  },
   preferences: {
     defaultCategory: 'auto'
   }
 };
 
 export async function loadAll() {
-  const data = await chrome.storage.sync.get(['userName', 'config', 'context', 'preferences']);
+  const data = await chrome.storage.sync.get(['userName', 'config', 'context', 'location', 'preferences']);
   return {
     userName: typeof data.userName === 'string' ? data.userName : DEFAULTS.userName,
     config: { ...DEFAULTS.config, ...(data.config || {}) },
     context: { ...DEFAULTS.context, ...(data.context || {}) },
+    location: { ...DEFAULTS.location, ...(data.location || {}) },
     preferences: { ...DEFAULTS.preferences, ...(data.preferences || {}) }
   };
 }
 
-export async function saveAll({ userName, config, context, preferences }) {
+export async function saveAll({ userName, config, context, location, preferences }) {
   await chrome.storage.sync.set({
     userName: typeof userName === 'string' ? userName : '',
     config,
     context,
+    location: { ...DEFAULTS.location, ...(location || {}) },
     preferences
   });
 }
