@@ -247,13 +247,15 @@ export default function App() {
       }
       initialMountDoneRef.current = true;
 
-      // Auto-fire Generate. Force=true on thread switch so cached context
-      // staleness (e.g. captured vehicle was updated server-side since
-      // last cache write) doesn't show wrong variants.
+      // Auto-fire Generate. On thread switch we DO NOT block on
+      // `loading` from a prior thread's in-flight call — the stale-
+      // response guard inside handleGenerate will discard whichever
+      // response arrives after the switch, so it's safe to start a new
+      // one. Without this, switching mid-flight produces a stuck
+      // display showing the prior thread's variants.
       if (!liveSrc || !hasConfig || isManualRef.current) return;
       const triggerKey = detectedThreadId + '|' + liveSrc;
       if (inFlightTriggerRef.current === triggerKey) return;
-      if (loading) return;
       inFlightTriggerRef.current = triggerKey;
       console.log('[FB Reply Maker SP] auto-firing Generate for thread', detectedThreadId, isThreadSwitch ? '(switch)' : '(initial/stale)');
       handleGenerate();
@@ -356,6 +358,14 @@ export default function App() {
       return;
     }
     if (!overrideFlags) setOverrideActive(false);
+    // Tag this generate call with the thread + incoming it was fired
+    // for. When the response arrives, we discard it if the user has
+    // since switched threads — otherwise a slow response from a prior
+    // thread leaks onto the freshly-switched thread's display.
+    const firedThreadId = autoDetect?.status === 'ok'
+      ? getThreadIdFromUrl(autoDetect.url || '')
+      : null;
+    const firedIncoming = incoming;
     setLoading(true);
     setResult(null);
     try {
@@ -528,6 +538,22 @@ export default function App() {
         console.log('[FB Reply Maker SP] no threadId on active tab URL, skipping lead update — url:', fbThreadUrl);
       }
 
+      // Stale-response guard: discard if the user switched threads or
+      // edited the incoming since this call was fired. The cache write
+      // above still happens (so the right thread benefits), but we
+      // don't paint stale variants over the active view.
+      const liveThreadId = autoDetect?.status === 'ok'
+        ? getThreadIdFromUrl(autoDetect.url || '')
+        : null;
+      const liveIncoming = incoming;
+      if (firedThreadId && firedThreadId !== liveThreadId) {
+        console.log('[FB Reply Maker SP] discarding stale generate response — fired for', firedThreadId, 'now on', liveThreadId);
+        return;
+      }
+      if (firedIncoming !== liveIncoming) {
+        console.log('[FB Reply Maker SP] discarding stale generate response — incoming changed mid-flight');
+        return;
+      }
       setResult(res);
     } catch (err) {
       setError(err.message || String(err));
