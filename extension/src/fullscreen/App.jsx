@@ -12,7 +12,8 @@ import {
   readAllCachedVariants,
   getInboxList,
   scrollInboxDown,
-  openThread
+  openThread,
+  openInbox
 } from './lib/api.js';
 
 const LEADS_REFRESH_INTERVAL_MS = 30 * 1000;
@@ -85,6 +86,10 @@ export default function App() {
   // Step 4: per-row click state. openingThreadId is the row currently
   // being driven open in the FB tab; ThreadList renders a spinner on it.
   const [openingThreadId, setOpeningThreadId] = useState(null);
+  // Step 5: refresh-in-flight guard. Auto-poll + manual refresh + scroll
+  // merge can all queue up; this coalesces them so the SW round-trip
+  // fires at most once at a time. Ref so changes don't re-render.
+  const refreshInboxInFlightRef = useRef(false);
 
   const refreshLeads = useCallback(async (s) => {
     const cfg = (s || settings)?.config;
@@ -121,6 +126,9 @@ export default function App() {
   // rows (keyed by source+thread_id) instead of replacing — so virtualized
   // rows we already saw don't disappear when FB unloads them out of view.
   const refreshInbox = useCallback(async ({ silent, merge } = {}) => {
+    // Coalesce: bail if another refresh is already round-tripping the SW.
+    if (refreshInboxInFlightRef.current) return;
+    refreshInboxInFlightRef.current = true;
     if (!silent) setInboxStatus((s) => (s === 'idle' ? 'loading' : s));
     try {
       const res = await getInboxList();
@@ -152,12 +160,26 @@ export default function App() {
         setInboxTabUrl(null);
         return;
       }
+      // Step 5: FB tab exists but is on a page that isn't an inbox/thread.
+      // Distinct status so ThreadList can offer a "Re-open Inbox" button
+      // that navigates the tab back instead of just retrying the same scrape.
+      if (res.reason === 'not_inbox') {
+        setInboxStatus('navigated_away');
+        setInboxError(res.reason);
+        setInboxTabUrl(res.tabUrl || res.url || null);
+        // Keep existing rows in merge mode so the user doesn't lose state
+        // mid-session if their FB tab briefly navigates away.
+        if (!merge) setInboxRows([]);
+        return;
+      }
       setInboxStatus('error');
       setInboxError(res.reason || 'unknown');
       setInboxTabUrl(res.tabUrl || null);
     } catch (err) {
       setInboxStatus('error');
       setInboxError(err?.message || 'rpc_failed');
+    } finally {
+      refreshInboxInFlightRef.current = false;
     }
   }, []);
 
@@ -215,10 +237,15 @@ export default function App() {
   }, [settings, refreshLeads]);
 
   // Periodic refresh of the live FB inbox. Silent so UI doesn't flicker.
+  // Step 5: skip when a thread is being opened — otherwise the poll can
+  // race the OPEN_THREAD scrape (FB tab is in transit to a new thread).
   useEffect(() => {
-    const id = setInterval(() => refreshInbox({ silent: true }), INBOX_REFRESH_INTERVAL_MS);
+    const id = setInterval(() => {
+      if (openingThreadId) return;
+      refreshInbox({ silent: true });
+    }, INBOX_REFRESH_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [refreshInbox]);
+  }, [refreshInbox, openingThreadId]);
 
   // Listen for SW pushes: variants updated/started/failed.
   useEffect(() => {
@@ -329,6 +356,16 @@ export default function App() {
     chrome.tabs.create({ url: 'https://www.facebook.com/marketplace/inbox' });
   }
 
+  // Step 5: invoked when FB tab exists but navigated off inbox. SW handles
+  // the navigate-in-place vs create-new decision; then we re-scrape.
+  async function handleReopenInbox() {
+    const res = await openInbox();
+    if (res?.ok) {
+      // Give FB a moment to load the inbox before scraping.
+      setTimeout(() => refreshInbox(), 1200);
+    }
+  }
+
   async function handleRegenerate(threadId) {
     if (!threadId) return;
     setGeneratingFor(threadId);
@@ -398,6 +435,7 @@ export default function App() {
         cachedByThread={cachedByThread}
         onRefresh={handleManualRefreshInbox}
         onOpenInboxTab={handleOpenInboxTab}
+        onReopenInbox={handleReopenInbox}
         onScrollNearBottom={handleScrollNearBottom}
       />
       <ThreadView

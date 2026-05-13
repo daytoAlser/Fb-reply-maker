@@ -97,6 +97,7 @@ export default function ThreadList({
   cachedByThread,
   onRefresh,
   onOpenInboxTab,
+  onReopenInbox,
   onScrollNearBottom
 }) {
   // Phase F.1.5 step 3 — scroll-to-load. When the pane-list-body scroll
@@ -145,6 +146,7 @@ export default function ThreadList({
   }, [rows, filter, query, cachedByThread]);
 
   const showEmptyTabState = inboxStatus === 'tab_not_found';
+  const showNavigatedAway = inboxStatus === 'navigated_away';
   const showInboxError = inboxStatus === 'error';
   const showInboxLoading = inboxStatus === 'loading' && rows.length === 0;
 
@@ -209,6 +211,26 @@ export default function ThreadList({
           </div>
         )}
 
+        {showNavigatedAway && (
+          <div className="pane-list-empty-block">
+            <p className="pane-list-empty">
+              FB tab moved off the inbox.
+            </p>
+            {inboxTabUrl && (
+              <p className="pane-list-empty-sub" title={inboxTabUrl}>
+                Now on: {inboxTabUrl.replace(/^https?:\/\//, '').slice(0, 60)}
+              </p>
+            )}
+            <button
+              type="button"
+              className="pane-list-cta"
+              onClick={onReopenInbox}
+            >
+              Re-open Inbox
+            </button>
+          </div>
+        )}
+
         {showInboxError && (
           <div className="pane-list-empty-block">
             <p className="pane-list-error">Inbox scrape failed: {inboxError}</p>
@@ -227,7 +249,7 @@ export default function ThreadList({
           <p className="pane-list-error">Supabase: {leadsError}</p>
         )}
 
-        {!showEmptyTabState && !showInboxError && !showInboxLoading && filtered.length === 0 && (
+        {!showEmptyTabState && !showNavigatedAway && !showInboxError && !showInboxLoading && filtered.length === 0 && (
           <p className="pane-list-empty">No threads match.</p>
         )}
 

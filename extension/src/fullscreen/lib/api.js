@@ -82,6 +82,21 @@ export async function scrollInboxDown() {
   });
 }
 
+// Phase F.1.5 step 5 — re-open / open the FB Marketplace inbox in the
+// existing FB tab (or create one). Used by the "Re-open Inbox" CTA when
+// the user has navigated their FB tab away.
+export async function openInbox() {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'F1_5_OPEN_INBOX' }, (res) => {
+      if (chrome.runtime.lastError) {
+        resolve({ ok: false, reason: chrome.runtime.lastError.message });
+        return;
+      }
+      resolve(res || { ok: false, reason: 'no_response' });
+    });
+  });
+}
+
 // Phase F.1.5 step 4 — drive the FB tab to a specific thread silently and
 // return the scraped history. Used by the row-click flow in App.jsx.
 export async function openThread(thread_id, source) {

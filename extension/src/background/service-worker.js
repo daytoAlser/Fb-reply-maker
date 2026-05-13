@@ -532,6 +532,42 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  // Phase F.1.5 step 5 — re-open / open the FB Marketplace inbox.
+  //
+  // - If a FB tab is already open, navigate it to /marketplace/inbox and
+  //   bring it active in its own window (no focus steal on the user's
+  //   window).
+  // - If none is open, create a new tab at /marketplace/inbox.
+  // Used by the "Re-open Inbox" CTA when the user has navigated their FB
+  // tab away from the inbox/thread surfaces.
+  if (msg?.type === 'F1_5_OPEN_INBOX') {
+    (async () => {
+      const targetUrl = 'https://www.facebook.com/marketplace/inbox';
+      try {
+        const candidates = await findInboxTabs();
+        const existing = candidates && candidates[0];
+        if (existing && existing.id) {
+          await chrome.tabs.update(existing.id, { url: targetUrl, active: true });
+          sendResponse({ ok: true, tabId: existing.id, navigated: true });
+          return;
+        }
+        // No inbox-pattern tab found — fall back to any facebook.com tab.
+        const fbTabs = await chrome.tabs.query({ url: 'https://*.facebook.com/*' });
+        if (fbTabs && fbTabs.length > 0) {
+          const t = fbTabs[0];
+          await chrome.tabs.update(t.id, { url: targetUrl, active: true });
+          sendResponse({ ok: true, tabId: t.id, navigated: true });
+          return;
+        }
+        const created = await chrome.tabs.create({ url: targetUrl });
+        sendResponse({ ok: true, tabId: created?.id, created: true });
+      } catch (err) {
+        sendResponse({ ok: false, reason: err?.message || 'open_inbox_failed' });
+      }
+    })();
+    return true;
+  }
+
   // Phase F.1.5 step 4 — drive the FB tab to a specific thread (silent
   // background click) and return the scraped messages. No focus changes:
   // the FB tab stays where it is and the user's view stays on the
