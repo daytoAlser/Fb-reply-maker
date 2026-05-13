@@ -1,8 +1,14 @@
-import { useCallback, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 
 // Trigger F1_5_SCROLL_INBOX once the user scrolls within this many px of
 // the bottom of the extension list body. App.jsx still debounces 1.5s.
 const SCROLL_NEAR_BOTTOM_PX = 100;
+
+// F.1.6: report the top-N rows currently visible in the body to App so it
+// can ship the prefetch candidate list to the SW. Debounced so a quick
+// scroll doesn't fire N times per frame.
+const VISIBLE_REPORT_DEBOUNCE_MS = 300;
+const VISIBLE_REPORT_TOP_N = 5;
 
 // Phase F.1.5 step 2 — ThreadList renders from the live FB inbox scrape
 // joined to Supabase by thread_id. Each row carries an isKnownLead flag:
@@ -98,22 +104,66 @@ export default function ThreadList({
   onRefresh,
   onOpenInboxTab,
   onReopenInbox,
-  onScrollNearBottom
+  onScrollNearBottom,
+  onVisibleChange,
+  prefetchingThreadIds,
+  prefetchSweep
 }) {
   // Phase F.1.5 step 3 — scroll-to-load. When the pane-list-body scroll
   // position is within SCROLL_NEAR_BOTTOM_PX of the bottom, fire the
   // upstream handler (which debounces and dispatches F1_5_SCROLL_INBOX +
   // a merge-mode re-scrape).
   const bodyRef = useRef(null);
-  const handleScroll = useCallback(() => {
-    if (!onScrollNearBottom) return;
+  const visibleReportTimerRef = useRef(null);
+  const lastReportedIdsRef = useRef('');
+
+  // F.1.6 — debounced computation of the top-N visible rows. Reports to
+  // App via onVisibleChange. Cheap: just rect-checks the rendered row
+  // buttons against the body bounds.
+  const reportVisible = useCallback(() => {
+    if (!onVisibleChange) return;
     const el = bodyRef.current;
     if (!el) return;
-    const distanceFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
-    if (distanceFromBottom <= SCROLL_NEAR_BOTTOM_PX) {
-      onScrollNearBottom();
+    const bodyRect = el.getBoundingClientRect();
+    const buttons = el.querySelectorAll('button[data-thread-id]');
+    const visible = [];
+    for (const btn of buttons) {
+      const r = btn.getBoundingClientRect();
+      if (r.bottom <= bodyRect.top) continue;
+      if (r.top >= bodyRect.bottom) break; // rows are in DOM order top→bottom
+      const tid = btn.getAttribute('data-thread-id');
+      if (tid) visible.push(tid);
+      if (visible.length >= VISIBLE_REPORT_TOP_N) break;
     }
-  }, [onScrollNearBottom]);
+    const key = visible.join(',');
+    if (key === lastReportedIdsRef.current) return;
+    lastReportedIdsRef.current = key;
+    onVisibleChange(visible);
+  }, [onVisibleChange]);
+
+  const scheduleReportVisible = useCallback(() => {
+    if (visibleReportTimerRef.current) clearTimeout(visibleReportTimerRef.current);
+    visibleReportTimerRef.current = setTimeout(reportVisible, VISIBLE_REPORT_DEBOUNCE_MS);
+  }, [reportVisible]);
+
+  const handleScroll = useCallback(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    if (onScrollNearBottom) {
+      const distanceFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
+      if (distanceFromBottom <= SCROLL_NEAR_BOTTOM_PX) onScrollNearBottom();
+    }
+    scheduleReportVisible();
+  }, [onScrollNearBottom, scheduleReportVisible]);
+
+  // Re-run visibility when the rendered row set changes (filter, search,
+  // new live rows arriving from the SW). Initial mount also covered.
+  useEffect(() => {
+    scheduleReportVisible();
+    return () => {
+      if (visibleReportTimerRef.current) clearTimeout(visibleReportTimerRef.current);
+    };
+  }, [filtered, scheduleReportVisible]);
   const counts = useMemo(() => {
     const c = { all: rows.length, unread: 0, qualifying: 0, qualified: 0, ready: 0, returning: 0 };
     for (const r of rows) {
@@ -188,6 +238,11 @@ export default function ThreadList({
             </button>
           ))}
         </div>
+        {prefetchSweep && prefetchSweep.active && prefetchSweep.total > 0 && (
+          <p className="pane-list-prefetch-status">
+            Prefetching {Math.min(prefetchSweep.completed + 1, prefetchSweep.total)} of {prefetchSweep.total}…
+          </p>
+        )}
       </header>
 
       <div className="pane-list-body" ref={bodyRef} onScroll={handleScroll}>
@@ -256,6 +311,7 @@ export default function ThreadList({
         {filtered.map((r) => {
           const isActive = r.thread_id === activeThreadId;
           const isOpening = r.thread_id === openingThreadId;
+          const isPrefetching = prefetchingThreadIds && prefetchingThreadIds.has(r.thread_id);
           const ready = isReady(r);
           const returning = isReturning(r);
           const unread = isUnread(r, cachedByThread[r.thread_id]);
@@ -264,10 +320,14 @@ export default function ThreadList({
             <button
               key={r.thread_id}
               type="button"
+              data-thread-id={r.thread_id}
               onClick={() => onSelect(r.thread_id, r.source)}
               disabled={isOpening}
-              className={`thread-row ${isActive ? 'is-active' : ''} ${r.isKnownLead ? '' : 'is-unknown'} ${isOpening ? 'is-opening' : ''}`}
+              className={`thread-row ${isActive ? 'is-active' : ''} ${r.isKnownLead ? '' : 'is-unknown'} ${isOpening ? 'is-opening' : ''} ${isPrefetching ? 'is-prefetching' : ''}`}
             >
+              {isPrefetching && !isOpening && (
+                <span className="thread-row-prefetch-spinner" title="Prefetching" aria-hidden="true" />
+              )}
               <div className="thread-row-line1">
                 <span className="thread-row-name">{r.partner_name || 'Unknown'}</span>
                 <span className="thread-row-time">

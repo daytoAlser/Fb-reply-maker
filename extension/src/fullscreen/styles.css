@@ -313,6 +313,38 @@ html, body, #root {
   to { transform: rotate(360deg); }
 }
 
+/* F.1.6 — prefetch spinner sits in the row's top-right corner. Smaller
+   and dimmer than the click spinner so it reads as ambient background
+   activity, not as a blocking action. */
+.thread-row { position: relative; }
+.thread-row-prefetch-spinner {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid transparent;
+  border-top-color: var(--text-mute);
+  border-radius: 50%;
+  animation: thread-row-spin 0.9s linear infinite;
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.pane-list-prefetch-status {
+  margin: 6px 0 0;
+  padding: 4px 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  color: var(--text-mute);
+  background: rgba(239, 68, 68, 0.04);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  text-align: center;
+  text-transform: uppercase;
+}
+
 /* ============================================================
    Thread view (center pane)
    ============================================================ */

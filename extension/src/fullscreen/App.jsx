@@ -13,13 +13,47 @@ import {
   getInboxList,
   scrollInboxDown,
   openThread,
-  openInbox
+  openInbox,
+  setVisibleThreadsForPrefetch,
+  stopPrefetch
 } from './lib/api.js';
 
 const LEADS_REFRESH_INTERVAL_MS = 30 * 1000;
 const INBOX_REFRESH_INTERVAL_MS = 30 * 1000;
 const INBOX_SCROLL_DEBOUNCE_MS = 1500;
 const MIN_VIEWPORT_WIDTH = 1280;
+
+// Phase F.1.6 — background prefetch. Top N visible rows in the extension
+// list get pre-warmed scrape + variant generation so the user's first
+// click is instant.
+const PREFETCH_TOP_N = 5;
+const PREFETCH_STALE_THRESHOLD_MS = 10 * 60 * 1000;
+
+// Build the priority-ranked candidate list the SW expects. We only include
+// rows that are worth pre-warming — others are filtered out here so the SW
+// doesn't have to re-derive the gates. Priority numbers don't have absolute
+// meaning, just relative ordering.
+function buildPrefetchCandidates(visibleIds, rows, cachedByThread) {
+  const byId = new Map(rows.map((r) => [r.thread_id, r]));
+  const out = [];
+  for (const tid of visibleIds.slice(0, PREFETCH_TOP_N)) {
+    const r = byId.get(tid);
+    if (!r) continue;
+    const cached = cachedByThread[tid] || null;
+    let priority = 0;
+    if (r.unread) priority = 4;                      // fresh incoming wins
+    else if (!r.isKnownLead) priority = 3;           // never seen
+    else {
+      const ageMs = cached ? (Date.now() - (cached.generated_at || 0)) : Infinity;
+      const isStale = ageMs > PREFETCH_STALE_THRESHOLD_MS;
+      const isWorkingStatus = r.status === 'qualifying' || r.status === 'qualified';
+      if (isStale && isWorkingStatus) priority = 2;
+      else continue;                                 // not worth prefetching
+    }
+    out.push({ thread_id: tid, source: r.source || 'marketplace', priority });
+  }
+  return out;
+}
 
 // Phase F.1.5 step 2 — build the list the ThreadList renders from. The live
 // FB inbox scrape is the source of truth for which rows exist; Supabase
@@ -90,6 +124,13 @@ export default function App() {
   // merge can all queue up; this coalesces them so the SW round-trip
   // fires at most once at a time. Ref so changes don't re-render.
   const refreshInboxInFlightRef = useRef(false);
+  // F.1.6: prefetch state. visibleThreadIds is the latest scroll-tracked
+  // top-N reported by ThreadList. prefetchingThreadIds is the set of
+  // threads currently being pre-warmed (per-row spinner). prefetchSweep
+  // is { active, completed, total, inFlight } for the header status line.
+  const [visibleThreadIds, setVisibleThreadIds] = useState([]);
+  const [prefetchingThreadIds, setPrefetchingThreadIds] = useState(new Set());
+  const [prefetchSweep, setPrefetchSweep] = useState({ active: false, completed: 0, total: 0, inFlight: null });
 
   const refreshLeads = useCallback(async (s) => {
     const cfg = (s || settings)?.config;
@@ -266,11 +307,43 @@ export default function App() {
         if (msg.thread_id === activeThreadId) {
           setGeneratingFor(null);
         }
+      } else if (msg.type === 'F1_6_PREFETCH_STARTED' && msg.thread_id) {
+        setPrefetchingThreadIds((prev) => {
+          const next = new Set(prev);
+          next.add(msg.thread_id);
+          return next;
+        });
+      } else if (msg.type === 'F1_6_PREFETCH_DONE' && msg.thread_id) {
+        setPrefetchingThreadIds((prev) => {
+          if (!prev.has(msg.thread_id)) return prev;
+          const next = new Set(prev);
+          next.delete(msg.thread_id);
+          return next;
+        });
+      } else if (msg.type === 'F1_6_PREFETCH_PROGRESS') {
+        setPrefetchSweep({
+          active: !msg.idle && (msg.in_flight != null || (msg.queued || 0) > 0),
+          completed: msg.completed || 0,
+          total: msg.total || 0,
+          inFlight: msg.in_flight || null
+        });
       }
     }
     chrome.runtime.onMessage.addListener(onMsg);
     return () => chrome.runtime.onMessage.removeListener(onMsg);
   }, [activeThreadId, refreshLeads]);
+
+  // Halt any in-flight sweep when the fullscreen tab is unloading so the
+  // SW doesn't keep burning API calls for a UI that's gone.
+  useEffect(() => {
+    function onPageHide() { stopPrefetch(); }
+    window.addEventListener('pagehide', onPageHide);
+    window.addEventListener('beforeunload', onPageHide);
+    return () => {
+      window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('beforeunload', onPageHide);
+    };
+  }, []);
 
   // When active thread changes: load cached variants. History is driven
   // by the click handler (handleSelectThread) via F1_5_OPEN_THREAD so the
@@ -404,6 +477,17 @@ export default function App() {
     };
   }, [activeThreadId, leads, mergedRows]);
 
+  // F.1.6: when the set of visible rows changes (or lead/cache state
+  // changes that could promote a row's prefetch priority), recompute the
+  // candidate list and ship it to the SW. Re-runs are cheap: the SW
+  // dedupes by completed set and current pending.
+  useEffect(() => {
+    if (!visibleThreadIds.length || !mergedRows.length) return;
+    const candidates = buildPrefetchCandidates(visibleThreadIds, mergedRows, cachedByThread);
+    if (candidates.length === 0) return;
+    setVisibleThreadsForPrefetch(candidates);
+  }, [visibleThreadIds, mergedRows, cachedByThread]);
+
   if (viewportTooSmall) {
     return (
       <div className="lead-center-narrow">
@@ -437,6 +521,9 @@ export default function App() {
         onOpenInboxTab={handleOpenInboxTab}
         onReopenInbox={handleReopenInbox}
         onScrollNearBottom={handleScrollNearBottom}
+        onVisibleChange={setVisibleThreadIds}
+        prefetchingThreadIds={prefetchingThreadIds}
+        prefetchSweep={prefetchSweep}
       />
       <ThreadView
         lead={activeLead}

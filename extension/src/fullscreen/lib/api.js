@@ -82,6 +82,25 @@ export async function scrollInboxDown() {
   });
 }
 
+// Phase F.1.6 — report priority-ranked visible threads to the SW so it can
+// pre-warm scrape + variant generation. Fire-and-forget; the SW broadcasts
+// F1_6_PREFETCH_* events back as the sweep progresses.
+export function setVisibleThreadsForPrefetch(visible_threads) {
+  try {
+    chrome.runtime.sendMessage({ type: 'F1_6_SET_VISIBLE', visible_threads }).catch(() => {});
+  } catch {
+    // SW not awake / context invalidated — next visibility change retries.
+  }
+}
+
+export function stopPrefetch() {
+  try {
+    chrome.runtime.sendMessage({ type: 'F1_6_STOP_PREFETCH' }).catch(() => {});
+  } catch {
+    // ignore
+  }
+}
+
 // Phase F.1.5 step 5 — re-open / open the FB Marketplace inbox in the
 // existing FB tab (or create one). Used by the "Re-open Inbox" CTA when
 // the user has navigated their FB tab away.

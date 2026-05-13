@@ -458,6 +458,256 @@ async function maybeAutoGenerate({ threadId, payload }) {
   }
 }
 
+// ============================================================
+// Phase F.1.6 — Background prefetch
+// ============================================================
+//
+// Pre-warm OPEN_THREAD + generate-reply on the top-N visible threads in
+// the fullscreen inbox so the user's first click renders variants
+// instantly. Sequential (single in-flight at a time, FB rate-limit safe),
+// humanized 2-4s throttle between operations, cancelable on tab close.
+//
+// Flow:
+//   1. Fullscreen sends F1_6_SET_VISIBLE with a priority-ranked list of
+//      thread ids it wants prefetched. SW dedupes vs already-completed,
+//      adds to pending queue, kicks the runner if idle.
+//   2. Runner pulls highest-priority pending, re-checks gates (lead may
+//      have closed since fullscreen built the list), runs OPEN_THREAD →
+//      generate-reply → cache write, then sleeps the throttle delay.
+//   3. F1_6_STOP_PREFETCH (sent on fullscreen unload or user request)
+//      flushes the queue and sets the stopped flag so the next loop
+//      iteration exits.
+
+const PREFETCH_DELAY_MIN_MS = 2000;
+const PREFETCH_DELAY_MAX_MS = 4000;
+const PREFETCH_STALE_THRESHOLD_MS = 10 * 60 * 1000;
+const PREFETCH_TOP_N = 5;
+
+const prefetchState = {
+  // thread_id → { source, priority }
+  pending: new Map(),
+  // thread_ids we've successfully completed in this session — don't redo
+  // unless explicitly invalidated (e.g. new incoming message detected).
+  completed: new Set(),
+  inFlight: null,
+  running: false,
+  stopped: false,
+  swept: 0,
+  total: 0
+};
+
+function prefetchBroadcast(extra) {
+  pushToFullscreen({
+    type: 'F1_6_PREFETCH_PROGRESS',
+    completed: prefetchState.swept,
+    total: prefetchState.total,
+    in_flight: prefetchState.inFlight,
+    queued: prefetchState.pending.size,
+    ...extra
+  });
+}
+
+async function isPrefetchEligible(threadId) {
+  if (!threadId) return { eligible: false, reason: 'no_id' };
+  if (prefetchState.completed.has(threadId)) {
+    return { eligible: false, reason: 'already_done' };
+  }
+  if (inFlightThreads.has(threadId)) {
+    return { eligible: false, reason: 'auto_gen_in_flight' };
+  }
+  // Lead-status gate. Closed/stale leads aren't worth pre-warming.
+  const leadsData = await chrome.storage.local.get('leads');
+  const lead = leadsData.leads?.[threadId] || null;
+  if (lead && AUTO_GEN_SKIP_STATUSES.has(lead.status)) {
+    return { eligible: false, reason: 'closed_status' };
+  }
+  return { eligible: true, lead };
+}
+
+async function runOnePrefetch({ thread_id, source }) {
+  const settings = await loadGenerationSettings();
+  if (!settings.config?.endpoint || !settings.config?.secret) {
+    return { ok: false, reason: 'missing_config' };
+  }
+
+  // Step 1: drive the FB tab to this thread + scrape. Reuse the same
+  // OPEN_THREAD RPC the user-click path uses; the content script handles
+  // navigation + bubble swap detection.
+  pushToFullscreen({ type: 'F1_6_PREFETCH_STARTED', thread_id });
+  const open = await callInboxTab({ type: 'OPEN_THREAD', thread_id, source });
+  if (!open || !open.ok) {
+    return { ok: false, reason: open?.reason || 'open_failed' };
+  }
+  const messages = Array.isArray(open.messages) ? open.messages : [];
+
+  // Step 2: find the most recent customer message. No incoming → nothing
+  // to reply to → skip silently.
+  let latestIncoming = null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].sender === 'them' && messages[i].text) {
+      latestIncoming = messages[i].text.trim();
+      break;
+    }
+  }
+  if (!latestIncoming) return { ok: false, reason: 'no_customer_message' };
+  const wordCount = latestIncoming.split(/\s+/).filter(Boolean).length;
+  if (wordCount < AUTO_GEN_MIN_WORDS) return { ok: false, reason: 'too_short' };
+
+  // Step 3: cache freshness. If we already generated for this exact message
+  // (e.g. F.1 auto-gen ran earlier), don't burn another call.
+  const cached = await readCachedVariants(thread_id);
+  if (cached?.source_message === latestIncoming) {
+    return { ok: true, skipped: 'fresh_cache' };
+  }
+
+  // Step 4: run generate-reply through the same path as auto-gen so the
+  // server sees identical context (existing_* hydration, etc).
+  if (inFlightThreads.has(thread_id)) {
+    return { ok: false, reason: 'auto_gen_raced' };
+  }
+  inFlightThreads.add(thread_id);
+  try {
+    const result = await runGenerateReply({
+      threadId: thread_id,
+      url: open.url,
+      message: latestIncoming,
+      partnerName: open.partnerName,
+      listingTitle: open.listingTitle,
+      conversationHistory: messages
+    });
+    if (result?.ok === false) {
+      return { ok: false, reason: result.reason || 'generate_failed' };
+    }
+    const entry = {
+      thread_id,
+      partner_name: open.partnerName || null,
+      listing_title: open.listingTitle || null,
+      result,
+      source_message: latestIncoming,
+      generated_at: Date.now(),
+      prefetched: true
+    };
+    await writeCachedVariants(thread_id, entry);
+    lastSeenIncoming.set(thread_id, latestIncoming);
+    pushToFullscreen({ type: 'F1_VARIANTS_UPDATED', thread_id, payload: entry });
+    return { ok: true };
+  } finally {
+    inFlightThreads.delete(thread_id);
+  }
+}
+
+function pickHighestPriorityPending() {
+  let best = null;
+  for (const [tid, info] of prefetchState.pending.entries()) {
+    if (!best || (info.priority || 0) > (best.priority || 0)) {
+      best = { thread_id: tid, ...info };
+    }
+  }
+  return best;
+}
+
+async function runPrefetchSweep() {
+  if (prefetchState.running) return;
+  prefetchState.running = true;
+  prefetchState.stopped = false;
+  try {
+    while (!prefetchState.stopped && prefetchState.pending.size > 0) {
+      const next = pickHighestPriorityPending();
+      if (!next) break;
+      prefetchState.pending.delete(next.thread_id);
+
+      // Re-check eligibility right before launching — lead state could
+      // have changed since fullscreen reported visibility.
+      const elig = await isPrefetchEligible(next.thread_id);
+      if (!elig.eligible) {
+        console.log('[FB Reply Maker SW] prefetch skip', next.thread_id, elig.reason);
+        continue;
+      }
+
+      prefetchState.inFlight = next.thread_id;
+      prefetchState.total = Math.max(prefetchState.total, prefetchState.swept + prefetchState.pending.size + 1);
+      prefetchBroadcast();
+
+      let result;
+      try {
+        result = await runOnePrefetch(next);
+      } catch (err) {
+        result = { ok: false, reason: err?.message || 'prefetch_threw' };
+      }
+
+      if (result?.ok) {
+        prefetchState.completed.add(next.thread_id);
+      }
+      prefetchState.swept++;
+      prefetchState.inFlight = null;
+      pushToFullscreen({
+        type: 'F1_6_PREFETCH_DONE',
+        thread_id: next.thread_id,
+        ok: !!result?.ok,
+        reason: result?.reason || null,
+        skipped: result?.skipped || null
+      });
+      prefetchBroadcast();
+
+      if (prefetchState.stopped || prefetchState.pending.size === 0) break;
+      // Humanized throttle between operations.
+      const delay = PREFETCH_DELAY_MIN_MS
+        + Math.floor(Math.random() * (PREFETCH_DELAY_MAX_MS - PREFETCH_DELAY_MIN_MS));
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  } finally {
+    prefetchState.running = false;
+    prefetchState.inFlight = null;
+    // Reset counters when fully drained so the next sweep starts at 0/N.
+    if (prefetchState.pending.size === 0) {
+      prefetchState.swept = 0;
+      prefetchState.total = 0;
+    }
+    prefetchBroadcast({ idle: true });
+  }
+}
+
+function enqueuePrefetch(threadId, info) {
+  if (!threadId) return false;
+  if (prefetchState.completed.has(threadId)) return false;
+  if (prefetchState.inFlight === threadId) return false;
+  if (prefetchState.pending.has(threadId)) return false;
+  prefetchState.pending.set(threadId, {
+    source: info?.source || 'marketplace',
+    priority: typeof info?.priority === 'number' ? info.priority : 1
+  });
+  return true;
+}
+
+function setVisibleThreadsForPrefetch(visible) {
+  if (!Array.isArray(visible)) return;
+  let added = 0;
+  // Cap to top N — fullscreen also caps, but defense-in-depth.
+  for (const v of visible.slice(0, PREFETCH_TOP_N)) {
+    if (enqueuePrefetch(v.thread_id, v)) added++;
+  }
+  if (added > 0 && !prefetchState.running) {
+    runPrefetchSweep().catch((err) =>
+      console.warn('[FB Reply Maker SW] prefetch sweep error:', err?.message || err)
+    );
+  }
+}
+
+function stopPrefetch() {
+  prefetchState.stopped = true;
+  prefetchState.pending.clear();
+  // inFlight is allowed to drain — interrupting an in-progress RPC is
+  // expensive and the next loop iteration will exit before starting more.
+}
+
+// Invalidate completed-set entries when their thread receives a new
+// incoming message via the standard THREAD_UPDATE path. This way the
+// auto-gen flow (which fires on THREAD_UPDATE) can refresh variants
+// without prefetch's "already done" guard blocking the next sweep.
+function invalidatePrefetchForThread(threadId) {
+  prefetchState.completed.delete(threadId);
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type === 'THREAD_UPDATE' && sender.tab?.id) {
     tabState.set(sender.tab.id, msg.payload);
@@ -469,6 +719,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.payload?.status === 'ok') {
       const threadId = getThreadIdFromUrl(msg.payload.url || '');
       if (threadId) {
+        // A live THREAD_UPDATE means we have fresh DOM for this thread —
+        // any prior prefetch result for this thread is stale candidate-
+        // wise. Clear the completed mark so a future visibility report
+        // can re-queue it if the message has changed.
+        invalidatePrefetchForThread(threadId);
         maybeAutoGenerate({ threadId, payload: msg.payload }).catch((err) =>
           console.error('[FB Reply Maker SW] maybeAutoGenerate threw:', err?.message || err)
         );
@@ -566,6 +821,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
     })();
     return true;
+  }
+
+  // Phase F.1.6 — background prefetch. Fullscreen reports priority-ranked
+  // visible threads; SW queues + sequentially pre-warms variants.
+  if (msg?.type === 'F1_6_SET_VISIBLE' && Array.isArray(msg.visible_threads)) {
+    setVisibleThreadsForPrefetch(msg.visible_threads);
+    // Echo current sweep state so the new fullscreen render has accurate
+    // counts immediately, without waiting for the next progress tick.
+    prefetchBroadcast({ ack: true });
+    return;
+  }
+
+  if (msg?.type === 'F1_6_STOP_PREFETCH') {
+    stopPrefetch();
+    return;
   }
 
   // Phase F.1.5 step 4 — drive the FB tab to a specific thread (silent
