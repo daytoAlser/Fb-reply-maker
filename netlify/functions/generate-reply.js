@@ -27,6 +27,13 @@ const RETURNING_GAP_MS = 48 * 60 * 60 * 1000;
 // Minimum gap before a LANGUAGE trigger can promote a lead to returning.
 // Stops false positives like "still got those?" arriving mid-flow on an
 // active conversation where the customer is mid-qualification.
+//
+// LOCKED — design decision 2026-05-13. The 6h floor stays. Test 2 in the
+// E.2 spec ("language trigger fires without needing the full 48h gap")
+// must use a lead whose last_updated is at least 7h old. Earlier drafts
+// of Test 2 said 2h, which conflicted with Test 4 (no-false-positive on
+// active conversations) — the 6h floor is the resolution and 7h is the
+// scaffolded Test 2 setup.
 const RETURNING_LANG_MIN_GAP_MS = 6 * 60 * 60 * 1000;
 // Used by the prompt to inject an explicit "been a minute" acknowledgment
 // rule when the returning gap is genuinely long.
