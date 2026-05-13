@@ -73,7 +73,12 @@ export default function VariantCard({ kind, text }) {
     console.log('[FB Reply Maker SP] Insert clicked, sending INSERT_REPLY', text.slice(0, 40));
     setInserted('pending');
     try {
-      chrome.runtime.sendMessage({ type: 'INSERT_REPLY', text }, (res) => {
+      // skip_humanized: true → instant bulk paste. Insert is for manual
+      // review (user clicks Send themselves), so we don't need humanized
+      // typing here. The slow per-char path was the source of the
+      // "one letter at a time" symptom — FB's React was re-rendering the
+      // compose box between our dispatches and orphaning our reference.
+      chrome.runtime.sendMessage({ type: 'INSERT_REPLY', text, skip_humanized: true }, (res) => {
         if (chrome.runtime.lastError) {
           console.error('[FB Reply Maker SP] INSERT_REPLY failed:', chrome.runtime.lastError.message);
           setInserted('err');

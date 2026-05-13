@@ -1,4 +1,4 @@
-export default function TabBar({ activeTab, onChange, leadsBadgeCount }) {
+export default function TabBar({ activeTab, onChange, leadsBadgeCount, inboxBadgeCount }) {
   return (
     <nav className="tab-bar" role="tablist">
       <button
@@ -8,7 +8,21 @@ export default function TabBar({ activeTab, onChange, leadsBadgeCount }) {
         className={`tab ${activeTab === 'reply' ? 'tab-active' : ''}`}
         onClick={() => onChange('reply')}
       >
-        Reply Maker
+        Reply
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={activeTab === 'inbox'}
+        className={`tab ${activeTab === 'inbox' ? 'tab-active' : ''}`}
+        onClick={() => onChange('inbox')}
+      >
+        <span>Inbox</span>
+        {inboxBadgeCount > 0 && (
+          <span className="tab-badge" aria-label={`${inboxBadgeCount} unread threads`}>
+            {inboxBadgeCount}
+          </span>
+        )}
       </button>
       <button
         type="button"

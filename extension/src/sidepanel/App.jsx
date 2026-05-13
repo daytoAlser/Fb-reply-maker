@@ -10,12 +10,14 @@ import FlagBanner from './components/FlagBanner.jsx';
 import MultiProductChips from './components/MultiProductChips.jsx';
 import ReturningCustomerBanner from './components/ReturningCustomerBanner.jsx';
 import LogOptionsModal from './components/LogOptionsModal.jsx';
+import InboxTab from './components/InboxTab.jsx';
 import { generateReply } from './lib/api.js';
 import { loadAll } from './lib/storage.js';
 import {
   getThreadIdFromUrl,
   createOrUpdateLead,
   getLeadByThreadId,
+  getAllLeads,
   logManualOptionsSent,
   migrateLeadsToSupabase,
   retrySyncPending
@@ -112,13 +114,24 @@ export default function App() {
     retrySyncPending().catch((err) =>
       console.warn('[FB Reply Maker SP] retry sweep error:', err?.message)
     );
+    chrome.storage.local.get('theme').then((d) => {
+      const t = d?.theme === 'light' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', t);
+    });
+    function onThemeChange(changes, area) {
+      if (area !== 'local' || !changes.theme) return;
+      const t = changes.theme.newValue === 'light' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', t);
+    }
+    chrome.storage.onChanged.addListener(onThemeChange);
+    return () => chrome.storage.onChanged.removeListener(onThemeChange);
   }, []);
 
   useEffect(() => {
     let q = 0;
     let f = 0;
     chrome.storage.local.get(['activeTab', 'unviewedQualifiedCount', 'unviewedFlaggedCount']).then((d) => {
-      if (d.activeTab === 'reply' || d.activeTab === 'leads') setActiveTab(d.activeTab);
+      if (d.activeTab === 'reply' || d.activeTab === 'leads' || d.activeTab === 'inbox') setActiveTab(d.activeTab);
       if (typeof d.unviewedQualifiedCount === 'number') q = d.unviewedQualifiedCount;
       if (typeof d.unviewedFlaggedCount === 'number') f = d.unviewedFlaggedCount;
       setLeadsBadgeCount(q + f);
@@ -142,6 +155,103 @@ export default function App() {
     setActiveTab(tab);
     chrome.storage.local.set({ activeTab: tab }).catch(() => {});
   }
+
+  // Local lead cache (chrome.storage.local) — passed to InboxTab so it can
+  // mark known-lead rows with status pills. Refreshed when a lead is
+  // created/updated by the auto-gen flow.
+  const [localLeads, setLocalLeads] = useState([]);
+  useEffect(() => {
+    let mounted = true;
+    async function pull() {
+      try {
+        const all = await getAllLeads();
+        if (mounted) setLocalLeads(Array.isArray(all) ? all : []);
+      } catch {}
+    }
+    pull();
+    function onStorageChange(changes, area) {
+      if (area === 'local' && changes.leads) pull();
+    }
+    chrome.storage.onChanged.addListener(onStorageChange);
+    return () => {
+      mounted = false;
+      chrome.storage.onChanged.removeListener(onStorageChange);
+    };
+  }, []);
+
+  // Inbox row click → side panel doesn't manage activeThreadId directly;
+  // the FB tab navigation will fire THREAD_UPDATE which the Reply tab
+  // auto-detects. We just swap tabs back to Reply so the user sees the
+  // variants for the freshly-opened thread.
+  function handleInboxSelect(_threadId, _source) {
+    handleTabChange('reply');
+  }
+
+  // Detected thread = the thread our content script reports on the
+  // active FB tab. Distinct from `currentThreadId` (state above) which
+  // tracks the thread we LAST RAN GENERATE FOR via the modal flow.
+  const detectedThreadId = autoDetect?.status === 'ok'
+    ? getThreadIdFromUrl(autoDetect.url || '')
+    : null;
+
+  // Track which thread the currently-displayed result is for, so we wipe
+  // cleanly when the user switches threads.
+  const lastLoadedThreadRef = useRef(null);
+
+  useEffect(() => {
+    if (!detectedThreadId) return;
+    if (lastLoadedThreadRef.current && lastLoadedThreadRef.current !== detectedThreadId) {
+      setResult(null);
+      setError(null);
+    }
+    lastLoadedThreadRef.current = detectedThreadId;
+    let cancelled = false;
+    async function loadCached() {
+      try {
+        const key = 'cached_variants:' + detectedThreadId;
+        const data = await chrome.storage.local.get(key);
+        const cached = data[key];
+        if (cancelled) return;
+        if (cached?.result) {
+          const cachedSrc = (cached.source_message || '').trim();
+          const liveSrc = (autoDetect?.latestIncoming || '').trim();
+          // Match if: no live message yet (race) OR sources match.
+          const sourceMatches = !liveSrc || cachedSrc === liveSrc;
+          if (sourceMatches) {
+            setResult(cached.result);
+            setError(null);
+          }
+        }
+      } catch (err) {
+        console.warn('[FB Reply Maker SP] cache read failed:', err?.message);
+      }
+    }
+    loadCached();
+    return () => { cancelled = true; };
+  }, [detectedThreadId, autoDetect?.latestIncoming]);
+
+  // Live SW broadcasts: VARIANTS_GENERATING shows the loading state,
+  // VARIANTS_CACHED swaps in the freshly-generated variants when SW's
+  // auto-gen finishes for the thread the user is viewing.
+  useEffect(() => {
+    function onGenMsg(msg) {
+      if (!msg || !detectedThreadId) return;
+      if (msg.thread_id !== detectedThreadId) return;
+      if (msg.type === 'VARIANTS_GENERATING') {
+        setLoading(true);
+        setError(null);
+      } else if (msg.type === 'VARIANTS_CACHED' && msg.payload?.result) {
+        setResult(msg.payload.result);
+        setLoading(false);
+        setError(null);
+      } else if (msg.type === 'VARIANTS_FAILED') {
+        setLoading(false);
+        setError(msg.error || 'Auto-generate failed');
+      }
+    }
+    chrome.runtime.onMessage.addListener(onGenMsg);
+    return () => chrome.runtime.onMessage.removeListener(onGenMsg);
+  }, [detectedThreadId]);
 
   useEffect(() => {
     rescanAndRefresh();
@@ -410,9 +520,16 @@ export default function App() {
         activeTab={activeTab}
         onChange={handleTabChange}
         leadsBadgeCount={leadsBadgeCount}
+        inboxBadgeCount={0}
       />
 
-      {activeTab === 'reply' ? (
+      {activeTab === 'inbox' ? (
+        <InboxTab
+          onSelectThread={handleInboxSelect}
+          currentThreadId={autoDetect?.status === 'ok' ? getThreadIdFromUrl(autoDetect.url || '') : null}
+          leads={localLeads}
+        />
+      ) : activeTab === 'reply' ? (
         <>
           <AutoDetectCard
             autoDetect={autoDetect}

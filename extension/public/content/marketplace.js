@@ -65,10 +65,10 @@ const HEADER_BLACKLIST = /^(chats?|marketplace|inbox|settings|messenger|notifica
 // line of defense in case a future FB update adds a new sender pattern.
 const UI_BLOCKLIST = /^(Thread composer|Message|New message|Customize chat|Chat members|Media,? files,? (?:and|&) links|Privacy (?:and|&) support|Search in conversation|Mute notifications?|Block|Restrict|Unrestrict|Report (?:conversation|user)?|Mark as unread|Archive chat|Unarchive chat|Delete chat|Notifications?|Active now|Active status|Open photo viewer|See all|See more|Reactions?|Reply|Forward|More options?|Settings|Close|Back|Sign out|Help|Profile picture|Edit name|Change theme|Change emoji|Change nicknames?|Add people|Mark as spam|Conversation information|Thread settings)$/i;
 
-const MAX_CONTEXT_MESSAGES = 5;
-// Phase F.1: separate history limit for the full-screen UI which renders a
-// chat-bubble thread view. The sidepanel context limit stays at 5 to keep
-// the AI prompt tight; the fullscreen history is for human readability.
+// Aligned to 20 in the side-panel migration so AI context matches the full
+// scrape window. THREAD_UPDATE broadcasts now ship up to 20 turns; the
+// server prompt builds the history block from all of them.
+const MAX_CONTEXT_MESSAGES = 20;
 const MAX_HISTORY_MESSAGES = 20;
 const MIN_TEXT_LENGTH = 4;
 const MAX_TEXT_LENGTH = 500;
@@ -236,7 +236,7 @@ function isConversationPage() {
 // Phase F.1: scan all aria-labelled message rows in the active thread and
 // return the deduped, classified list in DOM order (oldest → newest). Shared
 // by detectThread (sidepanel broadcast — STRICT, drives auto-gen safety),
-// the GET_THREAD_HISTORY RPC (fullscreen thread view), and OPEN_THREAD
+// the GET_THREAD_HISTORY RPC, and OPEN_THREAD
 // (passes opts.permissive: true so group chats render).
 function scanThreadMessages(container, partnerName, opts) {
   const permissive = !!(opts && opts.permissive);
@@ -548,8 +548,6 @@ async function humanizedType(box, text) {
   const plan = buildTypingPlan(text);
   for (const op of plan) {
     if (document.hidden) {
-      // Tab went background mid-typing — bail. Caller decides whether to
-      // retry (currently: no auto-retry, surface failure).
       return { ok: false, reason: 'tab_hidden_mid_type' };
     }
     if (op.kind === 'char') {
@@ -699,78 +697,41 @@ function checkPreSendGuards({ text, threadHint }) {
 
 // Bulk-insert fallback (the original F.1 method). Still used when the
 // humanized character-by-character path is rejected by FB or when caller
-// opts out via { skipHumanized: true }.
+// opts out via { skipHumanized: true }. Single-method insert via
+// execCommand — works reliably when the FB tab is the active foreground
+// tab (which it always is in side-panel mode).
 async function bulkInsertReply(text) {
   const box = document.querySelector(SELECTORS.replyTextbox);
   if (!box) return { ok: false, reason: 'no_textbox' };
-  const sample = text.slice(0, 20);
-
-  // Method 1: InputEvent (most React-compatible)
+  const sample = text.slice(0, Math.min(20, text.length));
   try {
     box.focus();
-    const range = document.createRange();
-    range.selectNodeContents(box);
-    range.collapse(false);
     const sel = window.getSelection();
+    const r = document.createRange();
+    r.selectNodeContents(box);
     sel.removeAllRanges();
-    sel.addRange(range);
-    const ie = new InputEvent('beforeinput', {
-      inputType: 'insertText', data: text, bubbles: true, cancelable: true
-    });
-    const accepted = box.dispatchEvent(ie);
-    if (accepted) {
-      box.dispatchEvent(new InputEvent('input', {
-        inputType: 'insertText', data: text, bubbles: true
-      }));
-      if (box.innerText.includes(sample)) return { ok: true, method: 'inputEvent' };
-    }
+    sel.addRange(r);
+    document.execCommand('insertText', false, text);
   } catch (err) {
-    console.warn('[FB Reply Maker] bulk method 1 threw:', err?.message);
+    return { ok: false, reason: err?.message || 'insert_threw' };
   }
-
-  // Method 2: DOM insertNode + synthetic input/change
-  try {
-    box.focus();
-    const textNode = document.createTextNode(text);
-    const r2 = document.createRange();
-    r2.selectNodeContents(box);
-    r2.collapse(false);
-    r2.insertNode(textNode);
-    box.dispatchEvent(new Event('input', { bubbles: true }));
-    box.dispatchEvent(new Event('change', { bubbles: true }));
-    if (box.innerText.includes(sample)) return { ok: true, method: 'domInsert' };
-  } catch (err) {
-    console.warn('[FB Reply Maker] bulk method 2 threw:', err?.message);
+  await sleep(40);
+  if (!(box.innerText || '').includes(sample)) {
+    return { ok: false, reason: 'insert_failed' };
   }
-
-  // Method 3: Clipboard paste simulation (last resort)
-  try {
-    await navigator.clipboard.writeText(text);
-    box.focus();
-    const dt = new DataTransfer();
-    dt.setData('text/plain', text);
-    box.dispatchEvent(new ClipboardEvent('paste', {
-      clipboardData: dt, bubbles: true, cancelable: true
-    }));
-    return { ok: true, method: 'clipboardPaste' };
-  } catch (err) {
-    console.warn('[FB Reply Maker] bulk method 3 threw:', err?.message);
-  }
-  return { ok: false, reason: 'all_methods_failed' };
+  return { ok: true, method: 'execCommand' };
 }
 
-// F.1.7 entry point for INSERT_REPLY. Runs pre-send guards, types the
-// message character-by-character (with humanized distribution + occasional
-// typo-retype), and optionally clicks send via a mousemove path. Falls
-// back to bulk insert if humanized typing didn't produce the expected
-// text in the box (FB rejected our synthetic events).
+// Entry point for INSERT_REPLY. Runs pre-send guards, types the message
+// character-by-character (with humanized distribution + occasional typo-
+// retype), and optionally clicks send via a mousemove path. Falls back to
+// bulk insert if humanized typing didn't produce the expected text in the
+// box (FB rejected our synthetic events).
 async function tryInsertReply(text, opts) {
   const options = opts || {};
   const autoSend = !!options.auto_send;
   const threadHint = options.thread_id || null;
 
-  // Pre-send guards run regardless of auto-send. A placeholder leak is
-  // never something we want to leave dangling in the compose box either.
   const guard = checkPreSendGuards({ text, threadHint });
   if (!guard.ok) {
     console.warn('[FB Reply Maker] pre-send guard:', guard.reason, guard);
@@ -781,9 +742,6 @@ async function tryInsertReply(text, opts) {
   if (!box) return { ok: false, reason: 'no_textbox' };
   const sample = text.slice(0, Math.min(20, text.length));
 
-  // Humanized character-by-character typing. If the box doesn't actually
-  // contain the typed text after this (FB rejected synthetic events on
-  // this surface), fall back to bulk insert.
   let usedMethod = null;
   if (!options.skip_humanized) {
     const t = await humanizedType(box, text);
@@ -794,8 +752,6 @@ async function tryInsertReply(text, opts) {
     }
   }
   if (!usedMethod) {
-    // Reset the box (humanized typing may have left a partial state)
-    // then try the bulk path.
     try { box.innerText = ''; } catch { /* ignore */ }
     const bulk = await bulkInsertReply(text);
     if (!bulk.ok) return { ok: false, reason: bulk.reason || 'insert_failed' };
@@ -1123,10 +1079,11 @@ async function openThreadByRowClick({ thread_id, source } = {}) {
   const preContainer = document.querySelector(SELECTORS.threadContainer);
   const baselineLabels = snapshotThreadLabels(preContainer);
 
-  // Humanize: minimum 100ms gap since last FB DOM action + a random
-  // 150-400ms pre-click delay so the cadence looks human.
+  // Humanize gap is still respected, but the pre-click jitter is kept
+  // short (50-120ms) — reading a thread isn't the high-risk surface,
+  // sending is. Saves ~200ms per row-click on average.
   await ensureHumanGap();
-  await sleep(randomBetween(150, 400));
+  await sleep(randomBetween(50, 120));
 
   try {
     anchor.click();
@@ -1152,15 +1109,31 @@ async function openThreadByRowClick({ thread_id, source } = {}) {
   if (!container) {
     return { ok: false, reason: 'no_thread_container', thread_id, url: location.href };
   }
-  const swapped = await waitForThreadContentSwap(container, baselineLabels, 2500);
+  const swapped = await waitForThreadContentSwap(container, baselineLabels, 1500);
   if (!swapped && baselineLabels.size > 2) {
-    // Soft-fail: still return what's there but flag it so the caller can
-    // surface a refresh hint instead of silently showing stale data.
     console.warn('[FB Reply Maker] OPEN_THREAD: content swap not detected for', thread_id);
   }
 
   // Final settle for any trailing bubble inject after the swap signal.
-  await sleep(200);
+  await sleep(80);
+
+  // Hard verify: location.href must match the requested thread before we
+  // trust the scrape. Without this check, a slow FB SPA swap means we
+  // scrape the PREVIOUS thread's DOM and cache it under the requested
+  // thread_id — the bug behind cross-attributed variant text.
+  const urlThreadId = (() => {
+    const m = location.href.match(/\/(?:marketplace|messages)\/t\/([^/?#]+)/);
+    return m ? m[1] : null;
+  })();
+  if (urlThreadId && urlThreadId !== thread_id) {
+    return {
+      ok: false,
+      reason: 'fb_did_not_navigate',
+      thread_id,
+      current_thread_id: urlThreadId,
+      url: location.href
+    };
+  }
 
   const { partner: partnerName, listingTitle } = extractThreadInfo(container);
   // UI-side scan: permissive so group chats render with sender labels.
@@ -1509,7 +1482,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return;
   }
 
-  // Phase F.1: full-history RPC for the fullscreen thread view. Returns the
+  // Full-history RPC. Returns the
   // most recent MAX_HISTORY_MESSAGES with sender + text, plus thread metadata.
   if (msg?.type === 'GET_THREAD_HISTORY') {
     try {
