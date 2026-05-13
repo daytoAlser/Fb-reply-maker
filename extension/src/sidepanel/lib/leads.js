@@ -454,6 +454,49 @@ export async function updateLeadStatus(threadId, newStatus) {
   return lead;
 }
 
+// Phase E.5 — append entries to a lead's manualOptionsLog and flip
+// status to options_sent. Used by the "Log Options Sent" form in the
+// sidepanel. Each entry shape: { product_type, brand, model, size,
+// price, notes, logged_at }. Server-side prompt block reads from the
+// merged log on the next generate.
+export async function logManualOptionsSent(threadId, entries) {
+  if (!threadId || !Array.isArray(entries) || entries.length === 0) return null;
+  const leads = await getAllLeadsRaw();
+  const lead = leads[threadId];
+  if (!lead) return null;
+
+  const now = Date.now();
+  const stamped = entries.map((e) => ({
+    product_type: (e && e.product_type) || null,
+    brand:        (e && e.brand) || null,
+    model:        (e && e.model) || null,
+    size:         (e && e.size) || null,
+    price:        (e && e.price) || null,
+    notes:        (e && e.notes) || null,
+    logged_at:    now
+  })).filter((e) => e.product_type || e.brand || e.model);
+
+  if (stamped.length === 0) return null;
+
+  const prev = Array.isArray(lead.manualOptionsLog) ? lead.manualOptionsLog : [];
+  lead.manualOptionsLog = [...prev, ...stamped];
+
+  // Status promotion: only auto-flip when current status is in the
+  // auto-rank ladder (new/qualifying/qualified). Manual statuses
+  // (contacted, closed_won, closed_lost, stale) are user-driven and
+  // shouldn't be overwritten by an options-logged event.
+  const prevStatus = lead.status || 'new';
+  if (!MANUAL_STATUSES.has(prevStatus)) {
+    lead.status = 'options_sent';
+    if (prevStatus === 'qualified') await bumpUnviewedQualified(-1);
+  }
+  lead.lastUpdated = now;
+
+  await chrome.storage.local.set({ [STORAGE_KEY]: leads });
+  fireAndForgetSync('upsert', threadId, lead);
+  return lead;
+}
+
 export async function resolveAllFlags(threadId) {
   if (!threadId) return null;
   const leads = await getAllLeadsRaw();

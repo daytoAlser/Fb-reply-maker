@@ -9,12 +9,14 @@ import LeadsTab from './components/LeadsTab.jsx';
 import FlagBanner from './components/FlagBanner.jsx';
 import MultiProductChips from './components/MultiProductChips.jsx';
 import ReturningCustomerBanner from './components/ReturningCustomerBanner.jsx';
+import LogOptionsModal from './components/LogOptionsModal.jsx';
 import { generateReply } from './lib/api.js';
 import { loadAll } from './lib/storage.js';
 import {
   getThreadIdFromUrl,
   createOrUpdateLead,
   getLeadByThreadId,
+  logManualOptionsSent,
   migrateLeadsToSupabase,
   retrySyncPending
 } from './lib/leads.js';
@@ -45,6 +47,13 @@ export default function App() {
   const [leadsBadgeCount, setLeadsBadgeCount] = useState(0);
   const [overrideActive, setOverrideActive] = useState(false);
   const [priorStatusSnapshot, setPriorStatusSnapshot] = useState(null);
+  // Phase E.5 — track current lead's thread + status so the Log Options
+  // Sent button can show/hide based on status === qualified, and so the
+  // log helper can target the right lead. Modal open + submit-in-flight.
+  const [currentThreadId, setCurrentThreadId] = useState(null);
+  const [currentLeadStatus, setCurrentLeadStatus] = useState(null);
+  const [logOptionsOpen, setLogOptionsOpen] = useState(false);
+  const [loggingOptions, setLoggingOptions] = useState(false);
 
   const isManualRef = useRef(false);
   const lastAutoFilledRef = useRef('');
@@ -251,6 +260,7 @@ export default function App() {
       let existingStatus = null;
       let existingLastUpdated = null;
       let existingSilenceDurationMs = null;
+      let existingManualOptionsLog = null;
       if (threadId) {
         try {
           const existingLead = await getLeadByThreadId(threadId);
@@ -268,6 +278,9 @@ export default function App() {
             : null;
           existingSilenceDurationMs = typeof existingLead?.silenceDurationMs === 'number'
             ? existingLead.silenceDurationMs
+            : null;
+          existingManualOptionsLog = Array.isArray(existingLead?.manualOptionsLog)
+            ? existingLead.manualOptionsLog
             : null;
         } catch (err) {
           console.warn('[FB Reply Maker SP] read existing lead failed:', err?.message);
@@ -315,6 +328,9 @@ export default function App() {
         existing_last_updated: existingLastUpdated || undefined,
         existing_silence_duration_ms: typeof existingSilenceDurationMs === 'number'
           ? existingSilenceDurationMs
+          : undefined,
+        existing_manual_options_log: existingManualOptionsLog && existingManualOptionsLog.length > 0
+          ? existingManualOptionsLog
           : undefined
       });
 
@@ -358,6 +374,10 @@ export default function App() {
             lastCustomerMessageAt: typeof res?.last_customer_message_at === 'number' ? res.last_customer_message_at : undefined
           });
           console.log('[FB Reply Maker SP] lead updated:', lead?.threadId);
+          // Phase E.5: track current lead so Log Options Sent button can
+          // gate its visibility on status.
+          setCurrentThreadId(lead?.threadId || threadId || null);
+          setCurrentLeadStatus(lead?.status || null);
         } catch (err) {
           console.error('[FB Reply Maker SP] lead update failed:', err);
         }
@@ -452,19 +472,56 @@ export default function App() {
               <VariantCard kind="quick" text={result.variants.quick} />
               <VariantCard kind="standard" text={result.variants.standard} />
               <VariantCard kind="detailed" text={result.variants.detailed} />
-              <button
-                className="btn-secondary"
-                onClick={() => handleGenerate()}
-                disabled={loading}
-              >
-                Regenerate
-              </button>
+              <div className="post-variant-actions">
+                <button
+                  className="btn-secondary"
+                  onClick={() => handleGenerate()}
+                  disabled={loading}
+                >
+                  Regenerate
+                </button>
+                {currentThreadId && (currentLeadStatus === 'qualified' || currentLeadStatus === 'options_sent') && (
+                  <button
+                    className="btn-secondary log-options-btn"
+                    onClick={() => setLogOptionsOpen(true)}
+                    disabled={loading || loggingOptions}
+                    title="Record what you just sent the customer so the next reply has context"
+                  >
+                    {currentLeadStatus === 'options_sent' ? '+ Log More Options' : 'Log Options Sent'}
+                  </button>
+                )}
+              </div>
             </section>
           )}
         </>
       ) : (
         <LeadsTab />
       )}
+
+      <LogOptionsModal
+        open={logOptionsOpen}
+        submitting={loggingOptions}
+        onClose={() => setLogOptionsOpen(false)}
+        onSubmit={async (entries) => {
+          if (!currentThreadId) {
+            setLogOptionsOpen(false);
+            return;
+          }
+          setLoggingOptions(true);
+          try {
+            const updated = await logManualOptionsSent(currentThreadId, entries);
+            if (updated) {
+              setCurrentLeadStatus(updated.status || 'options_sent');
+              console.log('[FB Reply Maker SP] manual options logged:', entries.length, 'entries');
+            }
+          } catch (err) {
+            console.error('[FB Reply Maker SP] log options failed:', err);
+          } finally {
+            setLoggingOptions(false);
+            setLogOptionsOpen(false);
+          }
+        }}
+      />
     </div>
   );
 }

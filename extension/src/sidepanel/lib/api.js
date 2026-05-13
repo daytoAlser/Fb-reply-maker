@@ -18,7 +18,8 @@ export async function generateReply({
   existing_last_customer_message_at,
   existing_status,
   existing_last_updated,
-  existing_silence_duration_ms
+  existing_silence_duration_ms,
+  existing_manual_options_log
 }) {
   const body = { message, context, categoryOverride };
   if (Array.isArray(conversationHistory) && conversationHistory.length > 0) {
@@ -65,6 +66,9 @@ export async function generateReply({
   }
   if (typeof existing_silence_duration_ms === 'number' && existing_silence_duration_ms >= 0) {
     body.existing_silence_duration_ms = existing_silence_duration_ms;
+  }
+  if (Array.isArray(existing_manual_options_log) && existing_manual_options_log.length > 0) {
+    body.existing_manual_options_log = existing_manual_options_log;
   }
 
   console.log('[FB Reply Maker API] sending body:', { ...body, secret: '[REDACTED]' });

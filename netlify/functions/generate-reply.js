@@ -123,7 +123,7 @@ function detectReturningTrigger({ message, prevMode, prevStatus, prevLastCustome
   return { mode: 'standard', firstTrigger: false, reason: 'no_trigger' };
 }
 
-async function upsertLeadToSupabase({ thread_id, partner_name, fb_thread_url, listing_title, ad_type, captured_fields, status, flags, writeFlags, products_of_interest, ready_for_options, conversation_mode, silence_duration_ms, last_customer_message_at }) {
+async function upsertLeadToSupabase({ thread_id, partner_name, fb_thread_url, listing_title, ad_type, captured_fields, status, flags, writeFlags, products_of_interest, ready_for_options, conversation_mode, silence_duration_ms, last_customer_message_at, manual_options_log }) {
   const row = {
     thread_id,
     last_updated: new Date().toISOString()
@@ -156,6 +156,12 @@ async function upsertLeadToSupabase({ thread_id, partner_name, fb_thread_url, li
   if (last_customer_message_at) {
     const ms = toEpochMs(last_customer_message_at);
     if (ms) row.last_customer_message_at = new Date(ms).toISOString();
+  }
+  // Phase E.5 — mirror manual_options_log into the row when supplied.
+  // sync-lead.js also writes this column from the standalone sync flow;
+  // having generate-reply do it too keeps the row fresh on each turn.
+  if (Array.isArray(manual_options_log)) {
+    row.manual_options_log = manual_options_log;
   }
 
   console.log('[FN] supabase upsert payload:', JSON.stringify(row));
@@ -308,6 +314,41 @@ ${lines.join('\n')}
 Carry these forward in products_of_interest. Add new entries if the current message references new product categories. Do not drop a product already tracked.
 
 Every per-product field listed above as anything other than "null" is RESOLVED. Per the RESOLVED QUALIFIER LOCK rule below, do not re-ask about any of these resolved values in QUICK, STANDARD, or DETAILED. Use them as established context only.
+`;
+}
+
+// Phase E.5 — YOU PREVIOUSLY SENT THESE OPTIONS block. Reads from the
+// lead's manualOptionsLog (set by the sidepanel "Log Options Sent" flow).
+// When present, the AI must reference these by name/price instead of
+// re-proposing products it can't actually pick from inventory.
+function buildManualOptionsBlock(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) return '';
+  const lines = [];
+  for (const e of entries) {
+    if (!e || typeof e !== 'object') continue;
+    const productType = (e.product_type || e.productType || '').toString().trim();
+    const brand = (e.brand || '').toString().trim();
+    const model = (e.model || '').toString().trim();
+    const size = (e.size || '').toString().trim();
+    const price = (e.price || '').toString().trim();
+    const notes = (e.notes || '').toString().trim();
+    const head = [productType || 'item', [brand, model].filter(Boolean).join(' ')]
+      .filter(Boolean).join(': ');
+    const specs = [size, price].filter(Boolean).join(' · ');
+    const tail = notes ? ` (${notes})` : '';
+    lines.push(`- ${head}${specs ? ' — ' + specs : ''}${tail}`);
+  }
+  if (lines.length === 0) return '';
+  return `
+YOU PREVIOUSLY SENT THESE OPTIONS (logged by the rep — these are real product picks that have been quoted to the customer)
+${lines.join('\n')}
+
+HARD RULES:
+- Reference these by name/price naturally when the customer responds. DO NOT re-suggest products — these are the options on the table.
+- When the customer expresses interest in one of these by name, treat it as a buy-signal: shift to phone-collection / deposit-setup voice ("Send me a good phone number for ya so I can add you to the system and get you a full estimate, broken down easy to read").
+- When the customer is torn between two of these, advisor mode (E.3) can apply on top of this context.
+- DO NOT invent additional product specs or alternative SKUs beyond what's listed above. The rep handpicked these.
+- Lead status is options_sent. Don't re-collect qualifiers that are already captured.
 `;
 }
 
@@ -718,7 +759,7 @@ ENDING:
 `;
 }
 
-const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock, decisionSupportBlock, wrongProductBlock, financingBlock }) => {
+const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock, decisionSupportBlock, wrongProductBlock, financingBlock, manualOptionsBlock }) => {
   const listingBlock = listingTitle && listingTitle.trim()
     ? `\nLISTING CONTEXT\nThe customer is messaging about this listing: "${listingTitle.trim()}". Use this together with the customer's message to infer ad_type (wheel / tire / accessory / lift) per the detection signals below.\n`
     : '';
@@ -1000,7 +1041,7 @@ When all qualifiers for a product are captured, MOVE FORWARD:
 - If ALL tracked products are fully qualified, transition into recommendation / quote-punt voice. Reference the captured spec ("for cruising and highway with the 6-inch goal, the value kit will be perfect…") rather than re-asking.
 
 Re-asking a resolved qualifier is a hard error. Every variant must respect the lock.
-${existingProductsBlock}${interpretationBlock || ''}${wrongProductBlock || ''}${financingBlock || ''}${decisionSupportBlock || ''}${categoryClause}${buildHistoryBlock(conversationHistory)}
+${existingProductsBlock}${manualOptionsBlock || ''}${interpretationBlock || ''}${wrongProductBlock || ''}${financingBlock || ''}${decisionSupportBlock || ''}${categoryClause}${buildHistoryBlock(conversationHistory)}
 OUTPUT
 Respond ONLY with valid JSON. No markdown fencing. No preamble.
 {
@@ -1080,7 +1121,11 @@ export async function handler(event) {
     existing_last_customer_message_at,
     existing_status,
     existing_last_updated,
-    existing_silence_duration_ms
+    existing_silence_duration_ms,
+    // Phase E.5 — array of { product_type, brand, model, size, price, notes,
+    // logged_at } entries the user has explicitly recorded as sent to the
+    // customer. Server treats it as canonical context for variant generation.
+    existing_manual_options_log
   } = body;
   if (!message || !context) {
     return { statusCode: 400, headers, body: 'Missing message or context' };
@@ -1294,6 +1339,15 @@ export async function handler(event) {
     block_length: decisionSupportBlock.length
   });
 
+  // Phase E.5 — manual options block. Builds from existing_manual_options_log
+  // ferried up from chrome.storage. Empty array / missing field → empty
+  // string; no regression on threads that haven't logged options.
+  const manualOptionsBlock = buildManualOptionsBlock(existing_manual_options_log);
+  console.log('[FN] manual options:', {
+    entry_count: Array.isArray(existing_manual_options_log) ? existing_manual_options_log.length : 0,
+    block_length: manualOptionsBlock.length
+  });
+
   const systemPrompt = SYSTEM_PROMPT_TEMPLATE({
     openerLine,
     listingTitle,
@@ -1308,7 +1362,8 @@ export async function handler(event) {
     interpretationBlock,
     decisionSupportBlock,
     wrongProductBlock,
-    financingBlock
+    financingBlock,
+    manualOptionsBlock
   });
 
   console.log('[FN] resolved opener:', openerLine);
@@ -1403,7 +1458,11 @@ export async function handler(event) {
           ready_for_options: allProductsQualified,
           conversation_mode: effectiveConversationMode,
           silence_duration_ms: effectiveSilenceDurationMs,
-          last_customer_message_at: effectiveLastCustomerMessageAt
+          last_customer_message_at: effectiveLastCustomerMessageAt,
+          // Phase E.5 — pass through so server-side upsert mirrors the
+          // extension's local manualOptionsLog. sync-lead.js already
+          // writes this column; this keeps generate-reply in step too.
+          manual_options_log: Array.isArray(existing_manual_options_log) ? existing_manual_options_log : undefined
         });
         if (error) {
           console.error('[FN] supabase upsert error full:', JSON.stringify(error));
