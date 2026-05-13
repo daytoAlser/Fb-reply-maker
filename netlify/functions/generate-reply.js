@@ -5,6 +5,8 @@ import { normalize as runNormalize } from './lib/interpretation/normalize.js';
 import { interpret as runInterpret } from './lib/interpretation/interpret.js';
 // Phase E.3 — per-turn decision-support detection.
 import { detectDecisionSupport } from './lib/interpretation/decisionSupport.js';
+// Phase E.4 — wrong-product / fitment-mismatch / pivot detection.
+import { detectWrongProduct } from './lib/interpretation/wrongProduct.js';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -556,7 +558,91 @@ TIE-IN:
 `;
 }
 
-const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock, decisionSupportBlock }) => {
+// Phase E.4 — WRONG-PRODUCT REDIRECT prompt block. Per-turn override.
+// Takes priority over E.3 advisor mode (caller suppresses decisionSupport
+// when wrongProduct fires). Coexists with RETURNING (body of message
+// becomes the redirect; returning opener still skipped).
+function buildWrongProductBlock(wp, returningActive) {
+  if (!wp || !wp.type) return '';
+  const returningCoexist = returningActive
+    ? `\n- RETURNING MODE is also active. The body of this turn is the redirect below; skip the returning-mode opener.`
+    : '';
+
+  if (wp.type === 'not_carried') {
+    const targets = (wp.redirect_targets && wp.redirect_targets.length > 0)
+      ? `\n- Vetted alternatives we CAN supply: ${wp.redirect_targets.join(', ')}. Only mention these — do NOT invent other alternatives.`
+      : `\n- No vetted alternatives available. If the customer pushes, punt to phone for a manager call.`;
+    return `
+WRONG-PRODUCT REDIRECT — NOT CARRIED (this turn only)
+The customer asked about "${wp.requested_product}" (matched phrase: "${wp.matched_phrase}") — this is NOT something CCAW supplies.${returningCoexist}
+
+HARD RULES (this turn):
+- Use this redirect message verbatim or very close: "${wp.redirect_message}"${targets}
+- DO NOT pretend we can get it, "check on it", or invent stock. CCAW does not carry this product line.
+- DO NOT collect qualifiers this turn — the dead-end / pivot offer comes first.
+- Tone stays casual Brandon. Bad news lands like good news. "Honestly man, we can't get those" beats "Unfortunately we do not carry that product line."
+- For competitive-shop redirects (tint, paint, fab, exhaust, detail): be helpful, not territorial. Offer to point them somewhere if you can.
+
+ENDING:
+- Soft offer to grab the alternative (if any), or to point them to a specialty shop.
+- DO NOT end with the standard estimate/phone-handoff pitch.
+`;
+  }
+
+  if (wp.type === 'fitment_mismatch') {
+    const reasonLines = (() => {
+      if (wp.subreason === 'bolt_pattern_incompatible') {
+        return `- Listing wheels are bolt pattern ${wp.listing_bolt_pattern}. Customer vehicle ("${wp.vehicle_text}") doesn't run that pattern.
+- Pivot suggestion: offer ${wp.pivot_suggestion}.`;
+      }
+      if (wp.subreason === 'tire_type_incompatible') {
+        return `- Listing tire is ${wp.listing_tire_prefix || ''}${wp.listing_tire_prefix ? '-prefix ' : ''}(${wp.listing_tire_type}). Customer vehicle ("${wp.vehicle_text}") is not a match for that tire type.`;
+      }
+      if (wp.subreason === 'lift_kit_incompatible_vehicle') {
+        return `- Listing is a lift kit. Customer vehicle ("${wp.vehicle_text}") is a car/sedan/sports car — there's no aftermarket lift for that.`;
+      }
+      return `- Listing/vehicle fitment mismatch detected.`;
+    })();
+
+    return `
+WRONG-PRODUCT REDIRECT — FITMENT MISMATCH (this turn only)
+The product in the listing won't fit the customer's vehicle.${returningCoexist}
+
+${reasonLines}
+
+HARD RULES (this turn):
+- Acknowledge the mismatch directly without sounding rejecting. Brandon voice: "Heads up man, those won't work on the ${wp.vehicle_text || 'vehicle'}, they're [reason]. Want me to find you options that'll fit?"
+- DO NOT pretend the listing wheels/tires/lift will fit. They won't.
+- DO NOT collect unrelated qualifiers — the fitment news comes first.
+- If a pivot suggestion exists, offer it as a soft open. If not, ask what the customer's actually looking for.
+
+ENDING:
+- Soft offer to find the correct product for their vehicle.
+- DO NOT push to phone handoff this turn.
+`;
+  }
+
+  if (wp.type === 'product_pivot') {
+    const quals = Array.isArray(wp.pivot_qualifiers_needed) ? wp.pivot_qualifiers_needed.join(', ') : '';
+    return `
+WRONG-PRODUCT REDIRECT — PRODUCT PIVOT (this turn only)
+Customer is pivoting from the original listing (${wp.original_listing}) to a different product (${wp.new_product}) that IS in our catalog.${returningCoexist}
+
+HARD RULES (this turn):
+- Smooth acknowledgment of the pivot — don't make a big deal of it. "Yeah for sure!" or "Easy, let me check" or "Totally, what were you thinking?"
+- Begin collecting the NEW product's qualifiers. Required for ${wp.new_product}: ${quals}.
+- RESOLVED QUALIFIER LOCK still applies for previously captured fields (e.g. vehicle stays captured). Don't re-ask anything already in extracted_fields.
+- DO NOT push the original product. Customer moved on.
+
+ENDING:
+- Ask the first missing qualifier for the new product naturally.
+`;
+  }
+
+  return '';
+}
+
+const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock, decisionSupportBlock, wrongProductBlock }) => {
   const listingBlock = listingTitle && listingTitle.trim()
     ? `\nLISTING CONTEXT\nThe customer is messaging about this listing: "${listingTitle.trim()}". Use this together with the customer's message to infer ad_type (wheel / tire / accessory / lift) per the detection signals below.\n`
     : '';
@@ -838,7 +924,7 @@ When all qualifiers for a product are captured, MOVE FORWARD:
 - If ALL tracked products are fully qualified, transition into recommendation / quote-punt voice. Reference the captured spec ("for cruising and highway with the 6-inch goal, the value kit will be perfect…") rather than re-asking.
 
 Re-asking a resolved qualifier is a hard error. Every variant must respect the lock.
-${existingProductsBlock}${interpretationBlock || ''}${decisionSupportBlock || ''}${categoryClause}${buildHistoryBlock(conversationHistory)}
+${existingProductsBlock}${interpretationBlock || ''}${wrongProductBlock || ''}${decisionSupportBlock || ''}${categoryClause}${buildHistoryBlock(conversationHistory)}
 OUTPUT
 Respond ONLY with valid JSON. No markdown fencing. No preamble.
 {
@@ -1043,20 +1129,51 @@ export async function handler(event) {
     block_length: interpretationBlock.length
   });
 
+  // Phase E.4: wrong-product detection. Runs BEFORE decision-support so
+  // we can suppress E.3 when E.4 fires (advisor mode doesn't make sense
+  // for a product we can't supply or that doesn't fit the vehicle).
+  let wrongProduct = null;
+  try {
+    wrongProduct = detectWrongProduct({
+      message,
+      listingTitle,
+      capturedVehicle,
+      adType: undefined // generate-reply infers ad_type via the LLM; not available here yet
+    });
+  } catch (err) {
+    console.warn('[FN] wrongProduct threw:', err?.message || err);
+    wrongProduct = null;
+  }
+  const wrongProductBlock = wrongProduct
+    ? buildWrongProductBlock(wrongProduct, effectiveConversationMode === 'returning')
+    : '';
+  console.log('[FN] wrong product:', {
+    type: wrongProduct?.type || null,
+    subreason: wrongProduct?.subreason || null,
+    requested: wrongProduct?.requested_product || null,
+    new_product: wrongProduct?.new_product || null,
+    block_length: wrongProductBlock.length
+  });
+
   // Phase E.3: decision-support detection. Pure, per-turn — doesn't
   // persist on the lead. Reads conversation_history for the options-
   // presented gate (≥2 $-prices across rep-sent messages) and the
   // current message for advisor language + sub-mode classification.
+  // SUPPRESSED when E.4 fires — wrong-product takes priority.
   let decisionSupport = null;
-  try {
-    decisionSupport = detectDecisionSupport({
-      message,
-      history: conversation_history,
-      normalized: interpretation
-    });
-  } catch (err) {
-    console.warn('[FN] decisionSupport threw:', err?.message || err);
-    decisionSupport = { triggered: false, gate_reason: 'detector_threw' };
+  if (wrongProduct) {
+    decisionSupport = { triggered: false, gate_reason: 'suppressed_by_wrong_product' };
+  } else {
+    try {
+      decisionSupport = detectDecisionSupport({
+        message,
+        history: conversation_history,
+        normalized: interpretation
+      });
+    } catch (err) {
+      console.warn('[FN] decisionSupport threw:', err?.message || err);
+      decisionSupport = { triggered: false, gate_reason: 'detector_threw' };
+    }
   }
   const decisionSupportBlock = decisionSupport && decisionSupport.triggered
     ? buildDecisionSupportBlock(decisionSupport, effectiveConversationMode === 'returning')
@@ -1083,7 +1200,8 @@ export async function handler(event) {
     priorStatus: existing_status,
     silenceDurationMs: effectiveSilenceDurationMs,
     interpretationBlock,
-    decisionSupportBlock
+    decisionSupportBlock,
+    wrongProductBlock
   });
 
   console.log('[FN] resolved opener:', openerLine);
