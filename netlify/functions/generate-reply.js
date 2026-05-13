@@ -7,6 +7,9 @@ import { interpret as runInterpret } from './lib/interpretation/interpret.js';
 import { detectDecisionSupport } from './lib/interpretation/decisionSupport.js';
 // Phase E.4 — wrong-product / fitment-mismatch / pivot detection.
 import { detectWrongProduct } from './lib/interpretation/wrongProduct.js';
+// Phase E.7 — financing-mode detection + deterministic FAQ.
+import { detectFinancingMode } from './lib/interpretation/financing.js';
+import { FINANCING_FAQ } from './lib/data/financing-faq.js';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -642,7 +645,80 @@ ENDING:
   return '';
 }
 
-const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock, decisionSupportBlock, wrongProductBlock }) => {
+// Phase E.7 — FINANCING MODE prompt block. Per-turn override. Reads
+// deterministic facts from FINANCING_FAQ — the LLM must NOT extemporize
+// beyond what's stated. Suppressed when E.4 (wrong-product) fires, and
+// suppresses E.3 (advisor) when itself fires.
+function buildFinancingBlock(financing, returningActive) {
+  if (!financing || !financing.triggered) return '';
+  const v = FINANCING_FAQ.voice_strings;
+  const subMode = financing.sub_mode || 'inquiry';
+  const primaryVoice = v[subMode] || v.inquiry;
+
+  // Orthogonal punts — appended when customer asked specifically about
+  // rates or approval odds, on top of the primary sub-mode voice.
+  const ratePuntLine = financing.asks_specific_rate
+    ? `\n- Customer asked about a SPECIFIC RATE. Use rate punt: "${v.rate_punt}". Do NOT quote a number under any circumstance.`
+    : '';
+  const approvalPuntLine = financing.asks_approval_promise
+    ? `\n- Customer asked WILL I BE APPROVED. Use approval punt: "${v.approval_punt}". Do NOT promise approval.`
+    : '';
+
+  const returningCoexist = returningActive
+    ? `\n- RETURNING MODE is also active. Skip the returning-mode opener; the financing answer below is the body of this turn.`
+    : '';
+
+  // Sub-mode-specific extra structure rules.
+  const structureExtra = (() => {
+    if (subMode === 'documents') {
+      const docList = FINANCING_FAQ.documents_required.map((d) => `  • ${d}`).join('\n');
+      return `\n\nALWAYS list ALL four documents in this exact order (or close to it):\n${docList}`;
+    }
+    if (subMode === 'calculation') {
+      return `\n\nThe customer is doing math on the loan. Acknowledge their number, then redirect to the open-ended benefit (interest accrues only while loan is open). Do NOT confirm or deny their total — only the financing partner can do the real math. Focus on the structural benefit, not the number itself.`;
+    }
+    if (subMode === 'early_payout') {
+      return `\n\nLean hard on "open-ended, no penalty". This is the strongest selling point — customers care about it more than the rate.`;
+    }
+    if (subMode === 'inquiry') {
+      return `\n\nIf this is a first-touch financing question, end with an offer to send the application. Don't dump everything at once — open the door.`;
+    }
+    return '';
+  })();
+
+  return `
+FINANCING MODE — ACTIVE (this turn only)
+The customer is asking about financing (sub-mode: ${subMode}). Answer from CCAW's deterministic financing FAQ. Do NOT extemporize beyond what's stated here.${returningCoexist}
+
+PRIMARY VOICE ANCHOR (use this verbatim or very close — adapt only to thread tone):
+"${primaryVoice}"${ratePuntLine}${approvalPuntLine}${structureExtra}
+
+DETERMINISTIC FACTS (these are CCAW's policy — do not contradict):
+- Financing partner: open-ended, no-credit-check, soft credit check only (does NOT impact credit score).
+- Default loan term: ${FINANCING_FAQ.loan_terms.default_term_months} months. Payment frequency: ${FINANCING_FAQ.loan_terms.payment_frequency.join(' or ')}.
+- Interest behavior: accrues ONLY on the time the loan is open. Pay off in 6 months → 6 months of interest, NOT the full 36-month schedule.
+- Early payout: NO penalty. Loan is open-ended. Pay principal + accrued interest to date, done.
+- Documents required: ${FINANCING_FAQ.documents_required.join(' / ')}.
+- Deposits: special orders require deposit (typically $200-$500); in-stock items installing within 2-3 days typically don't.
+- Approval: same-day typically, soft credit check only.
+
+HARD RULES (this turn):
+- NEVER quote a specific interest rate or APR percentage. Rate depends on customer credit; only the financing partner sets it.
+- NEVER promise approval ("you'll definitely be approved", "you'll get it for sure"). Always: "soft check, doesn't hurt to apply".
+- NEVER state a total dollar amount that includes interest. The financing partner does the real math at application time.
+- NEVER invent partner-specific quirks, dispute processes, or missed-payment policies. Outside-FAQ punt: "${v.outside_faq_punt}"
+- DO NOT pivot back to product qualifier collection this turn. Financing FAQ stays in the financing lane.
+- DO NOT push to estimate/phone handoff unless the question is genuinely outside the FAQ.
+- Tone stays casual Brandon. Financing is technical but the voice doesn't get formal. "Honestly man" / "Easy man" / "Big thing is" — same voice as the rest of CCAW.
+
+ENDING:
+- For inquiry / approval / documents sub-modes: end with an offer to send the application or move to next step.
+- For terms / early_payout / calculation: end with a soft hook on the open-ended benefit or "let me know if that helps".
+- Outside-FAQ topics: use the outside-FAQ punt above.
+`;
+}
+
+const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock, decisionSupportBlock, wrongProductBlock, financingBlock }) => {
   const listingBlock = listingTitle && listingTitle.trim()
     ? `\nLISTING CONTEXT\nThe customer is messaging about this listing: "${listingTitle.trim()}". Use this together with the customer's message to infer ad_type (wheel / tire / accessory / lift) per the detection signals below.\n`
     : '';
@@ -924,7 +1000,7 @@ When all qualifiers for a product are captured, MOVE FORWARD:
 - If ALL tracked products are fully qualified, transition into recommendation / quote-punt voice. Reference the captured spec ("for cruising and highway with the 6-inch goal, the value kit will be perfect…") rather than re-asking.
 
 Re-asking a resolved qualifier is a hard error. Every variant must respect the lock.
-${existingProductsBlock}${interpretationBlock || ''}${wrongProductBlock || ''}${decisionSupportBlock || ''}${categoryClause}${buildHistoryBlock(conversationHistory)}
+${existingProductsBlock}${interpretationBlock || ''}${wrongProductBlock || ''}${financingBlock || ''}${decisionSupportBlock || ''}${categoryClause}${buildHistoryBlock(conversationHistory)}
 OUTPUT
 Respond ONLY with valid JSON. No markdown fencing. No preamble.
 {
@@ -1155,14 +1231,44 @@ export async function handler(event) {
     block_length: wrongProductBlock.length
   });
 
+  // Phase E.7: financing-mode detection. Runs AFTER E.4 (which can
+  // suppress it — don't talk financing about a product we can't supply)
+  // and BEFORE E.3 (financing answers take priority over generic
+  // advisor framing when the question is financing-specific).
+  let financing = null;
+  if (wrongProduct) {
+    financing = { triggered: false, gate_reason: 'suppressed_by_wrong_product' };
+  } else {
+    try {
+      financing = detectFinancingMode(message);
+    } catch (err) {
+      console.warn('[FN] financing threw:', err?.message || err);
+      financing = { triggered: false, gate_reason: 'detector_threw' };
+    }
+  }
+  const financingBlock = financing && financing.triggered
+    ? buildFinancingBlock(financing, effectiveConversationMode === 'returning')
+    : '';
+  console.log('[FN] financing:', {
+    triggered: !!financing?.triggered,
+    sub_mode: financing?.sub_mode || null,
+    asks_rate: !!financing?.asks_specific_rate,
+    asks_approval: !!financing?.asks_approval_promise,
+    gate_reason: financing?.gate_reason || null,
+    block_length: financingBlock.length
+  });
+
   // Phase E.3: decision-support detection. Pure, per-turn — doesn't
   // persist on the lead. Reads conversation_history for the options-
   // presented gate (≥2 $-prices across rep-sent messages) and the
   // current message for advisor language + sub-mode classification.
-  // SUPPRESSED when E.4 fires — wrong-product takes priority.
+  // SUPPRESSED when E.4 OR E.7 fires (both take priority for their
+  // respective question domains).
   let decisionSupport = null;
   if (wrongProduct) {
     decisionSupport = { triggered: false, gate_reason: 'suppressed_by_wrong_product' };
+  } else if (financing && financing.triggered) {
+    decisionSupport = { triggered: false, gate_reason: 'suppressed_by_financing' };
   } else {
     try {
       decisionSupport = detectDecisionSupport({
@@ -1201,7 +1307,8 @@ export async function handler(event) {
     silenceDurationMs: effectiveSilenceDurationMs,
     interpretationBlock,
     decisionSupportBlock,
-    wrongProductBlock
+    wrongProductBlock,
+    financingBlock
   });
 
   console.log('[FN] resolved opener:', openerLine);
