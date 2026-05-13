@@ -699,7 +699,7 @@ DETERMINISTIC FACTS (these are CCAW's policy — do not contradict):
 - Interest behavior: accrues ONLY on the time the loan is open. Pay off in 6 months → 6 months of interest, NOT the full 36-month schedule.
 - Early payout: NO penalty. Loan is open-ended. Pay principal + accrued interest to date, done.
 - Documents required: ${FINANCING_FAQ.documents_required.join(' / ')}.
-- Deposits: special orders require deposit (typically $200-$500); in-stock items installing within 2-3 days typically don't.
+- Deposits: special orders require a deposit (amount varies by order size — let rep quote); in-stock items installing within 2-3 days typically don't.
 - Approval: same-day typically, soft credit check only.
 
 HARD RULES (this turn):

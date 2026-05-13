@@ -30,7 +30,7 @@ export const FINANCING_FAQ = {
     "Driver's license (both sides)"
   ],
   deposit_rules: {
-    special_orders: 'deposit required, typically $200-$500',
+    special_orders: 'deposit varies by order size',
     in_stock_quick_install: 'no deposit if installing within 2-3 days'
   },
   approval: {
