@@ -628,6 +628,36 @@ select:focus-visible {
   background: rgba(239, 68, 68, 0.08);
 }
 
+/* F.1.7: primary Send action — stronger than Insert (accent), with state
+   variants for ok/warn/err so the same button surfaces the result. */
+.btn-mini-send {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.btn-mini-send:hover {
+  background: var(--accent-hi, var(--accent));
+  box-shadow: var(--glow-accent-soft);
+}
+.btn-mini-send:disabled,
+.btn-mini-send:disabled:hover {
+  opacity: 0.55;
+  box-shadow: none;
+}
+.btn-mini-ok,
+.btn-mini-ok:hover {
+  background: var(--success, #16a34a);
+  border-color: var(--success, #16a34a);
+  color: #fff;
+}
+.btn-mini-warn,
+.btn-mini-warn:hover {
+  background: rgba(245, 158, 11, 0.15);
+  border-color: var(--warning, #f59e0b);
+  color: var(--warning, #f59e0b);
+}
+
 /* ============================================================
    Error banner
    ============================================================ */

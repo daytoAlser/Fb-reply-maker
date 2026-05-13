@@ -320,6 +320,21 @@ export default function App() {
           next.delete(msg.thread_id);
           return next;
         });
+      } else if (msg.type === 'F1_VARIANTS_CLEARED' && msg.thread_id) {
+        // F.1.7 post-send cleanup: SW just wiped cached_variants for this
+        // thread after a confirmed send. Mirror that locally so the right
+        // pane stops showing the variant that was just sent.
+        setCachedByThread((prev) => {
+          if (!(msg.thread_id in prev)) return prev;
+          const next = { ...prev };
+          delete next[msg.thread_id];
+          return next;
+        });
+        if (msg.thread_id === activeThreadId) {
+          setActiveCached(null);
+          setGeneratingFor(null);
+        }
+        refreshLeads();
       } else if (msg.type === 'F1_6_PREFETCH_PROGRESS') {
         setPrefetchSweep({
           active: !msg.idle && (msg.in_flight != null || (msg.queued || 0) > 0),

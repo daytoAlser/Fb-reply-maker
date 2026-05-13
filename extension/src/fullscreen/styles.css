@@ -625,3 +625,33 @@ html, body, #root {
   padding: 6px 14px;
   font-size: 12px;
 }
+
+/* F.1.7 Send button — state-aware. tone classes set by ReplyPane.handleSend
+   based on the content-script response. Width grows when the label is
+   verbose (block reasons, slow-network warning) so it doesn't wrap. */
+.send-btn {
+  white-space: nowrap;
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background var(--dur-fast) var(--ease-out-quint), border-color var(--dur-fast) var(--ease-out-quint);
+}
+.send-btn:disabled { opacity: 0.55; }
+.send-btn-ok,
+.send-btn-ok:hover {
+  background: var(--success, #16a34a);
+  border-color: var(--success, #16a34a);
+  color: #fff;
+}
+.send-btn-warn,
+.send-btn-warn:hover {
+  background: rgba(245, 158, 11, 0.18);
+  border-color: var(--warning, #f59e0b);
+  color: var(--warning, #f59e0b);
+}
+.send-btn-err,
+.send-btn-err:hover {
+  background: rgba(239, 68, 68, 0.14);
+  border-color: var(--danger);
+  color: var(--danger);
+}

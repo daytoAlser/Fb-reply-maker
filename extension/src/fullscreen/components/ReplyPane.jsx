@@ -2,6 +2,35 @@ import { useEffect, useMemo, useState } from 'react';
 
 const VARIANT_ORDER = ['quick', 'standard', 'detailed'];
 
+// F.1.7 adjustment 3: per-variant send. Mirrors the sidepanel
+// describeSendResponse so the two surfaces show identical toast text.
+function describeSendResponse(res) {
+  if (!res) return { label: 'Send failed', tone: 'err' };
+  if (res.ok && res.sent) {
+    const note = res.humanization_succeeded === false ? ' (bulk-paste fallback used)' : '';
+    return { label: 'Sent' + note, tone: 'ok' };
+  }
+  switch (res.reason) {
+    case 'placeholder_leak':
+      return { label: 'Blocked: variant contains a template placeholder', tone: 'err' };
+    case 'duplicate_send':
+      return { label: 'Blocked: this exact message was already sent in this thread', tone: 'err' };
+    case 'empty':
+      return { label: 'Blocked: variant is empty', tone: 'err' };
+    case 'thread_url_drift':
+      return { label: 'Blocked: FB tab moved to a different thread', tone: 'warn' };
+    case 'send_button_not_found':
+      return { label: "Couldn't find Send button on FB. Text copied to clipboard.", tone: 'warn' };
+    case 'send_not_confirmed':
+      return { label: 'Send may have failed. Check FB to verify.', tone: 'warn' };
+    case 'tab_hidden_mid_type':
+    case 'tab_hidden_before_send':
+      return { label: 'FB tab went background mid-send. Try again.', tone: 'warn' };
+    default:
+      return { label: 'Send failed: ' + (res.reason || 'unknown'), tone: 'err' };
+  }
+}
+
 function formatGeneratedAt(ts) {
   if (!ts) return '';
   const diff = Date.now() - ts;
@@ -25,12 +54,15 @@ export default function ReplyPane({
   const [expanded, setExpanded] = useState('quick');
   const [drafts, setDrafts] = useState({});
   const [copyToast, setCopyToast] = useState(null);
+  // F.1.7 send state per variant kind. Values: null | 'pending' | { label, tone }
+  const [sendState, setSendState] = useState({});
 
   // Reset drafts whenever the cached payload changes (new generation or new
   // thread selected). Drafts are scratch buffers for in-pane edits; they
   // don't persist.
   useEffect(() => {
     setDrafts({});
+    setSendState({});
     setExpanded('quick');
   }, [cached?.generated_at, threadId]);
 
@@ -51,6 +83,45 @@ export default function ReplyPane({
       setTimeout(() => setCopyToast(null), 1400);
     } catch (err) {
       console.error('[FB Reply Maker FS] copy failed:', err?.message);
+    }
+  }
+
+  function handleSend(kind) {
+    if (!threadId) return;
+    if (sendState[kind] === 'pending') return;
+    const text = getText(kind);
+    setSendState((s) => ({ ...s, [kind]: 'pending' }));
+    try {
+      chrome.runtime.sendMessage(
+        { type: 'INSERT_REPLY', text, auto_send: true, thread_id: threadId },
+        (res) => {
+          if (chrome.runtime.lastError) {
+            console.error('[FB Reply Maker FS] SEND error:', chrome.runtime.lastError.message);
+            setSendState((s) => ({ ...s, [kind]: { label: 'Send error', tone: 'err' } }));
+          } else {
+            const desc = describeSendResponse(res);
+            console.log('[FB Reply Maker FS] SEND response:', res, '→', desc);
+            setSendState((s) => ({ ...s, [kind]: desc }));
+          }
+          setTimeout(() => {
+            setSendState((s) => {
+              const next = { ...s };
+              delete next[kind];
+              return next;
+            });
+          }, 4000);
+        }
+      );
+    } catch (err) {
+      console.error('[FB Reply Maker FS] SEND threw:', err);
+      setSendState((s) => ({ ...s, [kind]: { label: 'Send failed', tone: 'err' } }));
+      setTimeout(() => {
+        setSendState((s) => {
+          const next = { ...s };
+          delete next[kind];
+          return next;
+        });
+      }, 4000);
     }
   }
 
@@ -132,14 +203,30 @@ export default function ReplyPane({
                   <button type="button" className="btn-mini" onClick={() => handleCopy(kind)}>
                     {copyToast === kind ? 'Copied ✓' : 'Copy'}
                   </button>
-                  <button
-                    type="button"
-                    className="btn-primary btn-primary-sm"
-                    title="Send-injection ships in F.1 step 7; for now this is disabled."
-                    disabled
-                  >
-                    Send (F.1 step 7)
-                  </button>
+                  {(() => {
+                    const ss = sendState[kind];
+                    const pending = ss === 'pending';
+                    const label = pending
+                      ? 'Sending…'
+                      : (ss && typeof ss === 'object' ? ss.label : 'Send');
+                    const tone = ss && typeof ss === 'object' ? ss.tone : null;
+                    const cls = `btn-primary btn-primary-sm send-btn ${tone ? 'send-btn-' + tone : ''}`;
+                    return (
+                      <button
+                        type="button"
+                        className={cls}
+                        onClick={() => handleSend(kind)}
+                        disabled={pending || !threadId}
+                        title={
+                          !threadId
+                            ? 'Select a thread first'
+                            : 'Type and click Send on FB with humanization'
+                        }
+                      >
+                        {label}
+                      </button>
+                    );
+                  })()}
                 </div>
               </>
             )}

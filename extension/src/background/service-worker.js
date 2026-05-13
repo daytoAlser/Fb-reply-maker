@@ -606,12 +606,70 @@ function pickHighestPriorityPending() {
   return best;
 }
 
+// F.1.6 adjustment 2: window-focus gate. Pause the sweep while the user
+// is actively looking at the FB tab — clicking rows + scraping while
+// they're staring at it would visibly flicker their view.
+//
+// Cases:
+//   FB tab in SAME window as fullscreen (background tab there) → run
+//   FB tab in a window that is NOT the focused window → run
+//   FB tab in a window that IS the focused window AND that window is
+//     different from fullscreen's window → defer
+//
+// Poll-only, called between sweep iterations. No event listener so the
+// SW doesn't need to stay alive on focus changes.
+const FULLSCREEN_URL_RE = /^chrome-extension:\/\/[^/]+\/src\/fullscreen\/index\.html$/;
+
+async function shouldDeferPrefetchForFocus() {
+  try {
+    const inboxCandidates = await findInboxTabs();
+    const fbTab = inboxCandidates && inboxCandidates[0];
+    if (!fbTab || fbTab.windowId == null) return { defer: false };
+
+    const fullscreenTabs = await chrome.tabs.query({
+      url: chrome.runtime.getURL('src/fullscreen/index.html')
+    }).catch(() => []);
+    const fullscreenWindowId = fullscreenTabs && fullscreenTabs[0] ? fullscreenTabs[0].windowId : null;
+
+    // Same window — fullscreen is in foreground in its window, FB is just
+    // a background tab there. Click-driven flicker isn't visible to user.
+    if (fullscreenWindowId != null && fullscreenWindowId === fbTab.windowId) {
+      return { defer: false };
+    }
+
+    const lastFocused = await chrome.windows.getLastFocused({ populate: false }).catch(() => null);
+    if (!lastFocused) return { defer: false };
+
+    // FB's window is the focused one AND fullscreen lives elsewhere →
+    // user is looking directly at FB. Pause the sweep.
+    if (lastFocused.id === fbTab.windowId && fullscreenWindowId !== fbTab.windowId) {
+      return { defer: true, reason: 'user_focused_fb_window', fb_window_id: fbTab.windowId };
+    }
+    return { defer: false };
+  } catch (err) {
+    console.warn('[FB Reply Maker SW] focus gate check failed:', err?.message || err);
+    return { defer: false };
+  }
+}
+
+const PREFETCH_FOCUS_DEFER_MS = 2000;
+
 async function runPrefetchSweep() {
   if (prefetchState.running) return;
   prefetchState.running = true;
   prefetchState.stopped = false;
   try {
     while (!prefetchState.stopped && prefetchState.pending.size > 0) {
+      // Focus gate (F.1.6 adjustment 2). Don't pop the candidate yet —
+      // if the user is on FB and we defer, we want the same candidate to
+      // remain pending so the next tick can try again.
+      const focus = await shouldDeferPrefetchForFocus();
+      if (focus.defer) {
+        console.log('[FB Reply Maker SW] prefetch defer:', focus.reason);
+        await new Promise((r) => setTimeout(r, PREFETCH_FOCUS_DEFER_MS));
+        continue;
+      }
+
       const next = pickHighestPriorityPending();
       if (!next) break;
       prefetchState.pending.delete(next.thread_id);
@@ -936,6 +994,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           skip_humanized: !!msg.skip_humanized
         });
         console.log('[FB Reply Maker SW] INSERT_REPLY content-script reply:', res);
+        // F.1.7 adjustment 3: post-send cleanup. On a confirmed send we
+        // clear cached_variants for the thread so the just-sent text
+        // doesn't linger and tempt a double-send on the next view.
+        if (res && res.ok && res.sent && typeof msg.thread_id === 'string') {
+          try {
+            await clearCachedVariants(msg.thread_id);
+            pushToFullscreen({ type: 'F1_VARIANTS_CLEARED', thread_id: msg.thread_id });
+            console.log('[FB Reply Maker SW] cleared cached_variants after send for', msg.thread_id);
+          } catch (cleanupErr) {
+            console.warn('[FB Reply Maker SW] post-send cleanup failed:', cleanupErr?.message || cleanupErr);
+          }
+        }
         sendResponse(res || { ok: false, reason: 'no_response' });
       } catch (err) {
         console.error('[FB Reply Maker SW] INSERT_REPLY forward failed:', err?.message || err);

@@ -368,7 +368,9 @@ const TYPING_BUCKETS = [
   { weight: 0.20, min: 90,  max: 180 },  // brief pause
   { weight: 0.10, min: 180, max: 400 }   // thinking pause
 ];
-const TYPO_PROBABILITY_PER_WORD = 0.04;        // 4%, within spec 3-5%
+// 1.5% per word — distracted-but-functional typing on long messages.
+// 4% felt noisy across real sends; 1.5% averages ~1 typo per 60-70 words.
+const TYPO_PROBABILITY_PER_WORD = 0.015;
 const TYPO_MIN_MESSAGE_LENGTH = 40;
 const FOCUS_PRE_TYPE_MIN_MS = 400;
 const FOCUS_PRE_TYPE_MAX_MS = 1200;
@@ -581,7 +583,7 @@ function findSendButton() {
 // with no prior pointer movement; a 3-5 step traversal over 80-200ms is
 // cheap insurance.
 async function humanizedClick(target) {
-  if (!target) return false;
+  if (!target) return { ok: false, reason: 'no_target' };
   const rect = target.getBoundingClientRect();
   const endX = rect.left + rect.width * (0.4 + Math.random() * 0.2);
   const endY = rect.top + rect.height * (0.4 + Math.random() * 0.2);
@@ -615,6 +617,28 @@ async function humanizedClick(target) {
     await sleep(stepDur);
   }
 
+  // Overlay collision check (spec adjustment 5). If something else is in
+  // the way at the final cursor coords — sticker tray, attachment menu,
+  // tooltip — the mouseover/down/up events would land on the overlay,
+  // not the button. Skip the pre-click event sequence in that case and
+  // fire a direct click on the target.
+  let finalElAtPoint = null;
+  try { finalElAtPoint = document.elementFromPoint(endX, endY); } catch { /* ignore */ }
+  const overlayCollision = finalElAtPoint && finalElAtPoint !== target && !target.contains(finalElAtPoint) && !finalElAtPoint.contains(target);
+  if (overlayCollision) {
+    console.warn('[FB Reply Maker] mousemove_overlay_collision', {
+      expected: target.tagName + (target.getAttribute('aria-label') ? `[${target.getAttribute('aria-label')}]` : ''),
+      got: finalElAtPoint.tagName + (finalElAtPoint.getAttribute && finalElAtPoint.getAttribute('aria-label') ? `[${finalElAtPoint.getAttribute('aria-label')}]` : '')
+    });
+    try {
+      target.click();
+      return { ok: true, method: 'direct_click_overlay_fallback' };
+    } catch (err) {
+      console.warn('[FB Reply Maker] direct-click fallback failed:', err?.message);
+      return { ok: false, reason: 'direct_click_threw' };
+    }
+  }
+
   try {
     // mouseover + mousedown + mouseup + click — full sequence so React
     // pointer handlers fire in the order they expect.
@@ -624,10 +648,10 @@ async function humanizedClick(target) {
     await sleep(20 + Math.floor(Math.random() * 50));
     target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0, clientX: endX, clientY: endY }));
     target.click();
-    return true;
+    return { ok: true, method: 'humanized_click' };
   } catch (err) {
     console.warn('[FB Reply Maker] humanizedClick failed:', err?.message);
-    return false;
+    return { ok: false, reason: err?.message || 'click_threw' };
   }
 }
 
@@ -778,9 +802,11 @@ async function tryInsertReply(text, opts) {
     usedMethod = bulk.method;
   }
 
+  const humanizationSucceeded = usedMethod === 'humanizedType';
+
   if (!autoSend) {
     fireActivationBurst();
-    return { ok: true, method: usedMethod, sent: false };
+    return { ok: true, method: usedMethod, sent: false, humanization_succeeded: humanizationSucceeded };
   }
 
   // Auto-send: locate button, review pause, humanized click, confirm send.
@@ -804,30 +830,62 @@ async function tryInsertReply(text, opts) {
     // Last-ditch: clipboard the text so the user has it on hand, surface
     // the failure so the UI can prompt for manual send.
     try { await navigator.clipboard.writeText(text); } catch { /* ignore */ }
-    return { ok: false, reason: 'send_button_not_found', method: usedMethod, clipboard_set: true };
+    return {
+      ok: false,
+      reason: 'send_button_not_found',
+      method: usedMethod,
+      humanization_succeeded: humanizationSucceeded,
+      clipboard_set: true
+    };
   }
 
   if (document.hidden) {
-    return { ok: false, reason: 'tab_hidden_before_send', method: usedMethod };
+    return {
+      ok: false,
+      reason: 'tab_hidden_before_send',
+      method: usedMethod,
+      humanization_succeeded: humanizationSucceeded
+    };
   }
 
-  const clicked = await humanizedClick(sendBtn);
-  if (!clicked) return { ok: false, reason: 'click_failed', method: usedMethod };
+  const clickResult = await humanizedClick(sendBtn);
+  if (!clickResult || !clickResult.ok) {
+    return {
+      ok: false,
+      reason: 'click_failed',
+      method: usedMethod,
+      humanization_succeeded: humanizationSucceeded
+    };
+  }
 
   // Confirm: wait for the message text to appear in the thread DOM. If
   // the network is slow we extend the wait but never auto-retry the send.
   const appeared = await waitForMessageInThread(text, SEND_CONFIRM_WAIT_MS);
   if (appeared) {
-    return { ok: true, method: usedMethod, sent: true };
+    return {
+      ok: true,
+      method: usedMethod,
+      sent: true,
+      humanization_succeeded: humanizationSucceeded,
+      click_method: clickResult.method
+    };
   }
   const lateAppeared = await waitForMessageInThread(text, SEND_NETWORK_GRACE_MS - SEND_CONFIRM_WAIT_MS);
   if (lateAppeared) {
-    return { ok: true, method: usedMethod, sent: true, slow: true };
+    return {
+      ok: true,
+      method: usedMethod,
+      sent: true,
+      slow: true,
+      humanization_succeeded: humanizationSucceeded,
+      click_method: clickResult.method
+    };
   }
   return {
     ok: false,
     reason: 'send_not_confirmed',
     method: usedMethod,
+    humanization_succeeded: humanizationSucceeded,
     advice: 'Send may have failed. Check FB before retrying.'
   };
 }
