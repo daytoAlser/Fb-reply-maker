@@ -24,6 +24,13 @@ function mergeCapturedFields(newFields, existingFields) {
 
 // Phase E.2: returning-customer detection
 const RETURNING_GAP_MS = 48 * 60 * 60 * 1000;
+// Minimum gap before a LANGUAGE trigger can promote a lead to returning.
+// Stops false positives like "still got those?" arriving mid-flow on an
+// active conversation where the customer is mid-qualification.
+const RETURNING_LANG_MIN_GAP_MS = 6 * 60 * 60 * 1000;
+// Used by the prompt to inject an explicit "been a minute" acknowledgment
+// rule when the returning gap is genuinely long.
+const RETURNING_LONG_GAP_MS = 30 * 24 * 60 * 60 * 1000;
 const RETURNING_TRIGGER_STATUSES = new Set([
   'options_sent', 'lead_warm_pending', 'qualified', 'contacted'
 ]);
@@ -31,17 +38,20 @@ const RESUMPTION_PATTERNS = [
   /\bsorry just getting back to (you|ya|u)\b/i,
   /\bsorry (about|for) (the )?(late|delayed?|slow) (reply|response|message)\b/i,
   /\bsorry (about|for) (the )?(wait|delay)\b/i,
+  /\bsorry to (bug|bother|pester) (you|ya|u)\b/i,
   /\bstill got (those|them|the)\b/i,
   /\bthe ones you (showed|sent|had|talked about)\b/i,
   /\b(the )?(bronze|black|silver|chrome|gloss|matte) ones\b/i,
   /\bare (those|they|these) still (available|in stock|around)\b/i,
   /\byou still have (those|them|these|the)\b/i,
-  /\bstill interested\b/i,
+  /\bstill (interested|thinking|considering|looking)\b/i,
   /\bhaven'?t forgotten\b/i,
   /\bhey again\b/i,
   /\b(coming|getting) back to (this|you|ya|the (wheels|tires|setup))\b/i,
   /\b(been )?meaning to (get back|reply|message|hit you up)\b/i,
-  /\bjust circling back\b/i
+  /\bjust circling back\b/i,
+  /\bany (update|luck|news)\b/i,
+  /\bdid (you|ya|u) (get|have) a (chance|sec|minute|second)\b/i
 ];
 
 function hasResumptionLanguage(text) {
@@ -76,7 +86,13 @@ function detectReturningTrigger({ message, prevMode, prevStatus, prevLastCustome
   const gap = reference ? Math.max(0, now - reference) : 0;
 
   const gapTrigger = RETURNING_TRIGGER_STATUSES.has(prevStatus) && gap >= RETURNING_GAP_MS;
-  const langTrigger = hasResumptionLanguage(message);
+  // Language trigger requires the SAME status gate as the gap trigger, plus
+  // a 6h floor on activity. Otherwise an active conversation where the
+  // customer happens to say "still got those" mid-flow would false-promote.
+  const langTrigger =
+    hasResumptionLanguage(message)
+    && RETURNING_TRIGGER_STATUSES.has(prevStatus)
+    && gap >= RETURNING_LANG_MIN_GAP_MS;
 
   if (gapTrigger || langTrigger) {
     return {
@@ -307,10 +323,16 @@ function buildReturningCustomerBlock({ conversationMode, priorStatus, silenceDur
   const optionsReference = priorStatus === 'options_sent'
     ? `\n- Prior options WERE sent. Reference them without re-listing ("which ones were you leaning toward", "did any of those catch your eye"). Do not propose NEW products in this turn.`
     : '';
+  // E.2 rule 7 / E2-10: long gaps (over 30 days) get a brief "been a minute"
+  // acknowledgment so the variant doesn't feel like the conversation never
+  // paused at all. Under 30 days: skip the gap callout entirely.
+  const longGapAck = (typeof silenceDurationMs === 'number' && silenceDurationMs >= RETURNING_LONG_GAP_MS)
+    ? `\n- LONG GAP (over 30 days). Add a brief, casual time acknowledgment to the opener WITHOUT making it awkward or guilt-trippy. Acceptable phrases: "Hey man, been a minute!", "Hey, welcome back!", "Long time no chat my man!". Then continue normally. Do NOT say things like "I was wondering where you went", "thought you forgot about us", or anything that implies pressure or absence-tracking.`
+    : '';
   return `
 RETURNING CUSTOMER MODE — ACTIVE
 
-This customer is resuming after silence (gap-based OR resumption language detected). Use the returning-customer voice. The voice rules below OVERRIDE the OPENER LINE at the top of this prompt — do NOT use the formal "Hey @Name, [Rep] here, I'd be happy to help you out today" opener in any variant.${priorLine}${silenceLine}${optionsReference}
+This customer is resuming after silence (gap-based OR resumption language detected). Use the returning-customer voice. The voice rules below OVERRIDE the OPENER LINE at the top of this prompt — do NOT use the formal "Hey @Name, [Rep] here, I'd be happy to help you out today" opener in any variant.${priorLine}${silenceLine}${optionsReference}${longGapAck}
 
 OPENER OVERRIDE (use ONE of these patterns for the first sentence of every variant):
 - If the customer apologized for the delay → "No worries at all my man, life happens!"
