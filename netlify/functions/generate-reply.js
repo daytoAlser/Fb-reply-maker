@@ -3,6 +3,8 @@ import { supabase } from './_shared/supabaseClient.js';
 // Phase E.6 — pre-LLM normalization + interpretation. See SPEC-PhaseE.md §6.
 import { normalize as runNormalize } from './lib/interpretation/normalize.js';
 import { interpret as runInterpret } from './lib/interpretation/interpret.js';
+// Phase E.3 — per-turn decision-support detection.
+import { detectDecisionSupport } from './lib/interpretation/decisionSupport.js';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -468,7 +470,93 @@ ${lines.join('\n')}
 `;
 }
 
-const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock }) => {
+// Phase E.3 — DECISION SUPPORT MODE prompt block. Per-turn override.
+// Only emitted when detectDecisionSupport().triggered === true. Takes
+// priority over: standard opener, RETURNING CUSTOMER MODE opener,
+// READY-FOR-OPTIONS handoff (deferred one turn), qualifier collection.
+//
+// Structure varies by sub-mode (compare / review / tradeoff) per spec
+// section E.3.  lean_hint from E.6 vehicle_subtype, if present,
+// pre-biases the prompt toward the right tier.
+function buildDecisionSupportBlock(ds, returningActive) {
+  if (!ds || !ds.triggered) return '';
+  const products = Array.isArray(ds.subject_products) ? ds.subject_products : [];
+  const productLine = products.length === 2
+    ? `\n- Products in scope: "${products[0]}" vs "${products[1]}". Reference by these names if the customer used them; otherwise stay tier-framed.`
+    : products.length === 1
+      ? `\n- Product in scope: "${products[0]}".`
+      : '';
+  const leanLine = ds.lean_hint === 'value'
+    ? `\n- LEAN HINT: customer signals daily/family/budget vehicle (from interpretation context). Lean VALUE tier in your recommendation. Premium is "better" on paper but value tier matches the use case — name that explicitly as the reason.`
+    : ds.lean_hint === 'premium'
+      ? `\n- LEAN HINT: customer signals enthusiast/build (from interpretation context). Premium-tier framing fits — they're not penny-pinching, they want the right product.`
+      : '';
+  const returningCoexist = returningActive
+    ? `\n- RETURNING MODE is also active. Advisor turn takes priority for this message. SKIP the returning-customer opener ("no worries", "hey man") — go straight to the honest framing below.`
+    : '';
+
+  // Sub-mode-specific structure rules + voice anchors.
+  const structureBlock = (() => {
+    if (ds.mode === 'compare') {
+      return `
+STRUCTURE (compare mode):
+1. Lean: which option you'd pick and why (tied to customer use case). 1-2 sentences.
+2. Counterpoint: what the OTHER option does better. 1 sentence.
+3. Tip-over-line: the specific use-case detail that pushes you over to your pick. 1 sentence.
+
+VOICE ANCHOR — compare:
+"Honestly for highway driving like yours, I'd lean Suretrac side. The Kanati has better off-road grip but you're not really using that, and the Suretrac rides quieter on pavement. If you were jumping curbs and hitting trails I'd flip my answer, but for your commute the Suretrac is the move."`;
+    }
+    if (ds.mode === 'review') {
+      return `
+STRUCTURE (review mode):
+1. Honest reputation read. 1 sentence. If the product isn't one you can speak to confidently (not iLink/Suretrac/Kanati/known value-or-premium tier brand), say "honestly I haven't sold a ton of those, want me to grab specific reviews?" Do NOT invent.
+2. Specific strengths and weaknesses. 1-2 sentences.
+3. Who it fits vs doesn't fit. 1 sentence.
+
+VOICE ANCHOR — review:
+"Real talk, iLink is our in-house value brand. Customers who buy them for budget daily driving are happy, customers who expect premium tire feel sometimes notice the compound is firmer. For your use case they punch above their weight. If you're rotating yearly anyway, totally fine choice."`;
+    }
+    // tradeoff
+    return `
+STRUCTURE (tradeoff mode):
+1. Name the tradeoff plainly. 1 sentence. ("Premium adds X, costs Y more.")
+2. When the upgrade IS worth it. 1-2 sentences.
+3. When it's NOT worth it. 1-2 sentences.
+4. Your lean for THIS customer based on what they've told you. 1 sentence.
+
+VOICE ANCHOR — tradeoff:
+"Honestly the Michelin is worth the extra if you keep your cars for the long haul, the 100K warranty pays for itself. For a daily that you'd flip in 3 years, the Gladiator is fine and saves you a couple hundred. What's your timeline on this car?"`;
+  })();
+
+  return `
+DECISION SUPPORT MODE — ACTIVE (this turn only)
+The customer is asking for advisor-style help, not spec collection. Shift voice from qualifier-driven to advisor-driven for this message ONLY.${productLine}${leanLine}${returningCoexist}
+
+HARD RULES (this turn):
+- DO NOT collect qualifiers. Missing qualifiers can come on the NEXT turn — finish the advisor turn first.
+- DO NOT pivot to estimate/phone handoff this turn even if READY FOR OPTIONS would normally trigger. Advisor turn takes the slot.
+- DO NOT push the more expensive option by default. Use case wins. If the LEAN HINT says value, lean value even when premium is "objectively better".
+- DO NOT hedge with "they're all great options" / "any of these would work" / "depends on what you want". Pick ONE based on what the customer has told you.
+- DO NOT recommend a specific SKU/product unless you're in review mode AND the product is one you can speak to (iLink / Suretrac / known tier brands). Otherwise stay tier-framed ("the value tier handles your driving fine", "the premium tier is worth it if you do X").
+
+OPENER OVERRIDE (this turn):
+- Lead with honest framing. Acceptable openers: "Honestly man, in my opinion...", "To be honest...", "If I were spending my own money...", "Real talk...".
+- DO NOT use the standard formal opener.
+- DO NOT use the returning-mode "no worries" opener even if RETURNING MODE is active.
+${structureBlock}
+
+ENDING:
+- Soft open at the end. Examples: "let me know if that helps narrow it down", "what's your gut telling you", "happy to dig deeper on either".
+- DO NOT end with a qualifier question. DO NOT end with "send me a phone number".
+
+TIE-IN:
+- The reason for your lean MUST tie to something the customer has actually said (use case, vehicle, prior message context). Generic reasons ("it's a good tire") are a hard error.
+- All variants (quick/standard/detailed) follow these rules. Quick can drop the counterpoint sentence; standard and detailed should keep the full structure.
+`;
+}
+
+const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock, decisionSupportBlock }) => {
   const listingBlock = listingTitle && listingTitle.trim()
     ? `\nLISTING CONTEXT\nThe customer is messaging about this listing: "${listingTitle.trim()}". Use this together with the customer's message to infer ad_type (wheel / tire / accessory / lift) per the detection signals below.\n`
     : '';
@@ -750,7 +838,7 @@ When all qualifiers for a product are captured, MOVE FORWARD:
 - If ALL tracked products are fully qualified, transition into recommendation / quote-punt voice. Reference the captured spec ("for cruising and highway with the 6-inch goal, the value kit will be perfect…") rather than re-asking.
 
 Re-asking a resolved qualifier is a hard error. Every variant must respect the lock.
-${existingProductsBlock}${interpretationBlock || ''}${categoryClause}${buildHistoryBlock(conversationHistory)}
+${existingProductsBlock}${interpretationBlock || ''}${decisionSupportBlock || ''}${categoryClause}${buildHistoryBlock(conversationHistory)}
 OUTPUT
 Respond ONLY with valid JSON. No markdown fencing. No preamble.
 {
@@ -955,6 +1043,34 @@ export async function handler(event) {
     block_length: interpretationBlock.length
   });
 
+  // Phase E.3: decision-support detection. Pure, per-turn — doesn't
+  // persist on the lead. Reads conversation_history for the options-
+  // presented gate (≥2 $-prices across rep-sent messages) and the
+  // current message for advisor language + sub-mode classification.
+  let decisionSupport = null;
+  try {
+    decisionSupport = detectDecisionSupport({
+      message,
+      history: conversation_history,
+      normalized: interpretation
+    });
+  } catch (err) {
+    console.warn('[FN] decisionSupport threw:', err?.message || err);
+    decisionSupport = { triggered: false, gate_reason: 'detector_threw' };
+  }
+  const decisionSupportBlock = decisionSupport && decisionSupport.triggered
+    ? buildDecisionSupportBlock(decisionSupport, effectiveConversationMode === 'returning')
+    : '';
+  console.log('[FN] decision support:', {
+    triggered: !!decisionSupport?.triggered,
+    mode: decisionSupport?.mode || null,
+    gate_reason: decisionSupport?.gate_reason || null,
+    products: decisionSupport?.subject_products || [],
+    options_count: decisionSupport?.options_presented_count ?? 0,
+    lean_hint: decisionSupport?.lean_hint || null,
+    block_length: decisionSupportBlock.length
+  });
+
   const systemPrompt = SYSTEM_PROMPT_TEMPLATE({
     openerLine,
     listingTitle,
@@ -966,7 +1082,8 @@ export async function handler(event) {
     conversationMode: effectiveConversationMode,
     priorStatus: existing_status,
     silenceDurationMs: effectiveSilenceDurationMs,
-    interpretationBlock
+    interpretationBlock,
+    decisionSupportBlock
   });
 
   console.log('[FN] resolved opener:', openerLine);
