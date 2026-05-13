@@ -212,7 +212,7 @@ function mapAdTypeToProduct(adType) {
 function qualifiersForProduct(tag) {
   switch (tag) {
     case 'wheels':         return ['vehicle', 'lookPreference', 'rideHeight'];
-    case 'tires':          return ['vehicle', 'tireSize'];
+    case 'tires':          return ['vehicle', 'tireType']; // tireType (mud/AT/snowflake/highway) — NEVER tireSize, that's pulled from the vehicle
     case 'lift_kit':       return ['vehicle', 'rideHeight', 'intent'];
     case 'leveling_kit':   return ['vehicle'];
     case 'coilovers':      return ['vehicle', 'intent'];

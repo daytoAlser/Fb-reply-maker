@@ -183,7 +183,7 @@ export const FRAME_PATTERNS = [
       { shape: 'rim_size', pattern: /\b(1[5-9]|2[0-6])\s*(?:inch|"|in)\b/i,
         bridge: 'Got the {match} inch — and what year/make/model is the ride?' },
       { shape: 'tire_size', pattern: /\b\d{3}\/\d{2}r\d{2}\b/i,
-        bridge: 'Got the tire size — and what year/make/model are we putting them on?' },
+        bridge: 'Appreciate the size — and what year/make/model are we putting them on? (We pull the right size from the vehicle, just want to confirm the ride.)' },
       { shape: 'bolt_pattern', pattern: /\b\d{1}x[\d.]+\b/i,
         bridge: 'Got the bolt pattern — and what year/make/model is the ride?' },
       { shape: 'color', pattern: /\b(black|chrome|bronze|silver|gloss|matte|gold)\b/i,
@@ -191,17 +191,22 @@ export const FRAME_PATTERNS = [
     ]
   },
   {
-    intent: 'tire_size',
+    // Tire qualifier intent: ALWAYS about tire TYPE (mud / A/T / snowflake-
+    // rated / highway / three-season), NEVER about size. The rep figures
+    // size from the vehicle. These bridges are for when Dayton asked the
+    // tire-type question and the customer answered with something off-topic.
+    intent: 'tire_type',
     daytonAsked: [
-      /\bwhat (tire )?size\b/i,
-      /\bwhat\s+size\s+tires?\b/i,
-      /\btire size\b/i
+      /\bwhat (kind|type|style) of tire\b/i,
+      /\bmud.{0,30}all.terrain.{0,30}snowflake/i,
+      /\bsnowflake.rated\b/i,
+      /\bA\/?T or M\/?T\b/i
     ],
     customerWrongShapes: [
       { shape: 'color', pattern: /\b(black|chrome|bronze|silver|gloss|matte|gold)\b/i,
-        bridge: 'Got the color — and what size tire are we matching?' },
+        bridge: 'Got the color — and what kind of tire are you after? Mud, A/T, snowflake-rated for winter, or highway/touring?' },
       { shape: 'rim_size', pattern: /\b(1[5-9]|2[0-6])\s*(?:inch|"|in)\b/i,
-        bridge: 'Got the {match} inch — what tire size do you need on those?' }
+        bridge: 'Got the {match} inch — and what kind of tire are you after on those? Mud, A/T, snowflake-rated for winter, or more highway/touring?' }
     ]
   }
 ];
