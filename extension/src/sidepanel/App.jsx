@@ -197,6 +197,10 @@ export default function App() {
   // Track which thread the currently-displayed result is for, so we wipe
   // cleanly when the user switches threads.
   const lastLoadedThreadRef = useRef(null);
+  // Guard against infinite-firing the auto-generate. Keyed by
+  // `${threadId}|${latestIncoming}` — once we've fired for that pair,
+  // don't fire again unless the user hits Generate themselves.
+  const autoGenTriggeredRef = useRef(new Set());
 
   useEffect(() => {
     if (!detectedThreadId) return;
@@ -212,14 +216,25 @@ export default function App() {
         const data = await chrome.storage.local.get(key);
         const cached = data[key];
         if (cancelled) return;
-        if (cached?.result) {
-          const cachedSrc = (cached.source_message || '').trim();
-          const liveSrc = (autoDetect?.latestIncoming || '').trim();
-          // Match if: no live message yet (race) OR sources match.
-          const sourceMatches = !liveSrc || cachedSrc === liveSrc;
-          if (sourceMatches) {
-            setResult(cached.result);
-            setError(null);
+        const cachedSrc = (cached?.source_message || '').trim();
+        const liveSrc = (autoDetect?.latestIncoming || '').trim();
+        const sourceMatches = !liveSrc || cachedSrc === liveSrc;
+        if (cached?.result && sourceMatches) {
+          setResult(cached.result);
+          setError(null);
+          return;
+        }
+        // Cache missing OR stale (live incoming differs from cached
+        // source). Auto-fire Generate so the user doesn't have to click
+        // for every thread switch — covers the "SW skipped because lead
+        // is closed" case the broadcast listener never catches.
+        const hasConfig = !!(settings?.config?.endpoint && settings?.config?.secret);
+        if (liveSrc && hasConfig && !isManualRef.current) {
+          const triggerKey = detectedThreadId + '|' + liveSrc;
+          if (!autoGenTriggeredRef.current.has(triggerKey) && !loading) {
+            autoGenTriggeredRef.current.add(triggerKey);
+            console.log('[FB Reply Maker SP] auto-firing Generate for stale/missing cache on thread', detectedThreadId);
+            handleGenerate();
           }
         }
       } catch (err) {
@@ -228,7 +243,8 @@ export default function App() {
     }
     loadCached();
     return () => { cancelled = true; };
-  }, [detectedThreadId, autoDetect?.latestIncoming]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detectedThreadId, autoDetect?.latestIncoming, settings?.config?.endpoint]);
 
   // Live SW broadcasts: VARIANTS_GENERATING shows the loading state,
   // VARIANTS_CACHED swaps in the freshly-generated variants when SW's
