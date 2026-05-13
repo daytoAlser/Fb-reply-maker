@@ -59,6 +59,13 @@ export default function App() {
 
   const isManualRef = useRef(false);
   const lastAutoFilledRef = useRef('');
+  // Live refs of the current detected thread + incoming. Used by
+  // handleGenerate's stale-response guard to compare against the
+  // CURRENT values when a response arrives, not the snapshot
+  // captured when the call was fired (closures over state are stale
+  // by the time async responses come back).
+  const liveDetectedThreadIdRef = useRef(null);
+  const liveIncomingRef = useRef('');
 
   function markManual(val) {
     isManualRef.current = val;
@@ -193,6 +200,11 @@ export default function App() {
   const detectedThreadId = autoDetect?.status === 'ok'
     ? getThreadIdFromUrl(autoDetect.url || '')
     : null;
+  // Mirror the latest values into refs so async callbacks (handleGenerate
+  // response, broadcast listeners) can read the LIVE current state
+  // instead of stale closure snapshots.
+  useEffect(() => { liveDetectedThreadIdRef.current = detectedThreadId; }, [detectedThreadId]);
+  useEffect(() => { liveIncomingRef.current = incoming; }, [incoming]);
 
   // Track which thread the currently-displayed result is for, so we wipe
   // cleanly when the user switches threads.
@@ -267,11 +279,15 @@ export default function App() {
 
   // Live SW broadcasts: VARIANTS_GENERATING shows the loading state,
   // VARIANTS_CACHED swaps in the freshly-generated variants when SW's
-  // auto-gen finishes for the thread the user is viewing.
+  // auto-gen finishes for the thread the user is viewing. Mounted once
+  // — reads detectedThreadId from the live ref so a thread switch
+  // between mount and message arrival doesn't paint stale variants.
   useEffect(() => {
     function onGenMsg(msg) {
-      if (!msg || !detectedThreadId) return;
-      if (msg.thread_id !== detectedThreadId) return;
+      if (!msg) return;
+      const liveThreadId = liveDetectedThreadIdRef.current;
+      if (!liveThreadId) return;
+      if (msg.thread_id !== liveThreadId) return;
       if (msg.type === 'VARIANTS_GENERATING') {
         setLoading(true);
         setError(null);
@@ -286,7 +302,7 @@ export default function App() {
     }
     chrome.runtime.onMessage.addListener(onGenMsg);
     return () => chrome.runtime.onMessage.removeListener(onGenMsg);
-  }, [detectedThreadId]);
+  }, []);
 
   useEffect(() => {
     rescanAndRefresh();
@@ -539,13 +555,11 @@ export default function App() {
       }
 
       // Stale-response guard: discard if the user switched threads or
-      // edited the incoming since this call was fired. The cache write
-      // above still happens (so the right thread benefits), but we
-      // don't paint stale variants over the active view.
-      const liveThreadId = autoDetect?.status === 'ok'
-        ? getThreadIdFromUrl(autoDetect.url || '')
-        : null;
-      const liveIncoming = incoming;
+      // edited the incoming since this call was fired. Reads from the
+      // LIVE refs (not closure snapshots, which would still hold the
+      // values at fire time and never trip).
+      const liveThreadId = liveDetectedThreadIdRef.current;
+      const liveIncoming = liveIncomingRef.current;
       if (firedThreadId && firedThreadId !== liveThreadId) {
         console.log('[FB Reply Maker SP] discarding stale generate response — fired for', firedThreadId, 'now on', liveThreadId);
         return;
