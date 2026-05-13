@@ -197,51 +197,68 @@ export default function App() {
   // Track which thread the currently-displayed result is for, so we wipe
   // cleanly when the user switches threads.
   const lastLoadedThreadRef = useRef(null);
-  // Guard against infinite-firing the auto-generate. Keyed by
-  // `${threadId}|${latestIncoming}` — once we've fired for that pair,
-  // don't fire again unless the user hits Generate themselves.
-  const autoGenTriggeredRef = useRef(new Set());
+  // Distinguish "first thread we saw" (cache hit is fine — page reload)
+  // from "user switched threads" (always force fresh — cached context
+  // may be stale even if source_message matches, e.g. lead capturedFields
+  // changed since last write).
+  const initialMountDoneRef = useRef(false);
+  // Guard re-firing for the same thread while one is already in flight.
+  // Cleared on thread switch so a new thread always gets a fresh fire.
+  const inFlightTriggerRef = useRef(null);
 
   useEffect(() => {
     if (!detectedThreadId) return;
-    if (lastLoadedThreadRef.current && lastLoadedThreadRef.current !== detectedThreadId) {
+    const isThreadSwitch =
+      lastLoadedThreadRef.current && lastLoadedThreadRef.current !== detectedThreadId;
+    if (isThreadSwitch) {
       setResult(null);
       setError(null);
+      inFlightTriggerRef.current = null;
     }
     lastLoadedThreadRef.current = detectedThreadId;
+
     let cancelled = false;
-    async function loadCached() {
-      try {
-        const key = 'cached_variants:' + detectedThreadId;
-        const data = await chrome.storage.local.get(key);
-        const cached = data[key];
-        if (cancelled) return;
-        const cachedSrc = (cached?.source_message || '').trim();
-        const liveSrc = (autoDetect?.latestIncoming || '').trim();
-        const sourceMatches = !liveSrc || cachedSrc === liveSrc;
-        if (cached?.result && sourceMatches) {
-          setResult(cached.result);
-          setError(null);
-          return;
-        }
-        // Cache missing OR stale (live incoming differs from cached
-        // source). Auto-fire Generate so the user doesn't have to click
-        // for every thread switch — covers the "SW skipped because lead
-        // is closed" case the broadcast listener never catches.
-        const hasConfig = !!(settings?.config?.endpoint && settings?.config?.secret);
-        if (liveSrc && hasConfig && !isManualRef.current) {
-          const triggerKey = detectedThreadId + '|' + liveSrc;
-          if (!autoGenTriggeredRef.current.has(triggerKey) && !loading) {
-            autoGenTriggeredRef.current.add(triggerKey);
-            console.log('[FB Reply Maker SP] auto-firing Generate for stale/missing cache on thread', detectedThreadId);
-            handleGenerate();
+    async function loadAndMaybeRegen() {
+      const liveSrc = (autoDetect?.latestIncoming || '').trim();
+      const hasConfig = !!(settings?.config?.endpoint && settings?.config?.secret);
+
+      // On INITIAL mount only: try the cache first (avoids burning a
+      // generate call on every panel open / page reload). On thread
+      // switch: always regen so context changes (lead state, captured
+      // fields) get picked up — cached source_message match is not
+      // sufficient signal that variants are still correct.
+      if (!isThreadSwitch && !initialMountDoneRef.current) {
+        try {
+          const key = 'cached_variants:' + detectedThreadId;
+          const data = await chrome.storage.local.get(key);
+          const cached = data[key];
+          if (cancelled) return;
+          const cachedSrc = (cached?.source_message || '').trim();
+          const sourceMatches = !liveSrc || cachedSrc === liveSrc;
+          if (cached?.result && sourceMatches) {
+            setResult(cached.result);
+            setError(null);
+            initialMountDoneRef.current = true;
+            return;
           }
+        } catch (err) {
+          console.warn('[FB Reply Maker SP] cache read failed:', err?.message);
         }
-      } catch (err) {
-        console.warn('[FB Reply Maker SP] cache read failed:', err?.message);
       }
+      initialMountDoneRef.current = true;
+
+      // Auto-fire Generate. Force=true on thread switch so cached context
+      // staleness (e.g. captured vehicle was updated server-side since
+      // last cache write) doesn't show wrong variants.
+      if (!liveSrc || !hasConfig || isManualRef.current) return;
+      const triggerKey = detectedThreadId + '|' + liveSrc;
+      if (inFlightTriggerRef.current === triggerKey) return;
+      if (loading) return;
+      inFlightTriggerRef.current = triggerKey;
+      console.log('[FB Reply Maker SP] auto-firing Generate for thread', detectedThreadId, isThreadSwitch ? '(switch)' : '(initial/stale)');
+      handleGenerate();
     }
-    loadCached();
+    loadAndMaybeRegen();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detectedThreadId, autoDetect?.latestIncoming, settings?.config?.endpoint]);

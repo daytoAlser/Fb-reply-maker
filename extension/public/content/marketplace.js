@@ -704,13 +704,43 @@ async function bulkInsertReply(text) {
   const box = document.querySelector(SELECTORS.replyTextbox);
   if (!box) return { ok: false, reason: 'no_textbox' };
   const sample = text.slice(0, Math.min(20, text.length));
+
+  // Forcefully activate the box. FB's compose is a contenteditable that
+  // sometimes ignores .focus() alone if the user hasn't interacted with
+  // the page since load — execCommand('insertText') silently fails when
+  // the active element isn't the box. Synthetic mousedown+mouseup+click
+  // mirrors a real user click and gets FB's React state into "focused".
   try {
+    const rect = box.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    for (const type of ['mousedown', 'mouseup', 'click']) {
+      box.dispatchEvent(new MouseEvent(type, {
+        bubbles: true, cancelable: true, view: window,
+        clientX: x, clientY: y, button: 0
+      }));
+    }
     box.focus();
+  } catch {}
+
+  // Place caret at end of any existing content + select-all so insertText
+  // replaces (not appends).
+  try {
     const sel = window.getSelection();
     const r = document.createRange();
     r.selectNodeContents(box);
     sel.removeAllRanges();
     sel.addRange(r);
+  } catch {}
+
+  // Verify the box is actually the active element. If not, one more
+  // focus attempt — sometimes the click takes a tick to land.
+  if (document.activeElement !== box) {
+    try { box.focus(); } catch {}
+    await sleep(20);
+  }
+
+  try {
     document.execCommand('insertText', false, text);
   } catch (err) {
     return { ok: false, reason: err?.message || 'insert_threw' };
