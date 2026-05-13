@@ -1,5 +1,11 @@
 // Phase E.3 — Decision Support Mode detection.
 //
+// Review sub-mode also resolves a product against the curated KB so the
+// prompt can inject calibrated reputation reads instead of falling back
+// to the generic "haven't sold a ton" punt.
+
+import { findKbProductInTexts } from '../data/product-kb.js';
+//
 // Per-turn (not persistent lead state): when the current customer
 // message is asking for advisor-style help and at least 2 product
 // options have been presented earlier in the thread, flip the prompt
@@ -172,7 +178,42 @@ export function detectDecisionSupport({ message, history, normalized } = {}) {
     options_presented_count: optionsCount,
     // Echo a coarse lean hint from E.6 vehicle_subtype so the prompt
     // builder can include it without re-reading normalized.
-    lean_hint: deriveLeanHint(normalized)
+    lean_hint: deriveLeanHint(normalized),
+    // Curated-KB product match. Scans the current message first, then
+    // recent rep messages — that way the customer's own naming wins
+    // when they re-cite a product the rep quoted earlier.
+    kb_match: resolveKbProduct(mode, message, history)
+  };
+}
+
+// Pull product mentions from the current customer message + last 3
+// rep-sent history entries. Current message wins (customer's own naming
+// is the strongest signal). Returns the PRODUCT_KB entry slug + matched
+// alias, or null on no match. Used by the prompt builder to inject the
+// PRODUCT KB CONTEXT block in review mode.
+function resolveKbProduct(mode, message, history) {
+  // Compare/tradeoff/inquiry/review all benefit from KB grounding when
+  // a product is named. We surface for all modes, prompt-side decides
+  // how loudly to use it (review mode is the primary consumer).
+  const hist = Array.isArray(history) ? history : [];
+  const recentRep = [];
+  for (let i = hist.length - 1; i >= 0 && recentRep.length < 3; i--) {
+    const h = hist[i];
+    if (h && h.sender === 'me' && typeof h.text === 'string') {
+      recentRep.push(h.text);
+    }
+  }
+  const texts = [message, ...recentRep];
+  const match = findKbProductInTexts(texts);
+  if (!match) return null;
+  return {
+    slug: match.slug,
+    matched_alias: match.alias_matched,
+    canonical_name: match.entry.canonical_name,
+    category: match.entry.category,
+    tier: match.entry.tier,
+    reputation_read: match.entry.reputation_read,
+    voice_strings: match.entry.voice_strings
   };
 }
 

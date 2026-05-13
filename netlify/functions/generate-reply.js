@@ -524,6 +524,34 @@ ${lines.join('\n')}
 // Structure varies by sub-mode (compare / review / tradeoff) per spec
 // section E.3.  lean_hint from E.6 vehicle_subtype, if present,
 // pre-biases the prompt toward the right tier.
+// Phase E.3 KB — PRODUCT KB CONTEXT block. Emitted when the customer's
+// message resolves to a curated product in PRODUCT_KB. Sits ABOVE the
+// DECISION SUPPORT MODE block so the LLM reads the reputation read as
+// anchoring context for whatever sub-mode (review/compare/tradeoff) the
+// turn is in. Review mode is the primary consumer but the rep-vetted
+// voice strings work as anchors for compare/tradeoff too when the
+// customer named a specific product.
+function buildKbContextBlock(kb) {
+  if (!kb || !kb.canonical_name) return '';
+  const r = kb.reputation_read || {};
+  const v = kb.voice_strings || {};
+  const strengths = Array.isArray(r.strengths) ? r.strengths.join(', ') : '';
+  const weaknesses = Array.isArray(r.weaknesses) ? r.weaknesses.join(', ') : '';
+  const voiceAnchor = v.default ? `\nREADY-TO-USE VOICE ANCHOR (use verbatim or lightly adapt):\n"${v.default}"` : '';
+  return `
+PRODUCT KB CONTEXT
+Customer is asking about: ${kb.canonical_name} (matched on "${kb.matched_alias}").
+Tier: ${kb.tier} · Category: ${kb.category}
+Reputation read: ${r.summary || '(no summary)'}
+Strengths: ${strengths || '(none listed)'}
+Weaknesses: ${weaknesses || '(none listed)'}
+Good fit for: ${r.good_fit_for || '(unspecified)'}
+Not great for: ${r.not_great_for || '(unspecified)'}${voiceAnchor}
+
+Use this as the calibrated source for your review/compare/tradeoff voice. Stay honest about the weaknesses — don't sales-pitch. The reputation read is rep-vetted, not LLM-improvised, so trust it over your own product knowledge.
+`;
+}
+
 function buildDecisionSupportBlock(ds, returningActive) {
   if (!ds || !ds.triggered) return '';
   const products = Array.isArray(ds.subject_products) ? ds.subject_products : [];
@@ -540,6 +568,11 @@ function buildDecisionSupportBlock(ds, returningActive) {
   const returningCoexist = returningActive
     ? `\n- RETURNING MODE is also active. Advisor turn takes priority for this message. SKIP the returning-customer opener ("no worries", "hey man") — go straight to the honest framing below.`
     : '';
+
+  // Phase E.3 KB grounding — when the customer is asking about a product
+  // in PRODUCT_KB, surface the rep-vetted reputation read so the LLM
+  // can speak from calibrated context instead of the generic punt.
+  const kbBlock = ds.kb_match ? buildKbContextBlock(ds.kb_match) : '';
 
   // Sub-mode-specific structure rules + voice anchors.
   const structureBlock = (() => {
@@ -575,7 +608,7 @@ VOICE ANCHOR — tradeoff:
 "Honestly the Michelin is worth the extra if you keep your cars for the long haul, the 100K warranty pays for itself. For a daily that you'd flip in 3 years, the Gladiator is fine and saves you a couple hundred. What's your timeline on this car?"`;
   })();
 
-  return `
+  return `${kbBlock}
 DECISION SUPPORT MODE — ACTIVE (this turn only)
 The customer is asking for advisor-style help, not spec collection. Shift voice from qualifier-driven to advisor-driven for this message ONLY.${productLine}${leanLine}${returningCoexist}
 
@@ -1336,6 +1369,8 @@ export async function handler(event) {
     products: decisionSupport?.subject_products || [],
     options_count: decisionSupport?.options_presented_count ?? 0,
     lean_hint: decisionSupport?.lean_hint || null,
+    kb_match_slug: decisionSupport?.kb_match?.slug || null,
+    kb_match_tier: decisionSupport?.kb_match?.tier || null,
     block_length: decisionSupportBlock.length
   });
 
