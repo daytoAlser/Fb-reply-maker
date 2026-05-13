@@ -923,11 +923,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ ok: false, reason: 'no_active_tab' });
         return;
       }
-      console.log('[FB Reply Maker SW] INSERT_REPLY received, forwarding to tab', tab.id, tab.url);
+      console.log('[FB Reply Maker SW] INSERT_REPLY received, forwarding to tab', tab.id, tab.url, {
+        auto_send: !!msg.auto_send,
+        thread_id: msg.thread_id || null
+      });
       try {
         const res = await chrome.tabs.sendMessage(tab.id, {
           type: 'INSERT_REPLY',
-          text: msg.text
+          text: msg.text,
+          auto_send: !!msg.auto_send,
+          thread_id: typeof msg.thread_id === 'string' ? msg.thread_id : undefined,
+          skip_humanized: !!msg.skip_humanized
         });
         console.log('[FB Reply Maker SW] INSERT_REPLY content-script reply:', res);
         sendResponse(res || { ok: false, reason: 'no_response' });

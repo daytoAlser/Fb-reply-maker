@@ -20,7 +20,15 @@ const FBRM = globalThis.FBRM_SELECTORS || null;
 const SELECTORS = {
   threadContainer: FBRM?.thread?.container || '[role="main"]',
   threadHeader: FBRM?.thread?.header || 'h1, h2',
-  replyTextbox: FBRM?.thread?.replyTextbox || '[contenteditable="true"][role="textbox"]'
+  replyTextbox: FBRM?.thread?.replyTextbox || '[contenteditable="true"][role="textbox"]',
+  sendButtonSelectors: FBRM?.thread?.sendButtonSelectors || [
+    'div[role="button"][aria-label="Press enter to send"]',
+    'div[role="button"][aria-label="Send"]',
+    'div[role="button"][aria-label="Press Enter to send"]',
+    'button[aria-label="Send"]',
+    'button[aria-label="Press enter to send"]',
+    '[role="textbox"] ~ div[role="button"]'
+  ]
 };
 const INBOX_SELECTORS = FBRM?.inbox || {
   threadAnchorSelectors: ['a[href*="/marketplace/t/"]', 'a[href*="/messages/t/"]'],
@@ -342,10 +350,335 @@ setInterval(() => {
   }
 }, 500);
 
-async function tryInsertReply(text) {
+// ============================================================
+// Phase F.1.7 — humanized send injection
+// ============================================================
+//
+// Replaces the prior bulk-insert with a character-by-character typing path,
+// adds an optional auto-send that locates the send button, "drives" the
+// cursor toward it with a short mousemove sequence, then clicks. Per-
+// character delays follow a 3-bucket distribution (normal / pause /
+// thinking) and occasional typo-retype patterns for messages over 40
+// chars. Pre-send guards block placeholder leaks, dedupes, and
+// thread-URL drift. Bulk-insert remains as a robust fallback if FB
+// rejects character-driven input on a given surface.
+
+const TYPING_BUCKETS = [
+  { weight: 0.70, min: 30,  max: 90  },  // normal typing
+  { weight: 0.20, min: 90,  max: 180 },  // brief pause
+  { weight: 0.10, min: 180, max: 400 }   // thinking pause
+];
+const TYPO_PROBABILITY_PER_WORD = 0.04;        // 4%, within spec 3-5%
+const TYPO_MIN_MESSAGE_LENGTH = 40;
+const FOCUS_PRE_TYPE_MIN_MS = 400;
+const FOCUS_PRE_TYPE_MAX_MS = 1200;
+const POST_TYPE_REVIEW_MIN_MS = 300;
+const POST_TYPE_REVIEW_MAX_MS = 900;
+const SEND_MOUSEMOVE_STEPS_MIN = 3;
+const SEND_MOUSEMOVE_STEPS_MAX = 5;
+const SEND_MOUSEMOVE_DURATION_MIN_MS = 80;
+const SEND_MOUSEMOVE_DURATION_MAX_MS = 200;
+const SEND_BUTTON_WAIT_MS = 2000;
+const SEND_CONFIRM_WAIT_MS = 3000;
+const SEND_NETWORK_GRACE_MS = 8000;
+const PLACEHOLDER_LEAK_PATTERNS = [
+  /@\[\s*(name|customer|partner|first[\s_-]?name)\s*\]/i,
+  /\{\s*(vehicle|name|partner|listing|customer)\s*\}/i,
+  /<<\s*\w+\s*>>/
+];
+// Adjacent-keys for typo simulation. Maps a→s,q,w; etc. Only common ASCII
+// letters; fallback to a generic shift if not in map.
+const TYPO_NEIGHBORS = {
+  a: 'sq', b: 'vn', c: 'xv', d: 'sf', e: 'wr', f: 'dg', g: 'fh', h: 'gj',
+  i: 'uo', j: 'hk', k: 'jl', l: 'k', m: 'n', n: 'bm', o: 'ip', p: 'o',
+  q: 'wa', r: 'et', s: 'ad', t: 'ry', u: 'yi', v: 'cb', w: 'qe', x: 'zc',
+  y: 'tu', z: 'x'
+};
+
+function pickTypingDelayMs() {
+  const r = Math.random();
+  let acc = 0;
+  for (const b of TYPING_BUCKETS) {
+    acc += b.weight;
+    if (r <= acc) return b.min + Math.floor(Math.random() * (b.max - b.min));
+  }
+  const last = TYPING_BUCKETS[TYPING_BUCKETS.length - 1];
+  return last.min + Math.floor(Math.random() * (last.max - last.min));
+}
+
+function pickFocusDelayMs(textLength) {
+  // Longer messages = more "reading before typing" time. Scale linearly,
+  // clamped to the configured range.
+  const scaled = FOCUS_PRE_TYPE_MIN_MS + Math.floor((textLength / 200) * (FOCUS_PRE_TYPE_MAX_MS - FOCUS_PRE_TYPE_MIN_MS));
+  const clamped = Math.min(FOCUS_PRE_TYPE_MAX_MS, Math.max(FOCUS_PRE_TYPE_MIN_MS, scaled));
+  // Add ±20% jitter so two same-length messages don't have identical delays.
+  const jitter = clamped * (Math.random() * 0.4 - 0.2);
+  return Math.max(FOCUS_PRE_TYPE_MIN_MS, Math.floor(clamped + jitter));
+}
+
+function typoNeighborFor(ch) {
+  const lower = ch.toLowerCase();
+  const neighbors = TYPO_NEIGHBORS[lower];
+  if (!neighbors) return null;
+  const pick = neighbors[Math.floor(Math.random() * neighbors.length)];
+  return ch === lower ? pick : pick.toUpperCase();
+}
+
+// Build a typing "plan" — an array of operations the typer will execute.
+// Most entries are { kind: 'char', char }. A small percentage of words get
+// a { kind: 'typo', wrong, correct } pair which the typer expands into
+// type-wrong → backspace → type-correct.
+function buildTypingPlan(text) {
+  const ops = [];
+  if (text.length < TYPO_MIN_MESSAGE_LENGTH) {
+    for (const ch of text) ops.push({ kind: 'char', char: ch });
+    return ops;
+  }
+  // Split into words preserving the separators so we can re-stream the
+  // original text exactly.
+  const tokens = text.match(/\S+|\s+/g) || [text];
+  for (const tok of tokens) {
+    if (/^\s+$/.test(tok)) {
+      for (const ch of tok) ops.push({ kind: 'char', char: ch });
+      continue;
+    }
+    // Eligible word for typo: at least 4 chars, only-letters body, has a
+    // typo-eligible character in positions 2-end. Pick one position to
+    // mis-type at the per-word probability.
+    const eligible = tok.length >= 4 && /^[A-Za-z'-]+[.,!?]?$/.test(tok);
+    if (eligible && Math.random() < TYPO_PROBABILITY_PER_WORD) {
+      const typoIdx = 1 + Math.floor(Math.random() * (tok.length - 1));
+      const right = tok[typoIdx];
+      const wrong = typoNeighborFor(right);
+      if (wrong && wrong !== right) {
+        for (let i = 0; i < tok.length; i++) {
+          if (i === typoIdx) {
+            ops.push({ kind: 'typo', wrong, correct: right });
+          } else {
+            ops.push({ kind: 'char', char: tok[i] });
+          }
+        }
+        continue;
+      }
+    }
+    for (const ch of tok) ops.push({ kind: 'char', char: ch });
+  }
+  return ops;
+}
+
+// (sleep + randomBetween already declared near the top of this IIFE
+//  for F.1.5 humanization; F.1.7 reuses them.)
+
+// Fire a single character into the contenteditable using a beforeinput +
+// input pair (most React-friendly). Falls back to textContent append if
+// the synthetic event was canceled. Returns whether the textbox grew.
+function typeChar(box, ch) {
+  const before = box.innerText || '';
+  try {
+    const ie = new InputEvent('beforeinput', {
+      inputType: 'insertText',
+      data: ch,
+      bubbles: true,
+      cancelable: true
+    });
+    const accepted = box.dispatchEvent(ie);
+    if (accepted) {
+      box.dispatchEvent(new InputEvent('input', {
+        inputType: 'insertText',
+        data: ch,
+        bubbles: true
+      }));
+    }
+  } catch (err) {
+    /* fall through to DOM append */
+  }
+  if ((box.innerText || '') === before) {
+    // Synthetic input was rejected — append directly so the next char
+    // doesn't compound the gap.
+    try {
+      box.appendChild(document.createTextNode(ch));
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+    } catch { /* give up on this char */ }
+  }
+  return (box.innerText || '').length > before.length;
+}
+
+function backspaceOne(box) {
+  const before = box.innerText || '';
+  try {
+    const ie = new InputEvent('beforeinput', {
+      inputType: 'deleteContentBackward',
+      bubbles: true,
+      cancelable: true
+    });
+    const accepted = box.dispatchEvent(ie);
+    if (accepted) {
+      box.dispatchEvent(new InputEvent('input', {
+        inputType: 'deleteContentBackward',
+        bubbles: true
+      }));
+    }
+  } catch { /* ignore */ }
+  if ((box.innerText || '') === before) {
+    // Manually pop the last character.
+    const txt = box.innerText || '';
+    if (txt.length > 0) {
+      box.innerText = txt.slice(0, -1);
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  }
+}
+
+async function humanizedType(box, text) {
+  // Place caret at end and focus.
+  try {
+    box.focus();
+    const range = document.createRange();
+    range.selectNodeContents(box);
+    range.collapse(false);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  } catch { /* best effort */ }
+
+  await sleep(pickFocusDelayMs(text.length));
+
+  const plan = buildTypingPlan(text);
+  for (const op of plan) {
+    if (document.hidden) {
+      // Tab went background mid-typing — bail. Caller decides whether to
+      // retry (currently: no auto-retry, surface failure).
+      return { ok: false, reason: 'tab_hidden_mid_type' };
+    }
+    if (op.kind === 'char') {
+      typeChar(box, op.char);
+      await sleep(pickTypingDelayMs());
+    } else if (op.kind === 'typo') {
+      typeChar(box, op.wrong);
+      // Brief "noticed it" pause before backspacing — short, not "thinking".
+      await sleep(80 + Math.floor(Math.random() * 120));
+      backspaceOne(box);
+      // Recovery pause before retyping.
+      await sleep(60 + Math.floor(Math.random() * 100));
+      typeChar(box, op.correct);
+      await sleep(pickTypingDelayMs());
+    }
+  }
+  return { ok: true };
+}
+
+function findSendButton() {
+  const list = SELECTORS.sendButtonSelectors || [];
+  for (const sel of list) {
+    const el = document.querySelector(sel);
+    if (el) return el;
+  }
+  return null;
+}
+
+// Fire a short mousemove sequence "toward" the target element ending in a
+// click. FB's bot-detection has been observed reacting to instant clicks
+// with no prior pointer movement; a 3-5 step traversal over 80-200ms is
+// cheap insurance.
+async function humanizedClick(target) {
+  if (!target) return false;
+  const rect = target.getBoundingClientRect();
+  const endX = rect.left + rect.width * (0.4 + Math.random() * 0.2);
+  const endY = rect.top + rect.height * (0.4 + Math.random() * 0.2);
+
+  // Pick a starting point somewhere left + above the target.
+  const startX = Math.max(10, endX - (60 + Math.random() * 120));
+  const startY = Math.max(10, endY - (40 + Math.random() * 80));
+
+  const steps = SEND_MOUSEMOVE_STEPS_MIN
+    + Math.floor(Math.random() * (SEND_MOUSEMOVE_STEPS_MAX - SEND_MOUSEMOVE_STEPS_MIN + 1));
+  const totalDur = SEND_MOUSEMOVE_DURATION_MIN_MS
+    + Math.floor(Math.random() * (SEND_MOUSEMOVE_DURATION_MAX_MS - SEND_MOUSEMOVE_DURATION_MIN_MS));
+  const stepDur = Math.max(8, Math.floor(totalDur / steps));
+
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    // Slight curve via sinusoidal Y offset so it isn't a straight line.
+    const curveY = Math.sin(t * Math.PI) * (4 + Math.random() * 6);
+    const x = startX + (endX - startX) * t;
+    const y = startY + (endY - startY) * t + curveY;
+    try {
+      const el = document.elementFromPoint(x, y) || target;
+      el.dispatchEvent(new MouseEvent('mousemove', {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+        view: window
+      }));
+    } catch { /* ignore */ }
+    await sleep(stepDur);
+  }
+
+  try {
+    // mouseover + mousedown + mouseup + click — full sequence so React
+    // pointer handlers fire in the order they expect.
+    target.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, clientX: endX, clientY: endY }));
+    await sleep(20 + Math.floor(Math.random() * 40));
+    target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: endX, clientY: endY }));
+    await sleep(20 + Math.floor(Math.random() * 50));
+    target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0, clientX: endX, clientY: endY }));
+    target.click();
+    return true;
+  } catch (err) {
+    console.warn('[FB Reply Maker] humanizedClick failed:', err?.message);
+    return false;
+  }
+}
+
+async function waitForMessageInThread(text, maxMs) {
+  const sample = text.slice(0, Math.min(40, text.length));
+  const container = document.querySelector(SELECTORS.threadContainer);
+  if (!container) return false;
+  const start = Date.now();
+  while (Date.now() - start < maxMs) {
+    const innerText = container.innerText || '';
+    if (innerText.includes(sample)) return true;
+    await sleep(150);
+  }
+  return false;
+}
+
+function checkPreSendGuards({ text, threadHint }) {
+  if (typeof text !== 'string') return { ok: false, reason: 'not_string' };
+  const trimmed = text.trim();
+  if (!trimmed) return { ok: false, reason: 'empty' };
+  for (const re of PLACEHOLDER_LEAK_PATTERNS) {
+    if (re.test(text)) return { ok: false, reason: 'placeholder_leak' };
+  }
+  // Optional caller-supplied thread URL hint: refuse to send if the tab
+  // has navigated to a different thread since the request was queued.
+  if (threadHint) {
+    const safe = String(threadHint).replace(/[^A-Za-z0-9_-]/g, '');
+    if (safe && !new RegExp('/(?:marketplace|messages)/t/' + safe + '(?:[/?#]|$)').test(location.href)) {
+      return { ok: false, reason: 'thread_url_drift', url: location.href };
+    }
+  }
+  // Dedupe: scan visible bubbles for an outgoing message identical to text.
+  const container = document.querySelector(SELECTORS.threadContainer);
+  if (container) {
+    const partner = extractThreadInfo(container).partner || null;
+    const { messages } = scanThreadMessages(container, partner);
+    for (const m of messages) {
+      if (m.sender === 'me' && m.text && m.text.trim() === trimmed) {
+        return { ok: false, reason: 'duplicate_send' };
+      }
+    }
+  }
+  return { ok: true };
+}
+
+// Bulk-insert fallback (the original F.1 method). Still used when the
+// humanized character-by-character path is rejected by FB or when caller
+// opts out via { skipHumanized: true }.
+async function bulkInsertReply(text) {
   const box = document.querySelector(SELECTORS.replyTextbox);
   if (!box) return { ok: false, reason: 'no_textbox' };
-
   const sample = text.slice(0, 20);
 
   // Method 1: InputEvent (most React-compatible)
@@ -357,26 +690,18 @@ async function tryInsertReply(text) {
     const sel = window.getSelection();
     sel.removeAllRanges();
     sel.addRange(range);
-
     const ie = new InputEvent('beforeinput', {
-      inputType: 'insertText',
-      data: text,
-      bubbles: true,
-      cancelable: true
+      inputType: 'insertText', data: text, bubbles: true, cancelable: true
     });
     const accepted = box.dispatchEvent(ie);
     if (accepted) {
       box.dispatchEvent(new InputEvent('input', {
-        inputType: 'insertText',
-        data: text,
-        bubbles: true
+        inputType: 'insertText', data: text, bubbles: true
       }));
-      if (box.innerText.includes(sample)) {
-        return { ok: true, method: 'inputEvent' };
-      }
+      if (box.innerText.includes(sample)) return { ok: true, method: 'inputEvent' };
     }
   } catch (err) {
-    console.warn('[FB Reply Maker] insert method 1 threw:', err?.message);
+    console.warn('[FB Reply Maker] bulk method 1 threw:', err?.message);
   }
 
   // Method 2: DOM insertNode + synthetic input/change
@@ -389,11 +714,9 @@ async function tryInsertReply(text) {
     r2.insertNode(textNode);
     box.dispatchEvent(new Event('input', { bubbles: true }));
     box.dispatchEvent(new Event('change', { bubbles: true }));
-    if (box.innerText.includes(sample)) {
-      return { ok: true, method: 'domInsert' };
-    }
+    if (box.innerText.includes(sample)) return { ok: true, method: 'domInsert' };
   } catch (err) {
-    console.warn('[FB Reply Maker] insert method 2 threw:', err?.message);
+    console.warn('[FB Reply Maker] bulk method 2 threw:', err?.message);
   }
 
   // Method 3: Clipboard paste simulation (last resort)
@@ -402,21 +725,110 @@ async function tryInsertReply(text) {
     box.focus();
     const dt = new DataTransfer();
     dt.setData('text/plain', text);
-    const pasteEvent = new ClipboardEvent('paste', {
-      clipboardData: dt,
-      bubbles: true,
-      cancelable: true
-    });
-    box.dispatchEvent(pasteEvent);
+    box.dispatchEvent(new ClipboardEvent('paste', {
+      clipboardData: dt, bubbles: true, cancelable: true
+    }));
     return { ok: true, method: 'clipboardPaste' };
   } catch (err) {
-    console.warn('[FB Reply Maker] insert method 3 threw:', err?.message);
+    console.warn('[FB Reply Maker] bulk method 3 threw:', err?.message);
+  }
+  return { ok: false, reason: 'all_methods_failed' };
+}
+
+// F.1.7 entry point for INSERT_REPLY. Runs pre-send guards, types the
+// message character-by-character (with humanized distribution + occasional
+// typo-retype), and optionally clicks send via a mousemove path. Falls
+// back to bulk insert if humanized typing didn't produce the expected
+// text in the box (FB rejected our synthetic events).
+async function tryInsertReply(text, opts) {
+  const options = opts || {};
+  const autoSend = !!options.auto_send;
+  const threadHint = options.thread_id || null;
+
+  // Pre-send guards run regardless of auto-send. A placeholder leak is
+  // never something we want to leave dangling in the compose box either.
+  const guard = checkPreSendGuards({ text, threadHint });
+  if (!guard.ok) {
+    console.warn('[FB Reply Maker] pre-send guard:', guard.reason, guard);
+    return { ok: false, reason: guard.reason, guard: true };
   }
 
+  const box = document.querySelector(SELECTORS.replyTextbox);
+  if (!box) return { ok: false, reason: 'no_textbox' };
+  const sample = text.slice(0, Math.min(20, text.length));
+
+  // Humanized character-by-character typing. If the box doesn't actually
+  // contain the typed text after this (FB rejected synthetic events on
+  // this surface), fall back to bulk insert.
+  let usedMethod = null;
+  if (!options.skip_humanized) {
+    const t = await humanizedType(box, text);
+    if (t.ok && (box.innerText || '').includes(sample)) {
+      usedMethod = 'humanizedType';
+    } else if (!t.ok && t.reason === 'tab_hidden_mid_type') {
+      return { ok: false, reason: 'tab_hidden_mid_type' };
+    }
+  }
+  if (!usedMethod) {
+    // Reset the box (humanized typing may have left a partial state)
+    // then try the bulk path.
+    try { box.innerText = ''; } catch { /* ignore */ }
+    const bulk = await bulkInsertReply(text);
+    if (!bulk.ok) return { ok: false, reason: bulk.reason || 'insert_failed' };
+    usedMethod = bulk.method;
+  }
+
+  if (!autoSend) {
+    fireActivationBurst();
+    return { ok: true, method: usedMethod, sent: false };
+  }
+
+  // Auto-send: locate button, review pause, humanized click, confirm send.
+  // Re-locate compose box right before clicking — FB sometimes shifts DOM
+  // during typing (sticker tray expands, attachment row appears, etc.).
+  const reviewPause = POST_TYPE_REVIEW_MIN_MS
+    + Math.floor(Math.random() * (POST_TYPE_REVIEW_MAX_MS - POST_TYPE_REVIEW_MIN_MS));
+  await sleep(reviewPause);
+
+  // Spec F1.7: "Send button not found within 2s of compose box focus →
+  // Re-locate compose box. If still not found, fail to clipboard fallback."
+  let sendBtn = findSendButton();
+  if (!sendBtn) {
+    const waitStart = Date.now();
+    while (!sendBtn && Date.now() - waitStart < SEND_BUTTON_WAIT_MS) {
+      await sleep(120);
+      sendBtn = findSendButton();
+    }
+  }
+  if (!sendBtn) {
+    // Last-ditch: clipboard the text so the user has it on hand, surface
+    // the failure so the UI can prompt for manual send.
+    try { await navigator.clipboard.writeText(text); } catch { /* ignore */ }
+    return { ok: false, reason: 'send_button_not_found', method: usedMethod, clipboard_set: true };
+  }
+
+  if (document.hidden) {
+    return { ok: false, reason: 'tab_hidden_before_send', method: usedMethod };
+  }
+
+  const clicked = await humanizedClick(sendBtn);
+  if (!clicked) return { ok: false, reason: 'click_failed', method: usedMethod };
+
+  // Confirm: wait for the message text to appear in the thread DOM. If
+  // the network is slow we extend the wait but never auto-retry the send.
+  const appeared = await waitForMessageInThread(text, SEND_CONFIRM_WAIT_MS);
+  if (appeared) {
+    return { ok: true, method: usedMethod, sent: true };
+  }
+  const lateAppeared = await waitForMessageInThread(text, SEND_NETWORK_GRACE_MS - SEND_CONFIRM_WAIT_MS);
+  if (lateAppeared) {
+    return { ok: true, method: usedMethod, sent: true, slow: true };
+  }
   return {
     ok: false,
-    reason: 'all_methods_failed',
-    tried: ['inputEvent', 'domInsert', 'clipboardPaste']
+    reason: 'send_not_confirmed',
+    method: usedMethod,
+    advice: 'Send may have failed. Check FB before retrying.'
   };
 }
 
@@ -940,12 +1352,22 @@ function scrapeInboxList() {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'INSERT_REPLY') {
     const text = msg.text || '';
-    console.log('[FB Reply Maker] INSERT_REPLY received, preview:', text.slice(0, 40));
+    const opts = {
+      auto_send: !!msg.auto_send,
+      thread_id: typeof msg.thread_id === 'string' ? msg.thread_id : null,
+      skip_humanized: !!msg.skip_humanized
+    };
+    console.log('[FB Reply Maker] INSERT_REPLY received', {
+      preview: text.slice(0, 40), auto_send: opts.auto_send, thread_id: opts.thread_id
+    });
     (async () => {
-      const result = await tryInsertReply(text);
+      const result = await tryInsertReply(text, opts);
       if (result.ok) {
-        console.log('[FB Reply Maker] insert method succeeded:', result.method);
-        fireActivationBurst();
+        console.log('[FB Reply Maker] insert succeeded:', result.method, 'sent:', !!result.sent);
+        // Only fire the activation burst when we're NOT auto-sending —
+        // post-send the box is empty and bursting input events would just
+        // wake the (now empty) compose React state for no reason.
+        if (!result.sent) fireActivationBurst();
       } else {
         console.warn('[FB Reply Maker] INSERT_REPLY failed:', result);
       }

@@ -33,7 +33,20 @@
     thread: {
       container: '[role="main"]',
       header: 'h1, h2',
-      replyTextbox: '[contenteditable="true"][role="textbox"]'
+      replyTextbox: '[contenteditable="true"][role="textbox"]',
+      // F.1.7: send-button selector chain. FB labels vary per surface
+      // (Marketplace vs Messenger group vs business). Tried in order;
+      // first match wins. Anchored on aria-label rather than class
+      // because classes are FB-random.
+      sendButtonSelectors: [
+        'div[role="button"][aria-label="Press enter to send"]',
+        'div[role="button"][aria-label="Send"]',
+        'div[role="button"][aria-label="Press Enter to send"]',
+        'button[aria-label="Send"]',
+        'button[aria-label="Press enter to send"]',
+        // Fallback: a submit-style button immediately after the textbox.
+        '[role="textbox"] ~ div[role="button"]'
+      ]
     },
 
     // ── Inbox list (new in F.1.5) ─────────────────────────────────────
