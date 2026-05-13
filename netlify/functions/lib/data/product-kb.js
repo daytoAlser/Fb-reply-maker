@@ -30,7 +30,10 @@ export const PRODUCT_KB = {
   // ────────────────────────────────────────────────────────────────
   ilink_multimatch: {
     canonical_name: 'iLink MultiMatch (3PMS all-season)',
-    aliases: ['ilink multimatch', 'ilink multi-match', 'multimatch', 'multi-match'],
+    // Bare "ilink" default-resolves here (MultiMatch is the higher-volume
+    // SKU). L-Zeal mentions still win via longer-first alias ordering
+    // ("ilink l-zeal" / "ilink lzeal" both rank above "ilink" alone).
+    aliases: ['ilink multimatch', 'ilink multi-match', 'multimatch', 'multi-match', 'ilink'],
     category: 'tire',
     tier: 'house_brand',
     reputation_read: {
