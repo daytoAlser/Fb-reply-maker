@@ -532,6 +532,79 @@ After logging, lead.manualOptionsLog gets the entry. Status flips to options_sen
 
 ---
 
+## 6. Phase E.6: Interpretation Layer
+
+**Server-side only.** Pre-parse normalization and frame-aware interpretation of customer messages BEFORE the LLM generates a reply. Surfaces customer intent more reliably so variants land more often without needing edits. Informed by transcript analysis covering bolt-pattern format chaos, frame-mismatch answers, re-asks, AWD tread depth rules, and partitioned tire setups.
+
+### 6.1 Architecture
+
+Pre-processor sits in `generate-reply.js` between request parse and LLM call:
+
+- **Old flow:** `req → parse → build system prompt → LLM → response`
+- **New flow:** `req → parse → normalize() + interpret() → enriched context → build system prompt → LLM → response`
+
+The normalize/interpret layer outputs a structured `interpretation` object, injected into the prompt as a new `INTERPRETATION CONTEXT` block. Can short-circuit certain responses if confidence is high enough (e.g. re-ask detection).
+
+### 6.2 Normalize step (pure transformations, no LLM call)
+
+**Bolt-pattern normalization** — accept any of `5x114.3`, `5-114.3`, `5x4.5`, `5-4.5`, `5x4.50`, `5x114` (typo for `.3`), `5x4.75`, `5x108/100/105/120`, `6x135`, `6x139.7`, `6x5.5`, `8x6.5`, `8x170`, `5-1.44` (inch-decimal shorthand for 4.5"). `"6 bolt"` is ambiguous (Ford 6x135 vs Chevy/GMC/Toyota 6x139.7) — flag for clarification. Output `interpretation.bolt_pattern = { raw, canonical, confidence, ambiguous? }`.
+
+**Tire-spec classification** — ST/LT/P prefix or none. Flag ST on passenger vehicles, LT on cars, etc.
+
+**Vehicle era** — extract year, classify pre-1990 / 1990-2010 / 2011-present.
+
+**Vehicle subtype** — multi-tag detection from natural-language phrases (`family_daily`, `enthusiast`, `beater`, `classic_truck`, `modern_truck`, `already_modified`, `unmodified`, `trailer`).
+
+**Tire partition** — `summer_only`, `winter_only`, `year_round`, or null. Hard rule: when detected, no opposite-season push.
+
+**Re-ask detection** — lexical similarity vs last 5 customer messages, plus "still"/"again"/"any update"/"sorry to bug you"/"any luck" phrases. When confidence > 0.7 inject HARD RULE: apologize for missing it, answer plainly.
+
+**Frame-mismatch detection** — if Dayton just asked Q, is customer's reply in-frame? E.g. "year/make/model?" → "17 inch" is rim-size, not vehicle. Output proposed bridge phrase.
+
+### 6.3 Interpret step (rule enrichment, no LLM call)
+
+**AWD partial replacement** — AWD vehicle + ask about 2 tires (not 4) → inject "ask tread depth check, must be within 3/32".
+
+**Wheel-size availability tradeoff** — 24"+ wheels → soft note about decreasing option availability.
+
+**Ram body generation** — 1994-2001 = 2nd gen, 2002-2008 = 3rd gen, 2009-2018 = 4th gen (DS, "classic" after 2019), 2019-present = 5th gen (DT, "new body"). For 2019+ confirm classic-vs-new-body if ambiguous, unless `already_modified` flag short-circuits.
+
+### 6.4 Prompt integration
+
+New `INTERPRETATION CONTEXT` block injected after `EXISTING TRACKED PRODUCTS` and before variant generation instructions. Only sub-blocks with detections are included; empty interpretation = no block added.
+
+Block contains conditional sections per detection: bolt-pattern callout (with ambiguity warning), tire-spec mismatch warning, classic-vehicle warning, subtype framing hints, tire-partition HARD RULE, re-ask HARD RULE, frame-mismatch HARD RULE with bridge phrase, AWD HARD RULE, wheel-size SOFT NOTE, Ram body-question SOFT RULE.
+
+### 6.5 Files
+
+| File | Role |
+|---|---|
+| `netlify/functions/generate-reply.js` | Integration point — call normalize → interpret → inject prompt block |
+| `netlify/functions/lib/interpretation/data.js` | Static lookup tables (bolt aliases, era cutoffs, subtype phrases, etc.) |
+| `netlify/functions/lib/interpretation/normalize.js` | Detection functions |
+| `netlify/functions/lib/interpretation/interpret.js` | Rule application on top of normalize output |
+
+No Supabase schema changes. No extension changes. No UI changes.
+
+### 6.6 Acceptance Criteria for E.6
+
+| # | Criterion |
+|---|---|
+| E6-1 | Bolt-pattern normalization covers all listed formats |
+| E6-2 | Tire-spec mismatch flagged when type doesn't match vehicle |
+| E6-3 | Vehicle-era classification works on year extraction |
+| E6-4 | Vehicle-subtype multi-tag detection on natural language |
+| E6-5 | Tire-partition rule enforced (no opposite-season push) |
+| E6-6 | Re-ask detection apologizes and answers directly |
+| E6-7 | Frame-mismatch bridges instead of re-asking verbatim |
+| E6-8 | AWD partial replacement triggers tread-depth check |
+| E6-9 | Wheel-size tradeoff soft note injects on 24+ |
+| E6-10 | Ram body generation classified, body-style question prompted when needed |
+| E6-11 | Empty interpretation = no prompt block (no regression on standard messages) |
+| E6-12 | Server-side only — no extension changes |
+
+---
+
 ## 8. Build Order
 
 Strict phase order. Stop after each. Test before moving on.

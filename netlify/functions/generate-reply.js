@@ -1,5 +1,8 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { supabase } from './_shared/supabaseClient.js';
+// Phase E.6 — pre-LLM normalization + interpretation. See SPEC-PhaseE.md §6.
+import { normalize as runNormalize } from './lib/interpretation/normalize.js';
+import { interpret as runInterpret } from './lib/interpretation/interpret.js';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -370,7 +373,102 @@ HARD RULES IN RETURNING MODE
 `;
 }
 
-const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs }) => {
+// Phase E.6 — INTERPRETATION CONTEXT prompt block. Conditional sub-blocks
+// per detection. Empty interpretation = empty string (no block added).
+// Injected after EXISTING TRACKED PRODUCTS, before category / history.
+function buildInterpretationBlock(interpretation) {
+  if (!interpretation || typeof interpretation !== 'object') return '';
+  const lines = [];
+
+  const bp = interpretation.bolt_pattern;
+  if (bp && bp.ambiguous) {
+    lines.push(`- BOLT-PATTERN AMBIGUOUS: customer wrote "${bp.raw}" (${bp.count}-bolt count with no measurement). Common candidates depend on make — ask which bolt pattern before quoting fitment.`);
+  } else if (bp && bp.canonical) {
+    const hedge = bp.confidence < 0.9 ? ' (low confidence — verify before quoting if needed)' : '';
+    lines.push(`- Bolt pattern detected: ${bp.canonical}${hedge}. Customer wrote: "${bp.raw}". Use canonical form when referencing.`);
+  }
+
+  const ts = interpretation.tire_spec;
+  if (ts && ts.mismatch_flag) {
+    lines.push(`- TIRE-SPEC MISMATCH: customer specified ${ts.raw} (${ts.type}) but vehicle is ${ts.mismatch_reason || 'a different category'}. Ask to confirm the spec or the vehicle before quoting.`);
+  } else if (ts && ts.type === 'special_trailer') {
+    lines.push(`- Tire spec is Special Trailer (${ts.raw}). Trailer rules apply — no TPMS, ST rating, different bolt-pattern conventions. Confirm this is for a trailer if not already clear.`);
+  }
+
+  const era = interpretation.vehicle_era;
+  if (era && era.era === 'classic') {
+    lines.push(`- Vehicle is a classic (${era.year}). Do NOT assume modern bolt patterns, TPMS requirements, or wheel sizes. Different fitment world — verify everything before quoting.`);
+  } else if (era && era.era === 'older_modern') {
+    lines.push(`- Vehicle year is ${era.year} (older modern). TPMS may or may not be present — confirm if quoting wheels.`);
+  }
+
+  const subtypes = Array.isArray(interpretation.vehicle_subtype) ? interpretation.vehicle_subtype : [];
+  if (subtypes.includes('trailer')) {
+    lines.push(`- TRAILER, not a passenger vehicle. ST tires, no TPMS, different bolt-pattern conventions. Do NOT push passenger/LT tires or warn about TPMS.`);
+  }
+  if (subtypes.includes('family_daily')) {
+    lines.push(`- Customer signals a daily/family vehicle. Lean toward comfort + value-tier framing. Don't lead with enthusiast/show-build language.`);
+  }
+  if (subtypes.includes('enthusiast')) {
+    lines.push(`- Customer signals enthusiast. Don't over-explain basics — tier/spec language is fine.`);
+  }
+  if (subtypes.includes('beater')) {
+    lines.push(`- Customer signals a low-budget vehicle. Budget tier framing primary. Don't push premium tiers without an explicit ask.`);
+  }
+  if (subtypes.includes('classic_truck')) {
+    lines.push(`- Customer mentioned classic/old-body truck. Confirm year/gen if quoting fitment — old-body and new-body share names but not specs.`);
+  }
+  if (subtypes.includes('already_modified')) {
+    lines.push(`- Vehicle is already modified (lifted/leveled/big tires). Skip "is it stock?" questions and the body-style question for newer Rams — they've clearly moved past pre-sale.`);
+  }
+
+  const partition = interpretation.tire_partition;
+  if (partition === 'summer_only' || partition === 'has_separate_winters') {
+    lines.push(`- TIRE PARTITION = customer has winters handled separately. HARD RULE: do NOT push all-season, all-weather, or winter tires. Stay on summer/performance options.`);
+  } else if (partition === 'winter_only' || partition === 'has_separate_summers') {
+    lines.push(`- TIRE PARTITION = customer has summers handled separately. HARD RULE: do NOT push all-season, all-weather, or summer tires. Stay on winter options.`);
+  } else if (partition === 'year_round') {
+    lines.push(`- TIRE PARTITION = customer wants year-round. Lead with all-weather / all-season options. Don't bring up separate winter sets unless they ask.`);
+  } else if (partition === 'seasonal_only') {
+    lines.push(`- TIRE PARTITION = customer indicated they want season-specific tires only. Honor what they asked for; don't broaden to year-round.`);
+  }
+
+  const reAsk = interpretation.re_ask;
+  if (reAsk && reAsk.detected && reAsk.confidence >= 0.7) {
+    const ref = reAsk.original_question_summary
+      ? ` ("${reAsk.original_question_summary}")`
+      : '';
+    lines.push(`- HARD RULE — RE-ASK DETECTED${ref}: customer is repeating a question they asked earlier. Apologize briefly for missing it ("Sorry man, missed that one") and answer plainly. Do NOT pretend it's the first ask. Do NOT re-frame as a new conversation.`);
+  }
+
+  const fm = interpretation.frame_mismatch;
+  if (fm && fm.detected && fm.proposed_bridge) {
+    lines.push(`- HARD RULE — FRAME MISMATCH: you (Dayton) asked about ${fm.asked_about.replace(/_/g, ' ')} and customer answered with ${fm.customer_answered_with.replace(/_/g, ' ')}. Acknowledge what they DID answer, then bridge back to the original ask. Suggested phrasing: "${fm.proposed_bridge}". Do NOT just re-ask the original question verbatim.`);
+  }
+
+  const awd = interpretation.awd_partial_replacement;
+  if (awd && awd.detected) {
+    lines.push(`- HARD RULE — AWD PARTIAL REPLACEMENT: vehicle is AWD/4WD and customer wants 2 tires (not 4). Installing 2 new tires on AWD requires tread depth within 3/32" of the existing tires to avoid stressing the transfer case. BEFORE quoting, ask: "Are the front (or rear, depending on which 2) tires fairly new? Need to make sure the tread depth is close so we don't put any strain on the AWD system."`);
+  }
+
+  const wst = interpretation.wheel_size_tradeoff;
+  if (wst && wst.size) {
+    lines.push(`- SOFT NOTE: customer is on ${wst.size}" wheels. Tire option availability is limited at this size — fewer brands/sizes than 20"-22". Acknowledge naturally if relevant ("there's a few options at ${wst.size}s, let me see what works"); don't lead with it or talk them off the size.`);
+  }
+
+  const ram = interpretation.ram_body;
+  if (ram && ram.body_question_needed) {
+    lines.push(`- SOFT RULE — RAM BODY UNCLEAR: ${ram.year} Ram falls in the 5th-gen / "Classic" body overlap. If you're about to quote fitment specs, confirm body style first: "Is this the classic or the new body Ram?". Skip if already-modified subtype was detected.`);
+  }
+
+  if (lines.length === 0) return '';
+  return `
+INTERPRETATION CONTEXT (pre-parsed from customer message — apply these as overlays on top of standard flow)
+${lines.join('\n')}
+`;
+}
+
+const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock }) => {
   const listingBlock = listingTitle && listingTitle.trim()
     ? `\nLISTING CONTEXT\nThe customer is messaging about this listing: "${listingTitle.trim()}". Use this together with the customer's message to infer ad_type (wheel / tire / accessory / lift) per the detection signals below.\n`
     : '';
@@ -652,7 +750,7 @@ When all qualifiers for a product are captured, MOVE FORWARD:
 - If ALL tracked products are fully qualified, transition into recommendation / quote-punt voice. Reference the captured spec ("for cruising and highway with the 6-inch goal, the value kit will be perfect…") rather than re-asking.
 
 Re-asking a resolved qualifier is a hard error. Every variant must respect the lock.
-${existingProductsBlock}${categoryClause}${buildHistoryBlock(conversationHistory)}
+${existingProductsBlock}${interpretationBlock || ''}${categoryClause}${buildHistoryBlock(conversationHistory)}
 OUTPUT
 Respond ONLY with valid JSON. No markdown fencing. No preamble.
 {
@@ -789,6 +887,74 @@ export async function handler(event) {
     prevStatus: existing_status || null
   });
 
+  // Phase E.6: pre-LLM normalize + interpret pass. Pure functions, no IO.
+  // Output gets injected as INTERPRETATION CONTEXT in the system prompt.
+  // capturedVehicle (from prior turns) feeds the AWD heuristic; tire-spec
+  // mismatch detection cross-checks the parsed tire type against the
+  // existing vehicle category if we can infer one.
+  const capturedVehicle = (existing_captured_fields && typeof existing_captured_fields.vehicle === 'string')
+    ? existing_captured_fields.vehicle
+    : null;
+  let interpretation = null;
+  try {
+    const normalized = runNormalize({ message, history: conversation_history });
+    const enriched = runInterpret({
+      message,
+      normalized,
+      capturedVehicle
+    });
+    interpretation = { ...normalized, ...enriched };
+
+    // Cross-check: tire_spec mismatch needs vehicle context. Scan BOTH
+    // capturedVehicle (from prior turns) AND the current message — the
+    // customer often names the vehicle in the same message as the tire
+    // spec ("ST225/75R15 for my F150"), which means there's no captured
+    // value yet but the mismatch is still detectable.
+    if (interpretation.tire_spec) {
+      const haystack = [capturedVehicle, message].filter(Boolean).join(' ').toLowerCase();
+      const isTrailerVeh = /\b(trailer|fifth wheel|rv|camper|toy hauler)\b/.test(haystack);
+      const isTruckVeh = /\b(f[\s-]?\d{3}|silverado|sierra|ram\s*\d|tacoma|tundra|titan|gladiator|colorado|canyon|ranger|frontier)\b/.test(haystack);
+      const isSuvVeh = /\b(suv|jeep|wrangler|4runner|tahoe|yukon|expedition|sequoia|suburban)\b/.test(haystack);
+      const t = interpretation.tire_spec;
+      // Only flag when we have SOME vehicle context — without it the
+      // type is just informational.
+      const hasVehicleSignal = isTrailerVeh || isTruckVeh || isSuvVeh
+        || /\b(civic|corolla|camry|accord|altima|sentra|prius|mustang|charger|challenger|impala)\b/.test(haystack);
+      if (hasVehicleSignal) {
+        if (t.type === 'special_trailer' && !isTrailerVeh) {
+          t.mismatch_flag = true;
+          t.mismatch_reason = `vehicle looks like ${isTruckVeh ? 'a truck' : isSuvVeh ? 'an SUV' : 'a passenger vehicle'}, not a trailer`;
+        } else if (t.type === 'light_truck' && !isTruckVeh && !isSuvVeh) {
+          t.mismatch_flag = true;
+          t.mismatch_reason = 'LT-rated tire on what looks like a passenger car';
+        } else if (t.type === 'passenger' && isTrailerVeh) {
+          t.mismatch_flag = true;
+          t.mismatch_reason = 'passenger tire on a trailer';
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[FN] interpretation layer threw:', err?.message || err);
+    interpretation = null;
+  }
+
+  const interpretationBlock = interpretation ? buildInterpretationBlock(interpretation) : '';
+  console.log('[FN] interpretation:', {
+    bolt_pattern: interpretation?.bolt_pattern?.canonical || null,
+    bolt_ambiguous: !!interpretation?.bolt_pattern?.ambiguous,
+    tire_spec_type: interpretation?.tire_spec?.type || null,
+    tire_spec_mismatch: !!interpretation?.tire_spec?.mismatch_flag,
+    vehicle_era: interpretation?.vehicle_era?.era || null,
+    subtypes: interpretation?.vehicle_subtype || [],
+    partition: interpretation?.tire_partition || null,
+    re_ask: !!interpretation?.re_ask?.detected,
+    frame_mismatch: !!interpretation?.frame_mismatch?.detected,
+    awd_partial: !!interpretation?.awd_partial_replacement?.detected,
+    wheel_tradeoff: interpretation?.wheel_size_tradeoff?.size || null,
+    ram_body_q: !!interpretation?.ram_body?.body_question_needed,
+    block_length: interpretationBlock.length
+  });
+
   const systemPrompt = SYSTEM_PROMPT_TEMPLATE({
     openerLine,
     listingTitle,
@@ -799,7 +965,8 @@ export async function handler(event) {
     existingProductsOfInterest: existing_products_of_interest,
     conversationMode: effectiveConversationMode,
     priorStatus: existing_status,
-    silenceDurationMs: effectiveSilenceDurationMs
+    silenceDurationMs: effectiveSilenceDurationMs,
+    interpretationBlock
   });
 
   console.log('[FN] resolved opener:', openerLine);
