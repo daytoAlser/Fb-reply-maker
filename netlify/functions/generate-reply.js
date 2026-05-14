@@ -726,7 +726,15 @@ ALL THREE VARIANTS MUST INCLUDE ALL OF:
 3. Size confirmation: "${inv.fired_from_size}".
 4. ONE short feature or reason that fits the customer's use case — pull from your general tire knowledge: 3PMS rating, tread pattern type (directional/symmetric/asymmetric), warranty length, ride feel, treadwear, what kind of driving it's calibrated for. ONE phrase, not a paragraph.
 5. The sticker price anchor: "${primaryPrice || '(no price on file)'} each" or "${primaryPrice ? primaryPrice + '/tire' : '(no price on file)'}". This is the ONE price you may quote — total package pricing still stays in the phone-then-estimate punt for later.
-6. A soft CTA (e.g. "want me to put a quote together for the set?", "wanna lock it in?", "good to roll on those?").
+6. The INSTALL QUESTION as the CTA — a single binary ask: "you looking at install too or just the tires?" / "want install booked in too or tires only?" / "are we doing install or just the tires?". This is the only acceptable closing this turn. Install must be answered before phone-for-estimate can fire on the next turn.
+
+PROHIBITED CTA PHRASINGS THIS TURN (these are closing-style asks that skip the install qualifier):
+- "Wanna lock it in?"
+- "Want me to put a quote together for the set?"
+- "Want me to put a quote together for the full set plus install?"
+- "Good to roll on those?"
+- "let me know if you want me to..." / any formal-quote framing.
+- "Send me your phone number for the estimate" — phone-for-estimate is the NEXT turn after install is answered, NOT this turn.
 
 PROHIBITED PHRASES THIS TURN (these are the canonical hedges the live inventory eliminates):
 - "I'll pull a few options" / "I'll pull a couple of options" / "let me pull options"
@@ -740,8 +748,8 @@ PROHIBITED PHRASES THIS TURN (these are the canonical hedges the live inventory 
 
 EXAMPLE STRUCTURE (Dayton voice — adapt phrasing, do NOT copy verbatim):
 ${primaryIsHouse
-  ? `"Perfect, all-seasons are a solid call for the ${inv.fired_from_size.includes('R18') || inv.fired_from_size.includes('R20') ? 'CR-V' : 'rig'}. We've got the ${primary.name.split(' ').slice(0, 4).join(' ')} in ${inv.fired_from_size} — 3PMS-rated touring all-season, smooth ride for daily, ${primaryPrice} each ready to rock. Wanna lock it in?"`
-  : `"For sure, the ${primary.name.split(' ').slice(0, 4).join(' ')} is a solid pick. We've got it in ${inv.fired_from_size}, ${primaryPrice} each. Wanna lock it in?"`}
+  ? `"Perfect, all-seasons are a solid call. We've got the ${primary.name.split(' ').slice(0, 4).join(' ')} in ${inv.fired_from_size} — 3PMS-rated touring all-season, smooth ride for daily, ${primaryPrice} each ready to rock. You looking at install too or just the tires?"`
+  : `"For sure, the ${primary.name.split(' ').slice(0, 4).join(' ')} is a solid pick. We've got it in ${inv.fired_from_size}, ${primaryPrice} each. Want install booked too or tires only?"`}
 
 The rep can click a different inventory pick to override this auto-selection. Otherwise: this IS the recommendation.`
     : '';
@@ -853,7 +861,9 @@ ALL THREE VARIANTS MUST INCLUDE ALL OF:
 2. The PRODUCT named explicitly by full product name: "${focus.name}".
 3. ONE short feature or reason that fits — pull from your tire knowledge (3PMS rating, tread pattern, warranty, ride feel, treadwear). ONE phrase.
 4. The sticker price anchor: "${price} each" or "${price}/tire". This is the ONE price you may quote — total package pricing still stays in the phone-then-estimate punt for later.
-5. A soft CTA ("wanna lock it in?", "want me to put a quote together for the set?", "good to roll on those?").${winterRule}
+5. The INSTALL QUESTION as the CTA — binary ask: "you looking at install too or just the tires?" / "want install booked too or tires only?" / "are we doing install or just the tires?". This is the only acceptable CTA this turn. Phone-for-estimate fires on the NEXT turn, after install is answered.${winterRule}
+
+PROHIBITED CTAs THIS TURN: "wanna lock it in?", "want me to put a quote together for the set?", "good to roll on those?", "send me your phone number for the estimate" — phone capture is the NEXT turn after install is answered, not this one.
 
 PROHIBITED PHRASES THIS TURN:
 - "I'll pull a few options" / "let me pull options"
@@ -864,7 +874,7 @@ PROHIBITED PHRASES THIS TURN:
 - Any phrasing that defers the recommendation to a later message.
 
 EXAMPLE STRUCTURE (Dayton voice — adapt phrasing, do NOT copy verbatim):
-"For sure, the ${shortName} is a solid pick. Smooth ride, ${price} each, ${framing}. Wanna lock it in?"
+"For sure, the ${shortName} is a solid pick. Smooth ride, ${price} each, ${framing}. You looking at install too or just the tires?"
 
 - Do NOT reference other inventory items this turn. Single-product focus.
 - Do NOT push iLink as an alternative even if this is NOT iLink — the rep has chosen this product on purpose.
@@ -2004,7 +2014,13 @@ ALL THREE VARIANTS (quick / standard / detailed) MUST:
 3. Confirm the size if known.
 4. Include ONE short feature/reason (3PMS rating, directional tread, smooth ride, warranty length — pull from general tire knowledge, ONE phrase).
 5. Anchor the sticker price: ${liveLeadPrice || '$XX.XX'} each (or /tire).
-6. Close with a soft CTA: "wanna lock it in?", "want me to put a quote together for the set?", "good to roll on those?".
+6. Close with the INSTALL QUESTION (binary ask): "you looking at install too or just the tires?" / "want install booked too or tires only?" / "are we doing install or just the tires?". This is the only acceptable CTA this turn. Phone-for-estimate fires on the NEXT turn, after install is answered.
+
+PROHIBITED CTAs THIS TURN (closing-style asks that skip the install qualifier):
+- "Wanna lock it in?"
+- "Want me to put a quote together for the set?" / "for the full set plus install?"
+- "Good to roll on those?"
+- "Send me your phone number for the estimate" (that's NEXT turn, after install is answered).
 
 PROHIBITED PHRASES THIS TURN (these are EXACTLY the canonical hedges the live inventory eliminates — using them is a HARD FAIL this turn):
 - "I'll pull a few options" / "let me pull a few options" / "pulling a few solid options"
@@ -2154,7 +2170,7 @@ The full ELEMENT LIST and EXAMPLE STRUCTURE are in the LIVE INVENTORY CONTEXT (o
     // the system prompt and tends to win without this last-position
     // override. Only fires when a primary or focused product is set.
     const userMessageTail = liveLeadProduct
-      ? `\n\n[TURN-LEVEL OVERRIDE — APPLY NOW]\nLive inventory active. PRIMARY: ${liveLeadProduct.name}${liveLeadPrice ? ` (${liveLeadPrice} each)` : ''}. All three variants MUST recommend this product by name, with its price as a single anchor and a one-phrase feature. The picture is auto-attached by the extension — do NOT promise to "send pics + pricing in a sec". Lead with the named product, end with a soft CTA. The prohibited-phrases list in the system prompt is in force.`
+      ? `\n\n[TURN-LEVEL OVERRIDE — APPLY NOW]\nLive inventory active. PRIMARY: ${liveLeadProduct.name}${liveLeadPrice ? ` (${liveLeadPrice} each)` : ''}. All three variants MUST recommend this product by name, with its price as a single anchor and a one-phrase feature. The picture is auto-attached by the extension — do NOT promise to "send pics + pricing in a sec". End EVERY variant with the install question as the CTA — "you looking at install too or just the tires?" (or equivalent). Do NOT close with "wanna lock it in", "want me to put a quote together", or "send me your phone number" — phone-for-estimate fires the turn AFTER the install question is answered. The prohibited-phrases list in the system prompt is in force.`
       : '';
     const completion = await client.messages.create({
       model: 'claude-haiku-4-5-20251001',

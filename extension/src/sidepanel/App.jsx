@@ -658,17 +658,17 @@ export default function App() {
                 onOverride={() => handleGenerate({ overrideFlags: true })}
                 loading={loading}
               />
-              <InventoryPicks
-                meta={result.inventory_meta}
-                onPickClick={(pick) => handleGenerate({ focusedProduct: pick })}
-                disabled={loading}
-              />
               <p className="insert-tip">
                 Tip: click on the @name in FB's reply box to convert it to a real tag before sending.
               </p>
               <VariantCard kind="quick" text={result.variants.quick} attachImages={result.inventory_meta?.attach_images} />
               <VariantCard kind="standard" text={result.variants.standard} attachImages={result.inventory_meta?.attach_images} />
               <VariantCard kind="detailed" text={result.variants.detailed} attachImages={result.inventory_meta?.attach_images} />
+              <InventoryPicks
+                meta={result.inventory_meta}
+                onPickClick={(pick) => handleGenerate({ focusedProduct: pick })}
+                disabled={loading}
+              />
               <div className="post-variant-actions">
                 <button
                   className="btn-secondary"
