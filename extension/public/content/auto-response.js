@@ -58,11 +58,46 @@
 
   // ──────────────────────────────────────────────────────────────────
   // Marketplace detection
+  //
+  // Two-step gate: URL pattern (cheap, fires first) + DOM signal
+  // (confirms it's actually a Marketplace thread vs a personal
+  // Messenger thread that happens to share the /messages/t/<id> URL).
   // ──────────────────────────────────────────────────────────────────
 
-  function isMarketplaceThread() {
-    const re = getSelectors().threadPathRegex || /^\/marketplace\/t\/[^/]+\/?$/i;
+  function urlIsThreadUrl() {
+    const re = getSelectors().threadPathRegex || /\/(?:marketplace|messages)\/t\/[^/?#]+/i;
     return re.test(location.pathname);
+  }
+
+  function hasMarketplaceDomSignal() {
+    const ar = getSelectors();
+    const selectors = ar.marketplaceSignalSelectors || [
+      '[role="main"] [aria-label*="Mark as sold"]',
+      '[role="main"] a[href*="/marketplace/item/"]'
+    ];
+    for (const sel of selectors) {
+      try { if (document.querySelector(sel)) return true; } catch {}
+    }
+    // Text-content fallback: scan the first ~80 elements inside
+    // [role="main"] for an exact "Marketplace" leaf text node. This is
+    // the sub-label shown under the partner name on every Marketplace
+    // thread and is absent on personal Messenger threads.
+    const main = document.querySelector('[role="main"]');
+    if (!main) return false;
+    let count = 0;
+    const walker = document.createTreeWalker(main, NodeFilter.SHOW_TEXT, null);
+    let node;
+    while ((node = walker.nextNode())) {
+      if (count++ > 200) break;
+      const t = (node.textContent || '').trim();
+      if (t === 'Marketplace') return true;
+    }
+    return false;
+  }
+
+  function isMarketplaceThread() {
+    if (!urlIsThreadUrl()) return false;
+    return hasMarketplaceDomSignal();
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -99,25 +134,49 @@
     return btn;
   }
 
+  // Throttled diagnostic so we don't flood the SW console with every
+  // mutation tick. Logs once per ~3s when the mount state changes.
+  let lastMountLog = '';
+  function logMountState(state) {
+    if (state === lastMountLog) return;
+    lastMountLog = state;
+    swlog('mount check: ' + state);
+  }
+
   function mountButton() {
-    if (!isMarketplaceThread()) {
+    if (!urlIsThreadUrl()) {
+      logMountState('skip — not a thread URL (path=' + location.pathname + ')');
+      unmountButton();
+      return;
+    }
+    if (!hasMarketplaceDomSignal()) {
+      logMountState('skip — thread URL but no Marketplace DOM signal');
       unmountButton();
       return;
     }
     const marker = getSelectors().buttonMarker || 'data-fbrm-auto-response-button';
-    if (document.querySelector('[' + marker + ']')) return;
+    if (document.querySelector('[' + marker + ']')) {
+      logMountState('already mounted');
+      return;
+    }
     const textbox = findComposeAnchor();
-    if (!textbox) return;
+    if (!textbox) {
+      logMountState('skip — composer textbox not found');
+      return;
+    }
     // Insert the button as a sibling immediately BEFORE the textbox's
     // closest div ancestor. This places it between the existing icon
     // group on the left and the text input on the right. Documented as
     // a structural insertion so a future FB DOM redesign can be patched
     // in selectors.js + this single rule.
     const before = textbox.closest('div');
-    if (!before || !before.parentElement) return;
+    if (!before || !before.parentElement) {
+      logMountState('skip — textbox has no parent div to anchor against');
+      return;
+    }
     const btn = buildButton();
     before.parentElement.insertBefore(btn, before);
-    swlog('button mounted');
+    logMountState('mounted');
   }
 
   function unmountButton() {

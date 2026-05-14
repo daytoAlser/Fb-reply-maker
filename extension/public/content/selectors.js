@@ -39,12 +39,31 @@
     // shape may change) and the walk-up rule in auto-response.js.
     autoResponse: {
       // The button must ONLY appear when the rep is in a Marketplace
-      // conversation, not the main Messenger view. Tested on
-      //   /marketplace/t/<id>    (web)
-      //   /marketplace/t/<id>/   (with trailing slash)
-      // The Messenger.com domain also rehosts marketplace threads, so
-      // we accept it as well.
-      threadPathRegex: /^\/marketplace\/t\/[^/]+\/?$/i,
+      // conversation, not on the Messenger home or in a personal
+      // Messenger thread. Two URL forms host Marketplace threads:
+      //   /marketplace/t/<id>     (Marketplace entry point)
+      //   /messages/t/<id>        (Messenger unified inbox — also
+      //                            shows Marketplace threads)
+      // The regex accepts both. The DOM-side filter below disambiguates
+      // a /messages/t/<id> URL that's a personal thread (no listing)
+      // from a Marketplace one (listing header present).
+      threadPathRegex: /\/(?:marketplace|messages)\/t\/[^/?#]+/i,
+
+      // Once the URL is a thread URL, this CSS selector chain is the
+      // DOM signal that confirms it's a Marketplace conversation. If
+      // ANY of these matches a node inside [role="main"], we're in a
+      // Marketplace thread:
+      //   - "Mark as sold" button (Marketplace-specific action)
+      //   - "More options" button on a listing strip
+      //   - "Marketplace" sub-label text under the partner name
+      // First match wins. Fragile-by-design — when FB ships a redesign,
+      // update this array first.
+      marketplaceSignalSelectors: [
+        '[role="main"] [aria-label*="Mark as sold"]',
+        '[role="main"] [aria-label*="sold"][role="button"]',
+        '[role="main"] a[href*="/marketplace/item/"]',
+        '[role="main"] a[href*="/marketplace/listing/"]'
+      ],
 
       // Anchor used to LOCATE the compose-bar row. Strategy in
       // auto-response.js: querySelector for SELECTORS.thread.replyTextbox,
