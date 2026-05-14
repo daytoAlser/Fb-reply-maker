@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import IncomingPanel from './components/IncomingPanel.jsx';
 import CategoryPicker from './components/CategoryPicker.jsx';
 import VariantCard from './components/VariantCard.jsx';
+import InventoryPicks from './components/InventoryPicks.jsx';
 import ErrorBanner from './components/ErrorBanner.jsx';
 import AutoDetectCard from './components/AutoDetectCard.jsx';
 import TabBar from './components/TabBar.jsx';
@@ -662,6 +663,7 @@ export default function App() {
               <VariantCard kind="quick" text={result.variants.quick} />
               <VariantCard kind="standard" text={result.variants.standard} />
               <VariantCard kind="detailed" text={result.variants.detailed} />
+              <InventoryPicks meta={result.inventory_meta} />
               <div className="post-variant-actions">
                 <button
                   className="btn-secondary"

@@ -1973,3 +1973,190 @@ select:focus-visible {
   font-size: 10.5px;
 }
 .inbox-foot-loading { color: var(--text-dim); }
+
+/* ============================================================
+   LIVE INVENTORY PICKS — thumbnail gallery of products Claude
+   referenced when writing the variants. Rep can click out to
+   the product page, or drag the image into the FB chat thread.
+   ============================================================ */
+
+.inventory-picks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  margin: 2px 0;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent-hi);
+  border-radius: var(--radius-md);
+  background: var(--bg-elev);
+  animation: slideDown var(--dur-base) var(--ease-out-quint);
+}
+
+.inventory-picks-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.inventory-picks-title {
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent-hi);
+}
+
+.inventory-picks-sub {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-dim);
+  text-align: right;
+}
+
+.inventory-picks-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+}
+
+.inventory-picks-tip {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-mute);
+  margin: 0;
+  line-height: 1.4;
+}
+
+.pick-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  text-decoration: none;
+  color: inherit;
+  transition:
+    border-color var(--dur-base) var(--ease-out-quint),
+    transform var(--dur-base) var(--ease-out-quint),
+    box-shadow var(--dur-base) var(--ease-out-quint);
+}
+
+.pick-card:hover {
+  border-color: var(--accent-hi);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-card-hover);
+}
+
+.pick-card-ilink { border-left: 2px solid var(--accent-hi); }
+.pick-card-brand_requested { border-left: 2px solid var(--accent); }
+.pick-card-other { border-left: 2px solid var(--border-strong); }
+
+.pick-thumb {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.pick-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #fff;
+}
+
+.pick-thumb-fallback {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.pick-bucket-tag {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 2px 5px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+}
+
+.pick-bucket-ilink { background: var(--accent-hi); color: #000; }
+.pick-bucket-brand_requested { background: var(--accent); color: #fff; }
+
+.pick-meta {
+  padding: 7px 8px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pick-name {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.3;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.pick-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.pick-price {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.pick-framing {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.pick-framing-ready_to_rock {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.pick-framing-we_can_get_those {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.pick-stock {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--text-mute);
+  letter-spacing: 0.02em;
+}

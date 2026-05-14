@@ -2009,6 +2009,32 @@ export async function handler(event) {
 
     console.log('[FN] products_of_interest merged:', mergedProducts.map((p) => `${p.productType}:${p.productState}`).join(', ') || 'none', '| ready_for_options:', allProductsQualified, '| mode:', effectiveConversationMode);
 
+    // Surface inventory picks to the side panel so the rep can see (and
+    // attach to FB) the actual product images Claude was working from.
+    // Backend logic is the source of truth on the picks — the LLM's reply
+    // text references these; the UI renders thumbnails of the same set.
+    if (inventory && inventory.triggered) {
+      const tag = (bucket) => (it) => ({ ...it, bucket });
+      parsed.inventory_meta = {
+        triggered: true,
+        source: inventory.source,
+        fired_from_size: inventory.fired_from_size,
+        brand_requested: inventory.brand_requested,
+        totals: inventory.totals,
+        home_location: inventory.home_location,
+        picks: [
+          ...(inventory.ilink_items || []).map(tag('ilink')),
+          ...(inventory.brand_requested_items || []).map(tag('brand_requested')),
+          ...(inventory.other_items || []).map(tag('other'))
+        ]
+      };
+    } else if (inventory) {
+      parsed.inventory_meta = {
+        triggered: false,
+        gate_reason: inventory.gate_reason || null
+      };
+    }
+
     console.log('[FN] supabase check: thread_id=', thread_id, 'type=', typeof thread_id);
 
     if (thread_id) {
