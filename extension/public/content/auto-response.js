@@ -116,28 +116,75 @@
   }
 
   function buildButton() {
-    const btn = document.createElement('div');
-    btn.setAttribute(getSelectors().buttonMarker || 'data-fbrm-auto-response-button', '');
-    btn.setAttribute('role', 'button');
-    btn.setAttribute('tabindex', '0');
-    btn.className = 'fbrm-ar-launch-btn';
-    btn.title = 'Open Auto Response (FB Reply Maker)';
-    btn.innerHTML = `
-      <svg class="fbrm-ar-sparkle" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
-        <path d="M12 2.5l1.6 4.7a2 2 0 001.2 1.2l4.7 1.6-4.7 1.6a2 2 0 00-1.2 1.2L12 17.5l-1.6-4.7a2 2 0 00-1.2-1.2l-4.7-1.6 4.7-1.6a2 2 0 001.2-1.2L12 2.5z"/>
-        <path d="M19 14.5l.7 2.1a1 1 0 00.6.6l2.1.7-2.1.7a1 1 0 00-.6.6l-.7 2.1-.7-2.1a1 1 0 00-.6-.6l-2.1-.7 2.1-.7a1 1 0 00.6-.6l.7-2.1z" opacity=".75"/>
-      </svg>
-      <span class="fbrm-ar-launch-label">Auto Response</span>
+    // Shadow DOM gives total CSS isolation — FB's compose-bar CSS
+    // can't reach inside the shadow root to blank our background or
+    // override our padding/border-radius. The host element is plain
+    // and inherits nothing visible.
+    const host = document.createElement('div');
+    host.setAttribute(getSelectors().buttonMarker || 'data-fbrm-auto-response-button', '');
+    host.style.cssText = 'display:inline-block;vertical-align:middle;all:initial;';
+    const shadow = host.attachShadow({ mode: 'open' });
+    shadow.innerHTML = `
+      <style>
+        :host { display: inline-block; vertical-align: middle; }
+        * { box-sizing: border-box; }
+        .btn {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          height: 36px;
+          padding: 0 18px;
+          background: #1B7CFF;
+          background-image: linear-gradient(180deg, #1B85FF 0%, #1166E6 100%);
+          color: #ffffff;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+          font-size: 14px;
+          font-weight: 700;
+          letter-spacing: 0.01em;
+          line-height: 1;
+          border: 1px solid #2D8BFF;
+          border-radius: 18px;
+          cursor: pointer;
+          user-select: none;
+          white-space: nowrap;
+          box-shadow:
+            0 2px 8px rgba(8, 102, 255, 0.55),
+            inset 0 0 0 1px rgba(255, 255, 255, 0.10);
+          text-shadow: 0 1px 0 rgba(0, 0, 0, 0.18);
+          transition: filter 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+        }
+        .btn:hover {
+          filter: brightness(1.10);
+          box-shadow:
+            0 4px 14px rgba(8, 102, 255, 0.70),
+            inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+        }
+        .btn:active { transform: scale(0.97); }
+        .btn:focus-visible { outline: 2px solid #ffffff; outline-offset: 2px; }
+        .sparkle {
+          flex: 0 0 auto;
+          color: #ffffff;
+          filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.55));
+        }
+      </style>
+      <div class="btn" role="button" tabindex="0" title="Open Auto Response (FB Reply Maker)">
+        <svg class="sparkle" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+          <path fill="currentColor" d="M12 2.5l1.6 4.7a2 2 0 001.2 1.2l4.7 1.6-4.7 1.6a2 2 0 00-1.2 1.2L12 17.5l-1.6-4.7a2 2 0 00-1.2-1.2l-4.7-1.6 4.7-1.6a2 2 0 001.2-1.2L12 2.5z"/>
+          <path fill="currentColor" opacity="0.75" d="M19 14.5l.7 2.1a1 1 0 00.6.6l2.1.7-2.1.7a1 1 0 00-.6.6l-.7 2.1-.7-2.1a1 1 0 00-.6-.6l-2.1-.7 2.1-.7a1 1 0 00.6-.6l.7-2.1z"/>
+        </svg>
+        <span>Auto Response</span>
+      </div>
     `;
+    const inner = shadow.querySelector('.btn');
     const onActivate = (e) => {
       if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
       e.preventDefault();
       e.stopPropagation();
       openPanel();
     };
-    btn.addEventListener('click', onActivate);
-    btn.addEventListener('keydown', onActivate);
-    return btn;
+    inner.addEventListener('click', onActivate);
+    inner.addEventListener('keydown', onActivate);
+    return host;
   }
 
   // Throttled diagnostic so we don't flood the SW console with every
