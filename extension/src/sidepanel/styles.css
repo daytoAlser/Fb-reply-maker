@@ -2123,6 +2123,46 @@ select:focus-visible {
   pointer-events: none;
 }
 
+.pick-card-primary {
+  border-color: var(--success);
+  box-shadow: 0 0 0 1px var(--success);
+}
+.pick-card-primary:hover {
+  border-color: var(--success);
+  box-shadow: 0 0 0 1px var(--success), var(--shadow-card-hover);
+}
+
+.pick-card-focused {
+  border-color: var(--accent-hi);
+  box-shadow: 0 0 0 1px var(--accent-hi);
+}
+
+.pick-primary-tag {
+  position: absolute;
+  bottom: 4px;
+  left: 4px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 2px 5px;
+  border-radius: 3px;
+  background: var(--success);
+  color: #000;
+}
+
+.variant-attach-chip {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent-hi);
+  margin-right: 6px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+}
+
 .pick-meta {
   padding: 7px 8px 8px;
   display: flex;

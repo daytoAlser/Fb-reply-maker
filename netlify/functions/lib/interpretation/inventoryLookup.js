@@ -22,7 +22,12 @@ import {
   normalizeTireSpec,
   formatTireSpec
 } from '../inventory/queryBuilder.js';
-import { rankAndBucket, shapeForPrompt } from '../inventory/rank.js';
+import {
+  rankAndBucket,
+  shapeForPrompt,
+  getTireSeasonContext,
+  selectAutoPrimary
+} from '../inventory/rank.js';
 
 function resolveTireSize({ normalized, capturedFields, productsOfInterest }) {
   // Priority: current turn -> captured field -> product_of_interest.
@@ -95,24 +100,48 @@ export async function lookupInventory({
   });
 
   const buckets = rankAndBucket(items, { brandRequested, homeLocationShort });
+  const seasonContext = getTireSeasonContext();
 
   const shape = (it) => shapeForPrompt(it, homeLocationShort);
-  const ilink_items = buckets.ilink_items.map(shape);
-  const brand_requested_items = buckets.brand_requested_items.map(shape);
-  const other_items = buckets.other_items.map(shape);
+  let ilink_items = buckets.ilink_items.map(shape);
+  let brand_requested_items = buckets.brand_requested_items.map(shape);
+  let other_items = buckets.other_items.map(shape);
+
+  // Outside winter-tire season, drop winter-only picks from primary
+  // surfacing entirely — they're wrong-season recommendations. We still
+  // keep them in totals so the prompt can mention them if asked.
+  const winterFilteredOut = { ilink: 0, brand_requested: 0, other: 0 };
+  if (!seasonContext.isWinterSeason) {
+    const dropWinter = (list, key) => {
+      const before = list.length;
+      const kept = list.filter((it) => !it.winterOnly);
+      winterFilteredOut[key] = before - kept.length;
+      return kept;
+    };
+    ilink_items = dropWinter(ilink_items, 'ilink');
+    brand_requested_items = dropWinter(brand_requested_items, 'brand_requested');
+    other_items = dropWinter(other_items, 'other');
+  }
 
   const surfacedCount = ilink_items.length + brand_requested_items.length + other_items.length;
   if (surfacedCount === 0 && !brandRequested) {
-    // Nothing to show, no override path. Fall back to existing product-kb voice.
     return {
       triggered: false,
       gate_reason: 'no_matches',
       fired_from_size: firedFromSize,
       brand_requested: null,
       query,
-      totals: buckets.totals
+      totals: buckets.totals,
+      season_context: seasonContext
     };
   }
+
+  const autoPrimary = selectAutoPrimary({
+    ilink_items,
+    brand_requested_items,
+    other_items,
+    seasonContext
+  });
 
   return {
     triggered: true,
@@ -125,6 +154,9 @@ export async function lookupInventory({
     brand_requested_items,
     other_items,
     home_location: location && location.name ? location.name : null,
-    home_location_short: homeLocationShort
+    home_location_short: homeLocationShort,
+    season_context: seasonContext,
+    winter_filtered_out: winterFilteredOut,
+    auto_primary: autoPrimary
   };
 }

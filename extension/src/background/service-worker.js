@@ -496,7 +496,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           text: msg.text,
           auto_send: !!msg.auto_send,
           thread_id: typeof msg.thread_id === 'string' ? msg.thread_id : undefined,
-          skip_humanized: !!msg.skip_humanized
+          skip_humanized: !!msg.skip_humanized,
+          // Optional list of image URLs to paste alongside the text reply.
+          // Content script fetches each, builds a DataTransfer of File
+          // objects, and dispatches a synthetic paste event on FB's
+          // contenteditable to attach the photos.
+          images: Array.isArray(msg.images) ? msg.images : undefined
         });
         // On confirmed send, clear cached_variants so a stale variant
         // doesn't tempt a double-send on the next view.

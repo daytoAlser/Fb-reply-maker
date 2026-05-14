@@ -666,9 +666,9 @@ export default function App() {
               <p className="insert-tip">
                 Tip: click on the @name in FB's reply box to convert it to a real tag before sending.
               </p>
-              <VariantCard kind="quick" text={result.variants.quick} />
-              <VariantCard kind="standard" text={result.variants.standard} />
-              <VariantCard kind="detailed" text={result.variants.detailed} />
+              <VariantCard kind="quick" text={result.variants.quick} attachImages={result.inventory_meta?.attach_images} />
+              <VariantCard kind="standard" text={result.variants.standard} attachImages={result.inventory_meta?.attach_images} />
+              <VariantCard kind="detailed" text={result.variants.detailed} attachImages={result.inventory_meta?.attach_images} />
               <div className="post-variant-actions">
                 <button
                   className="btn-secondary"

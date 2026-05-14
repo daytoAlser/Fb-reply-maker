@@ -658,6 +658,19 @@ function buildInventoryBlock(inv) {
   const totals = inv.totals || {};
   const homeShort = inv.home_location_short || null;
   const homeName = inv.home_location || (homeShort ? homeShort : null);
+  const season = inv.season_context || null;
+  const primarySku = inv.auto_primary ? inv.auto_primary.sku : null;
+
+  // Header text injected at the top of every layout.
+  const seasonLine = season
+    ? `Today: ${season.iso_date} · Season: ${season.season} · Winter-tire season active: ${season.isWinterSeason ? 'YES' : 'NO'}`
+    : '';
+  const winterDroppedLine = (() => {
+    const wfo = inv.winter_filtered_out || {};
+    const total = (wfo.ilink || 0) + (wfo.brand_requested || 0) + (wfo.other || 0);
+    if (total === 0) return '';
+    return `\nFiltered out ${total} winter-only pick(s) — wrong season (it's ${season ? season.season : 'not winter'} right now, winter tires not appropriate as a recommendation).`;
+  })();
 
   let idx = 0;
   const renderItem = (it) => {
@@ -678,13 +691,25 @@ function buildInventoryBlock(inv) {
     const homeLine = `    ${homeLabel}: ${homeQty}${framingTag} · ${networkParts.join(' · ')}`;
     const urlLine = it.url ? `\n    ${it.url}` : '';
     const winterTag = it.winterOnly ? ' [WINTER ONLY — dedicated snow/ice tire, NOT all-season]' : '';
-    return `[${idx}] ${it.name}${winterTag} — ${priceStr}\n${homeLine}${urlLine}`;
+    const primaryTag = primarySku && it.sku === primarySku ? ' ⭐ PRIMARY PICK' : '';
+    return `[${idx}] ${it.name}${winterTag}${primaryTag} — ${priceStr}\n${homeLine}${urlLine}`;
   };
 
   // Did any surfaced pick get tagged WINTER ONLY? Drives the HARD RULE.
   const anyWinter = [...ilink, ...requested, ...other].some((it) => it && it.winterOnly);
   const winterRule = anyWinter
     ? '\n- WINTER-ONLY ITEMS: any pick tagged [WINTER ONLY] is a DEDICATED winter/snow tire (soft compound, summer-unsafe), NOT a 3PMS all-season. Only recommend if the customer is explicitly after dedicated winters or running a second wheel set. If they asked generically about "snowflake rated" or 3PMS, DO NOT push a [WINTER ONLY] tire — ask whether they want dedicated winters vs all-weather 3PMS first. If you do reference a [WINTER ONLY] tire, frame it explicitly: "for dedicated winters" / "for the winter set", never as a year-round option.'
+    : '';
+  const seasonRule = season && !season.isWinterSeason
+    ? `\n- SEASON CHECK: it is currently ${season.season} (${season.iso_date}). Winter-tire season is NOT active. NEVER recommend dedicated winter tires this turn — they're wrong-season. If the customer is asking about "snowflake rated" or 3PMS, that maps to all-season 3PMS-rated tires (e.g. iLink MultiMatch A/S), not dedicated winters. If the customer specifically asks about winter tires anyway (off-season stocking up), acknowledge the season and confirm intent before recommending.`
+    : '';
+
+  // PRIMARY PICK rule — when auto_primary is set, all variants lead with
+  // this product by name. This is the ready-to-go path: in stock, season-
+  // appropriate, house brand preferred.
+  const primary = inv.auto_primary || null;
+  const primaryRule = primary
+    ? `\n- ⭐ PRIMARY PICK (auto-selected: in stock locally + season-appropriate + ${/\bilink\b/i.test(primary.brand || '') ? 'house brand' : 'best fit'}): ${primary.name}${primary.priceFormatted ? ` — ${primary.priceFormatted}` : ''}. ALL THREE VARIANTS MUST LEAD WITH THIS PRODUCT BY NAME. Do not hedge with "let me pull some options" — the option is right here, named, in stock, ready to ship. Anchor the sticker price in one variant (any of quick/standard/detailed). Use the availability framing from the line above. The rep can click a different pick if they want to override; otherwise this is the recommendation.`
     : '';
 
   // Brand-requested + zero matches -> honest punt + house fallback.
@@ -695,13 +720,15 @@ function buildInventoryBlock(inv) {
     return `
 LIVE INVENTORY CONTEXT — BRAND-REQUESTED HAS ZERO MATCHES
 
+${seasonLine}${winterDroppedLine}
+
 Customer asked about ${inv.brand_requested} in ${inv.fired_from_size}. We have 0 ${inv.brand_requested} matches in that size right now.${ilink.length ? ' House alternative available:' : ''}${houseSection}
 
 HARD RULES (this turn):
 - Be honest: "we don't have ${inv.brand_requested} in that size right now". Do NOT pretend we do.
 - Offer iLink as a value-tier alternative ONLY if the customer's tone suggests they're open ("anything close?", "what do you have?"). If they explicitly want ${inv.brand_requested}, punt to "let me see what we can pull in" voice — don't force the alternative.
 - Use the availability framing from each item ("ready to rock" / "we can get those for ya"). NEVER say "in stock" or pin to a specific location — ABSOLUTE RULE D2 still applies.
-- Do NOT invent ${inv.brand_requested} SKUs / prices / stock claims.${winterRule}
+- Do NOT invent ${inv.brand_requested} SKUs / prices / stock claims.${seasonRule}${winterRule}${primaryRule}
 `;
   }
 
@@ -714,6 +741,8 @@ HARD RULES (this turn):
     return `
 LIVE INVENTORY CONTEXT — BRAND-REQUESTED + HOUSE OPTIONS SIDE-BY-SIDE
 
+${seasonLine}${winterDroppedLine}
+
 Customer asked about ${inv.brand_requested} in ${inv.fired_from_size}. Showing both the requested brand AND our house option so you can pick what fits the customer's tone.
 Source: ${inv.source} · Query: "${inv.query}" · Found ${totals.matched || 0} matches total (${totals.brand_requested || 0} ${inv.brand_requested}, ${totals.ilink || 0} iLink).
 
@@ -725,7 +754,7 @@ HARD RULES (this turn):
 - If you reference a specific product in your reply, it MUST be one of the items above. Do NOT invent SKUs, model names, prices, or stock claims.
 - Use the availability framing from each item ("ready to rock" / "we can get those for ya"). NEVER say "in stock" or pin to a specific location — ABSOLUTE RULE D2 still applies.
 - Do NOT quote totals in chat. You may anchor ONE sticker price by product ("the ${inv.brand_requested} Open Country is $324 ea") as a single data point. Full package pricing stays in the phone-then-estimate punt.
-- Reference 1–2 products by name. The full catalog is the rep's tool, not the reply text.${winterRule}
+- Reference 1–2 products by name. The full catalog is the rep's tool, not the reply text.${seasonRule}${winterRule}${primaryRule}
 `;
   }
 
@@ -739,6 +768,8 @@ HARD RULES (this turn):
   return `
 LIVE INVENTORY CONTEXT (real-time CCAW catalog lookup — products physically available right now; use as SOURCE OF TRUTH if you reference specific tires)
 
+${seasonLine}${winterDroppedLine}
+
 Query: "${inv.query}" · iLink prioritized (customer did not name a brand) · Source: ${inv.source}
 Found ${totals.matched || 0} matches total (${totals.ilink || 0} iLink, ${totals.other || 0} other brands). Top picks:
 
@@ -750,7 +781,7 @@ HARD RULES (this turn):
 - iLink is our house brand and default value tier. Since the customer did not name a brand, lead with iLink unless the conversation strongly signals a premium tier (off-road, hard use, "I want the best", etc.). If the customer signaled a tire type (snowflake / 3PMS / A/T / mud / highway), pick the iLink option that matches it.
 - Use the availability framing from each item ("ready to rock" / "we can get those for ya"). NEVER say "in stock" or pin to a specific location — ABSOLUTE RULE D2 still applies.
 - Do NOT quote totals in chat. You may anchor ONE sticker price by product ("the iLink MultiMatch is $189 ea") as a single data point. Full package pricing stays in the phone-then-estimate punt.
-- Reference 1–2 products by name. The full catalog is the rep's tool, not the reply text.${winterRule}
+- Reference 1–2 products by name. The full catalog is the rep's tool, not the reply text.${seasonRule}${winterRule}${primaryRule}
 `;
 }
 
@@ -2079,6 +2110,27 @@ export async function handler(event) {
     // text references these; the UI renders thumbnails of the same set.
     if (inventory && inventory.triggered) {
       const tag = (bucket) => (it) => ({ ...it, bucket });
+      const picks = [
+        ...(inventory.ilink_items || []).map(tag('ilink')),
+        ...(inventory.brand_requested_items || []).map(tag('brand_requested')),
+        ...(inventory.other_items || []).map(tag('other'))
+      ];
+      // Resolve which pick the variant text is centered on, so the side
+      // panel knows which images to attach when INSERT is clicked.
+      // Priority: rep's clicked focused_product -> auto_primary -> none.
+      const attachSource = (focused_product && typeof focused_product === 'object' && focused_product.name)
+        ? focused_product
+        : (inventory.auto_primary || null);
+      const attachImages = attachSource && Array.isArray(attachSource.allImages) && attachSource.allImages.length > 0
+        ? attachSource.allImages.slice(0, 2)
+        : (attachSource && attachSource.image ? [attachSource.image] : []);
+      // Mark the primary pick in the picks array so the UI can highlight it.
+      const primarySku = inventory.auto_primary ? inventory.auto_primary.sku : null;
+      const focusedSku = (focused_product && focused_product.sku) || null;
+      for (const p of picks) {
+        if (focusedSku && p.sku === focusedSku) p.isFocused = true;
+        if (primarySku && p.sku === primarySku) p.isAutoPrimary = true;
+      }
       parsed.inventory_meta = {
         triggered: true,
         source: inventory.source,
@@ -2086,11 +2138,12 @@ export async function handler(event) {
         brand_requested: inventory.brand_requested,
         totals: inventory.totals,
         home_location: inventory.home_location,
-        picks: [
-          ...(inventory.ilink_items || []).map(tag('ilink')),
-          ...(inventory.brand_requested_items || []).map(tag('brand_requested')),
-          ...(inventory.other_items || []).map(tag('other'))
-        ]
+        season_context: inventory.season_context,
+        winter_filtered_out: inventory.winter_filtered_out,
+        auto_primary: inventory.auto_primary,
+        focused_product: focused_product || null,
+        attach_images: attachImages,
+        picks
       };
     } else if (inventory) {
       parsed.inventory_meta = {

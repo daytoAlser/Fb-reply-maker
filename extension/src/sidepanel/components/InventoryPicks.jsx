@@ -23,12 +23,20 @@ export default function InventoryPicks({ meta, onPickClick, disabled }) {
   const header = meta.brand_requested
     ? `${meta.brand_requested} + iLink in ${meta.fired_from_size}`
     : `iLink-first picks in ${meta.fired_from_size}`;
+  const wfo = meta.winter_filtered_out || {};
+  const winterDropped = (wfo.ilink || 0) + (wfo.brand_requested || 0) + (wfo.other || 0);
+  const seasonNote = (() => {
+    if (winterDropped > 0 && meta.season_context) {
+      return ` · ${winterDropped} winter pick${winterDropped > 1 ? 's' : ''} hidden (it's ${meta.season_context.season})`;
+    }
+    return '';
+  })();
 
   return (
     <section className="inventory-picks" aria-label="Recommended products">
       <div className="inventory-picks-header">
         <span className="inventory-picks-title">RECOMMENDING</span>
-        <span className="inventory-picks-sub">{header}</span>
+        <span className="inventory-picks-sub">{header}{seasonNote}</span>
       </div>
       <div className="inventory-picks-grid">
         {picks.map((p, i) => (
@@ -85,6 +93,8 @@ function PickCard({ pick, onClick, disabled }) {
     'pick-card',
     `pick-card-${pick.bucket || 'other'}`,
     winterOnly ? 'pick-card-winter' : '',
+    pick.isAutoPrimary ? 'pick-card-primary' : '',
+    pick.isFocused ? 'pick-card-focused' : '',
     disabled ? 'pick-card-disabled' : ''
   ].filter(Boolean).join(' ');
 
@@ -117,6 +127,11 @@ function PickCard({ pick, onClick, disabled }) {
         {winterOnly && (
           <span className="pick-winter-tag" title="Dedicated winter / snow tire — not all-season">
             WINTER
+          </span>
+        )}
+        {pick.isAutoPrimary && (
+          <span className="pick-primary-tag" title="Auto-selected primary recommendation — in stock + season-appropriate">
+            ★ PRIMARY
           </span>
         )}
       </div>

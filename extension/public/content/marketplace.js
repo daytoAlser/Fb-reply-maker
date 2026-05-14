@@ -752,6 +752,109 @@ async function bulkInsertReply(text) {
   return { ok: true, method: 'execCommand' };
 }
 
+// Pastes one or more product images into the FB chat reply box by
+// fetching each URL as a blob, wrapping in a File, attaching to a
+// DataTransfer, and dispatching a synthetic ClipboardEvent('paste') on
+// the contenteditable. FB Messenger's compose handles paste events with
+// image clipboardData the same way as a real Ctrl+V on a screenshot.
+//
+// Returns { attached: number, errors: string[] }. Tolerates per-image
+// fetch failures (CORS, 404) — partial success still attaches what loaded.
+async function pasteImagesIntoReplyBox(urls) {
+  const result = { attached: 0, errors: [] };
+  if (!Array.isArray(urls) || urls.length === 0) return result;
+
+  const box = document.querySelector(SELECTORS.replyTextbox);
+  if (!box) {
+    result.errors.push('no_textbox');
+    return result;
+  }
+
+  // Fetch each image as a Blob. Done in parallel; per-image failures are
+  // captured and don't sink the whole batch.
+  const fetches = await Promise.all(urls.map(async (url) => {
+    try {
+      const res = await fetch(url, { credentials: 'omit', mode: 'cors' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      // Derive a sensible filename + MIME type. FB inspects the File name
+      // for the upload UI label; falling back to image/jpeg is safe.
+      const mime = blob.type && blob.type.startsWith('image/') ? blob.type : 'image/jpeg';
+      const ext = mime.split('/')[1] || 'jpg';
+      const safeName = (url.split('/').pop() || `tire-${Date.now()}.${ext}`).replace(/[^A-Za-z0-9._-]/g, '_');
+      const file = new File([blob], safeName, { type: mime });
+      return { ok: true, file, url };
+    } catch (err) {
+      return { ok: false, url, err: err?.message || String(err) };
+    }
+  }));
+
+  const files = fetches.filter((f) => f.ok).map((f) => f.file);
+  for (const f of fetches) {
+    if (!f.ok) result.errors.push(`${f.url}: ${f.err}`);
+  }
+  if (files.length === 0) return result;
+
+  // Make sure the box is focused — paste events require the target to be
+  // the active element or focus is ambiguous.
+  try {
+    box.focus();
+    // Move caret to end so the paste lands after the existing text reply.
+    const sel = window.getSelection();
+    const r = document.createRange();
+    r.selectNodeContents(box);
+    r.collapse(false);
+    sel.removeAllRanges();
+    sel.addRange(r);
+  } catch {}
+  if (document.activeElement !== box) {
+    await sleep(40);
+    try { box.focus(); } catch {}
+  }
+
+  // Build the DataTransfer. Chrome supports the `new DataTransfer()` ctor
+  // and `DataTransfer.items.add(file)` since ~MV3 era.
+  let dt;
+  try {
+    dt = new DataTransfer();
+    for (const file of files) dt.items.add(file);
+  } catch (err) {
+    result.errors.push(`datatransfer: ${err?.message || err}`);
+    return result;
+  }
+
+  // Dispatch the paste event. ClipboardEvent constructor accepts
+  // clipboardData but Chrome historically ignores it — we set it via
+  // Object.defineProperty as a fallback so React's synthetic event
+  // handlers see the files.
+  let ev;
+  try {
+    ev = new ClipboardEvent('paste', {
+      bubbles: true,
+      cancelable: true,
+      clipboardData: dt
+    });
+    if (!ev.clipboardData || !ev.clipboardData.files || ev.clipboardData.files.length === 0) {
+      Object.defineProperty(ev, 'clipboardData', { value: dt, writable: false });
+    }
+  } catch (err) {
+    result.errors.push(`event_ctor: ${err?.message || err}`);
+    return result;
+  }
+
+  const accepted = box.dispatchEvent(ev);
+  // Some implementations of paste handlers also listen on document /
+  // window; fire there as a secondary signal if the box-level handler
+  // didn't claim it.
+  if (!ev.defaultPrevented) {
+    try { document.dispatchEvent(ev); } catch {}
+  }
+  result.attached = files.length;
+  result.dispatch_accepted = accepted;
+  result.default_prevented = !!ev.defaultPrevented;
+  return result;
+}
+
 // Entry point for INSERT_REPLY. Runs pre-send guards, types the message
 // character-by-character (with humanized distribution + occasional typo-
 // retype), and optionally clicks send via a mousemove path. Falls back to
@@ -1418,17 +1521,31 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       thread_id: typeof msg.thread_id === 'string' ? msg.thread_id : null,
       skip_humanized: !!msg.skip_humanized
     };
+    const imageUrls = Array.isArray(msg.images) ? msg.images.filter(Boolean) : [];
     console.log('[FB Reply Maker] INSERT_REPLY received', {
-      preview: text.slice(0, 40), auto_send: opts.auto_send, thread_id: opts.thread_id
+      preview: text.slice(0, 40), auto_send: opts.auto_send, thread_id: opts.thread_id,
+      image_count: imageUrls.length
     });
     (async () => {
       const result = await tryInsertReply(text, opts);
       if (result.ok) {
         console.log('[FB Reply Maker] insert succeeded:', result.method, 'sent:', !!result.sent);
-        // Only fire the activation burst when we're NOT auto-sending —
-        // post-send the box is empty and bursting input events would just
-        // wake the (now empty) compose React state for no reason.
         if (!result.sent) fireActivationBurst();
+        // If images requested, paste them onto the chat input AFTER text
+        // succeeded. Pasted via a synthetic paste event with a DataTransfer
+        // containing image File objects — FB Messenger handles this the
+        // same way it handles a real Ctrl+V on a clipboard image.
+        if (imageUrls.length > 0 && !result.sent) {
+          try {
+            const attached = await pasteImagesIntoReplyBox(imageUrls);
+            result.imagesAttached = attached.attached;
+            result.imageErrors = attached.errors;
+            console.log('[FB Reply Maker] images attached:', attached);
+          } catch (err) {
+            console.warn('[FB Reply Maker] image attach failed:', err?.message || err);
+            result.imageErrors = [err?.message || String(err)];
+          }
+        }
       } else {
         console.warn('[FB Reply Maker] INSERT_REPLY failed:', result);
       }
