@@ -2,6 +2,14 @@ import { useState, useEffect, useRef } from 'react';
 
 const TITLES = { quick: 'Quick', standard: 'Standard', detailed: 'Detailed' };
 
+// Route side-panel logs to the SW console (which the user keeps open
+// in a separate window). Side panel's own DevTools is rarely open.
+function swlog(message) {
+  try {
+    chrome.runtime.sendMessage({ type: 'LOG_FROM_CS', message: '[sp] ' + message });
+  } catch {}
+}
+
 // Convert a blob to PNG via OffscreenCanvas, returning a Blob with
 // image/png MIME. PNG is the most reliable clipboard format on Chrome.
 async function blobToPng(blob) {
@@ -75,16 +83,38 @@ export default function VariantCard({ kind, text, attachImages }) {
     }
   }
 
-  // SYNC clipboard.write of a pre-loaded blob. Returns a promise but
-  // the focus check happens before this returns, so even if the rest
-  // of the click handler completes and focus shifts, the write still
-  // succeeds.
-  function clipboardWriteSync(idx) {
+  // Clipboard write with a focus-recovery retry. The first attempt
+  // happens synchronously in the click handler so document.hasFocus()
+  // should be true. If it fails with "Document is not focused" (Chrome
+  // side panel quirk where pointer-events don't always promote the
+  // panel to focused-document state), we call window.focus() and
+  // retry once after a short delay.
+  async function clipboardWriteSync(idx) {
     const blob = blobsRef.current[idx];
     if (!blob || typeof ClipboardItem === 'undefined') {
-      return Promise.reject(new Error(blob ? 'no_ClipboardItem' : 'blob_not_loaded'));
+      throw new Error(blob ? 'no_ClipboardItem' : 'blob_not_loaded');
     }
-    return navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      swlog('clipboard.write OK idx=' + idx + ' bytes=' + blob.size);
+      return;
+    } catch (err) {
+      const msg = err?.message || String(err);
+      swlog('clipboard.write attempt 1 FAILED idx=' + idx + ' err=' + msg);
+      if (!/not focused|NotAllowed/i.test(msg)) throw err;
+    }
+    // Retry path: try to grab side panel focus, brief delay, retry.
+    try { window.focus(); } catch {}
+    await new Promise((r) => setTimeout(r, 80));
+    try { window.focus(); } catch {}
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      swlog('clipboard.write OK idx=' + idx + ' (retried) bytes=' + blob.size);
+    } catch (err) {
+      const msg = err?.message || String(err);
+      swlog('clipboard.write attempt 2 FAILED idx=' + idx + ' err=' + msg);
+      throw err;
+    }
   }
 
   // Trigger a trusted Ctrl+V on the FB tab via the SW's chrome.debugger
@@ -106,23 +136,22 @@ export default function VariantCard({ kind, text, attachImages }) {
   // Ctrl+V manually" if chrome.debugger can't attach.
   function copyImageByIndex(idx) {
     if (!blobsRef.current[idx]) {
-      console.warn('[FB Reply Maker SP] image blob not loaded yet, idx=', idx);
+      swlog('copyImageByIndex(' + idx + ') aborted: blob not loaded');
       setImageCopyState((p) => ({ ...p, [idx]: 'err' }));
       setTimeout(() => setImageCopyState((p) => ({ ...p, [idx]: 'idle' })), 1500);
       return;
     }
+    swlog('copyImageByIndex(' + idx + ') click');
     setImageCopyState((p) => ({ ...p, [idx]: 'pending' }));
-    // SYNC: call clipboard.write IMMEDIATELY in the click handler so the
-    // focus check passes while the side panel still owns focus.
     const writePromise = clipboardWriteSync(idx);
     writePromise.then(async () => {
-      // Ask SW to focus FB compose + fire trusted Ctrl+V.
-      const focused = await chrome.runtime.sendMessage({ type: 'FOCUS_REPLY_BOX' }).catch(() => null);
+      await chrome.runtime.sendMessage({ type: 'FOCUS_REPLY_BOX' }).catch(() => null);
       const pasted = await dispatchCtrlV();
+      swlog('📋 button idx=' + idx + ' result pasted=' + pasted);
       setImageCopyState((p) => ({ ...p, [idx]: pasted ? 'pasted' : 'copied' }));
       setTimeout(() => setImageCopyState((p) => ({ ...p, [idx]: 'idle' })), 3000);
     }).catch((err) => {
-      console.warn('[FB Reply Maker SP] clipboard.write failed:', err?.message || err);
+      swlog('📋 button idx=' + idx + ' caught: ' + (err?.message || err));
       setImageCopyState((p) => ({ ...p, [idx]: 'err' }));
       setTimeout(() => setImageCopyState((p) => ({ ...p, [idx]: 'idle' })), 2000);
     });
