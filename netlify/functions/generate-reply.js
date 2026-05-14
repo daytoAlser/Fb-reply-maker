@@ -1030,7 +1030,7 @@ ENDING:
 `;
 }
 
-const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock, decisionSupportBlock, wrongProductBlock, financingBlock, manualOptionsBlock, inventoryBlock, focusedRecommendationBlock }) => {
+const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock, decisionSupportBlock, wrongProductBlock, financingBlock, manualOptionsBlock, inventoryBlock, focusedRecommendationBlock, liveInventoryTopOverride }) => {
   const listingBlock = listingTitle && listingTitle.trim()
     ? `\nLISTING CONTEXT\nThe customer is messaging about this listing: "${listingTitle.trim()}". Use this together with the customer's message to infer ad_type (wheel / tire / accessory / lift) per the detection signals below.\n`
     : '';
@@ -1066,7 +1066,7 @@ The ONLY valid source for the @mention name is the OPENER LINE above (resolved b
 - "@Customer", "@there", "@Buyer", "@friend", "@User" are never valid. If you don't have a resolved first name, no @ is the right answer.
 
 When using an @mention anywhere in a reply, use ONLY the customer's first name from the OPENER LINE (a single word). "@Glen" not "@Glen Hans" — FB's tag system only matches single-word prefixes.
-${listingBlock}${locationBlock}${overrideClause}${returningBlock}
+${liveInventoryTopOverride || ''}${listingBlock}${locationBlock}${overrideClause}${returningBlock}
 ABSOLUTE RULES — these override every other rule in this prompt. Violating them is a hard fail.
 
 (A) NEVER ASK THE CUSTOMER FOR TIRE SIZE.
@@ -1972,6 +1972,52 @@ export async function handler(event) {
     winter_only: !!focused_product?.winterOnly,
     block_length: focusedRecommendationBlock.length
   });
+
+  // Highest-priority override: when live inventory has a named product
+  // to lead with (auto-primary OR rep-focused), we explicitly suspend the
+  // canonical "I'll pull options / shoot the pics + pricing in a sec"
+  // hedge framing taught in THE STANDARD FLOW. Without this top-of-prompt
+  // notice, the model defaults to those baked-in canonical phrasings.
+  // Renders both AT THE TOP OF SYSTEM PROMPT (early attention) and is
+  // also prepended to the user message (most direct attention).
+  const liveLeadProduct = (focused_product && focused_product.name)
+    ? focused_product
+    : (inventory && inventory.triggered && inventory.auto_primary ? inventory.auto_primary : null);
+  const liveLeadPrice = liveLeadProduct && (liveLeadProduct.priceFormatted || (liveLeadProduct.price ? `$${liveLeadProduct.price.toFixed(2)}` : ''));
+  const liveInventoryTopOverride = liveLeadProduct
+    ? `
+
+🚨 LIVE INVENTORY OVERRIDE — TURN-LEVEL HARD RULE (READ THIS FIRST)
+We have a live, in-stock, named product ready to recommend RIGHT NOW: **${liveLeadProduct.name}** at ${liveLeadPrice || '(see live inventory block)'} each.
+
+For THIS TURN ONLY, the canonical "I'll pull a few options / shoot the pics + pricing right here in a sec" framing taught later in this prompt is SUSPENDED. The picture is already attached automatically by the extension. The pricing is right above. There is nothing to "pull" — it's already pulled.
+
+ALL THREE VARIANTS (quick / standard / detailed) MUST:
+1. Acknowledge the customer's stated preference in one short phrase.
+2. Name the product explicitly: **${liveLeadProduct.name}**.
+3. Confirm the size if known.
+4. Include ONE short feature/reason (3PMS rating, directional tread, smooth ride, warranty length — pull from general tire knowledge, ONE phrase).
+5. Anchor the sticker price: ${liveLeadPrice || '$XX.XX'} each (or /tire).
+6. Close with a soft CTA: "wanna lock it in?", "want me to put a quote together for the set?", "good to roll on those?".
+
+PROHIBITED PHRASES THIS TURN (these are EXACTLY the canonical hedges the live inventory eliminates — using them is a HARD FAIL this turn):
+- "I'll pull a few options" / "let me pull a few options" / "pulling a few solid options"
+- "let me grab a couple of options" / "let me grab a couple"
+- "shoot the pics + pricing right here in a sec" / "shoot the pics and pricing"
+- "send the pics and pricing right here in the chat" / "pics and pricing coming right here"
+- "pulling some options for ya" / "pulling options"
+- "in a sec so you can see what we're working with"
+- "let me find some options" / "let me see what fits"
+
+The full ELEMENT LIST and EXAMPLE STRUCTURE are in the LIVE INVENTORY CONTEXT (or FOCUSED RECOMMENDATION) block further down. This top-of-prompt notice is a reinforcement, not a replacement — read both.
+`
+    : '';
+  console.log('[FN] live inventory top override:', {
+    active: !!liveLeadProduct,
+    lead_product: liveLeadProduct?.name || null,
+    lead_price: liveLeadPrice || null,
+    override_length: liveInventoryTopOverride.length
+  });
   console.log('[FN] inventory:', {
     triggered: !!inventory?.triggered,
     gate_reason: inventory?.gate_reason || null,
@@ -2076,7 +2122,8 @@ export async function handler(event) {
     financingBlock,
     manualOptionsBlock,
     inventoryBlock,
-    focusedRecommendationBlock
+    focusedRecommendationBlock,
+    liveInventoryTopOverride
   });
 
   console.log('[FN] resolved opener:', openerLine);
@@ -2094,11 +2141,19 @@ export async function handler(event) {
   });
 
   try {
+    // Append the live-inventory hard reminder DIRECTLY to the user message
+    // so it's the very last thing the model reads before generating. The
+    // canonical "pulling options" framing is hardcoded in many places in
+    // the system prompt and tends to win without this last-position
+    // override. Only fires when a primary or focused product is set.
+    const userMessageTail = liveLeadProduct
+      ? `\n\n[TURN-LEVEL OVERRIDE — APPLY NOW]\nLive inventory active. PRIMARY: ${liveLeadProduct.name}${liveLeadPrice ? ` (${liveLeadPrice} each)` : ''}. All three variants MUST recommend this product by name, with its price as a single anchor and a one-phrase feature. The picture is auto-attached by the extension — do NOT promise to "send pics + pricing in a sec". Lead with the named product, end with a soft CTA. The prohibited-phrases list in the system prompt is in force.`
+      : '';
     const completion = await client.messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 1200,
       system: systemPrompt,
-      messages: [{ role: 'user', content: `INCOMING MESSAGE:\n${message}` }]
+      messages: [{ role: 'user', content: `INCOMING MESSAGE:\n${message}${userMessageTail}` }]
     });
 
     const text = completion.content
