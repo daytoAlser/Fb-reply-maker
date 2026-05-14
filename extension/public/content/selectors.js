@@ -28,6 +28,46 @@
   const SELECTORS = {
     layoutVersion: LAYOUT_VERSION,
 
+    // ── Auto Response in-page panel (new in 2026-05) ────────────────────
+    //
+    // The Auto Response feature injects a button INTO the FB Messenger
+    // compose bar (FB-blue, sparkle icon). When clicked, a left-side
+    // panel overlays the inbox column. These entries gate visibility and
+    // describe how to find the injection target — selector-by-structure
+    // because FB's class names rot but the role/contenteditable anchors
+    // are stable. If FB ships a redesign, update both the regex (URL
+    // shape may change) and the walk-up rule in auto-response.js.
+    autoResponse: {
+      // The button must ONLY appear when the rep is in a Marketplace
+      // conversation, not the main Messenger view. Tested on
+      //   /marketplace/t/<id>    (web)
+      //   /marketplace/t/<id>/   (with trailing slash)
+      // The Messenger.com domain also rehosts marketplace threads, so
+      // we accept it as well.
+      threadPathRegex: /^\/marketplace\/t\/[^/]+\/?$/i,
+
+      // Anchor used to LOCATE the compose-bar row. Strategy in
+      // auto-response.js: querySelector for SELECTORS.thread.replyTextbox,
+      // then walk up the DOM until we find an ancestor whose width is
+      // most of the conversation pane AND has at least one icon-like
+      // button as a sibling. This survives FB class-name churn because
+      // it relies on role + structure, not class names.
+      anchorTextboxSelector: '[contenteditable="true"][role="textbox"]',
+
+      // Marker attribute on the injected button so we can dedupe + find
+      // it back for removal. Also lets a curious FB engineer see what
+      // we are.
+      buttonMarker: 'data-fbrm-auto-response-button',
+
+      // Marker attribute on the injected panel root.
+      panelMarker: 'data-fbrm-auto-response-panel',
+
+      // High-but-not-modal z-index. FB's own dialogs sit at ~1e6+; the
+      // inbox column we cover has no z-index baseline. 9999 keeps us
+      // above the inbox underneath without blocking FB modals.
+      panelZIndex: 9999
+    },
+
     // ── Active thread (existing — pulled out of marketplace.js so both
     //    paths share a single source of truth) ────────────────────────────
     thread: {

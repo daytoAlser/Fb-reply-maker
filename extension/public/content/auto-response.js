@@ -1,0 +1,964 @@
+// FB Reply Maker — Auto Response in-page surface.
+//
+// Injects an "Auto Response" button directly into the FB Messenger
+// compose bar (only on Marketplace threads) + a left-side variant
+// panel that overlays the inbox column. Parallel surface to the
+// extension's side panel; the side panel stays untouched.
+//
+// Runs in the same isolated world as marketplace.js (registered
+// sequentially by the SW). Reuses scrape + insert helpers via
+// globalThis.FBRM_API. The SW handles the variant API call + the
+// trusted-Ctrl+V image attach via chrome.debugger.
+
+(function () {
+  if (globalThis.__FBRM_AUTO_RESPONSE_LOADED__) return;
+  globalThis.__FBRM_AUTO_RESPONSE_LOADED__ = true;
+
+  const BUILD = 'ar-2026-05-14-v1';
+  console.log('[FB Reply Maker] auto-response.js loaded build=' + BUILD);
+
+  // ──────────────────────────────────────────────────────────────────
+  // Helpers
+  // ──────────────────────────────────────────────────────────────────
+
+  function swlog(message) {
+    try {
+      const api = globalThis.FBRM_API;
+      if (api && typeof api.swlog === 'function') {
+        api.swlog('[ar] ' + message);
+        return;
+      }
+      chrome.runtime.sendMessage({ type: 'LOG_FROM_CS', message: '[ar] ' + message });
+    } catch {}
+  }
+
+  function getSelectors() {
+    return (globalThis.FBRM_SELECTORS && globalThis.FBRM_SELECTORS.autoResponse) || {};
+  }
+
+  function getThreadSelectors() {
+    return (globalThis.FBRM_SELECTORS && globalThis.FBRM_SELECTORS.thread) || {};
+  }
+
+  function getThreadIdFromUrl(url) {
+    if (!url || typeof url !== 'string') return null;
+    const m = url.match(/\/t\/([^/?#]+)/);
+    return m ? m[1] : null;
+  }
+
+  function escapeHtml(s) {
+    return String(s || '')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // Marketplace detection
+  // ──────────────────────────────────────────────────────────────────
+
+  function isMarketplaceThread() {
+    const re = getSelectors().threadPathRegex || /^\/marketplace\/t\/[^/]+\/?$/i;
+    return re.test(location.pathname);
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // Button injection
+  // ──────────────────────────────────────────────────────────────────
+
+  function findComposeAnchor() {
+    const anchor = getSelectors().anchorTextboxSelector || '[contenteditable="true"][role="textbox"]';
+    return document.querySelector(anchor);
+  }
+
+  function buildButton() {
+    const btn = document.createElement('div');
+    btn.setAttribute(getSelectors().buttonMarker || 'data-fbrm-auto-response-button', '');
+    btn.setAttribute('role', 'button');
+    btn.setAttribute('tabindex', '0');
+    btn.className = 'fbrm-ar-launch-btn';
+    btn.title = 'Open Auto Response (FB Reply Maker)';
+    btn.innerHTML = `
+      <svg class="fbrm-ar-sparkle" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+        <path d="M12 2.5l1.6 4.7a2 2 0 001.2 1.2l4.7 1.6-4.7 1.6a2 2 0 00-1.2 1.2L12 17.5l-1.6-4.7a2 2 0 00-1.2-1.2l-4.7-1.6 4.7-1.6a2 2 0 001.2-1.2L12 2.5z"/>
+        <path d="M19 14.5l.7 2.1a1 1 0 00.6.6l2.1.7-2.1.7a1 1 0 00-.6.6l-.7 2.1-.7-2.1a1 1 0 00-.6-.6l-2.1-.7 2.1-.7a1 1 0 00.6-.6l.7-2.1z" opacity=".75"/>
+      </svg>
+      <span class="fbrm-ar-launch-label">Auto Response</span>
+    `;
+    const onActivate = (e) => {
+      if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      e.stopPropagation();
+      openPanel();
+    };
+    btn.addEventListener('click', onActivate);
+    btn.addEventListener('keydown', onActivate);
+    return btn;
+  }
+
+  function mountButton() {
+    if (!isMarketplaceThread()) {
+      unmountButton();
+      return;
+    }
+    const marker = getSelectors().buttonMarker || 'data-fbrm-auto-response-button';
+    if (document.querySelector('[' + marker + ']')) return;
+    const textbox = findComposeAnchor();
+    if (!textbox) return;
+    // Insert the button as a sibling immediately BEFORE the textbox's
+    // closest div ancestor. This places it between the existing icon
+    // group on the left and the text input on the right. Documented as
+    // a structural insertion so a future FB DOM redesign can be patched
+    // in selectors.js + this single rule.
+    const before = textbox.closest('div');
+    if (!before || !before.parentElement) return;
+    const btn = buildButton();
+    before.parentElement.insertBefore(btn, before);
+    swlog('button mounted');
+  }
+
+  function unmountButton() {
+    const marker = getSelectors().buttonMarker || 'data-fbrm-auto-response-button';
+    const existing = document.querySelector('[' + marker + ']');
+    if (existing) {
+      existing.remove();
+      swlog('button unmounted');
+    }
+  }
+
+  // FB is an SPA. Re-evaluate button visibility on URL changes and any
+  // major DOM mutation that might mean the compose bar just rendered.
+  let mountThrottle = null;
+  function scheduleMount() {
+    if (mountThrottle) return;
+    mountThrottle = setTimeout(() => {
+      mountThrottle = null;
+      try { mountButton(); } catch (err) { swlog('mount threw: ' + (err?.message || err)); }
+    }, 200);
+  }
+
+  function watchForNavigation() {
+    // popstate fires on browser back/forward. FB SPA also uses pushState
+    // which doesn't dispatch popstate; we observe the document title as
+    // a cheap proxy for navigation events.
+    window.addEventListener('popstate', scheduleMount);
+    let lastHref = location.href;
+    const obs = new MutationObserver(() => {
+      if (location.href !== lastHref) {
+        lastHref = location.href;
+        scheduleMount();
+        // Close panel on thread switch so we don't show stale variants.
+        if (!isMarketplaceThread() && panelEl) closePanel();
+      }
+      scheduleMount();
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // Panel lifecycle
+  // ──────────────────────────────────────────────────────────────────
+
+  let panelEl = null;
+  let escHandler = null;
+
+  function openPanel() {
+    if (panelEl) return;
+    injectStylesOnce();
+    panelEl = buildPanelSkeleton();
+    document.body.appendChild(panelEl);
+    escHandler = (e) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        closePanel();
+      }
+    };
+    // Use capture so we beat FB's own ESC handlers (image viewer, etc.)
+    document.addEventListener('keydown', escHandler, true);
+    swlog('panel opened');
+    runGenerate();
+  }
+
+  function closePanel() {
+    if (!panelEl) return;
+    panelEl.remove();
+    panelEl = null;
+    if (escHandler) {
+      document.removeEventListener('keydown', escHandler, true);
+      escHandler = null;
+    }
+    swlog('panel closed');
+  }
+
+  function buildPanelSkeleton() {
+    const panel = document.createElement('div');
+    panel.setAttribute(getSelectors().panelMarker || 'data-fbrm-auto-response-panel', '');
+    panel.className = 'fbrm-ar-panel';
+    panel.innerHTML = `
+      <header class="fbrm-ar-panel-header">
+        <span class="fbrm-ar-panel-title">▌AUTO RESPONSE</span>
+        <button type="button" class="fbrm-ar-panel-close" aria-label="Close">×</button>
+      </header>
+      <div class="fbrm-ar-panel-body">
+        <div class="fbrm-ar-loading">
+          <div class="fbrm-ar-loading-bar"></div>
+          <div class="fbrm-ar-loading-bar"></div>
+          <div class="fbrm-ar-loading-bar"></div>
+        </div>
+      </div>
+    `;
+    panel.querySelector('.fbrm-ar-panel-close').addEventListener('click', closePanel);
+    return panel;
+  }
+
+  function renderError(msg) {
+    if (!panelEl) return;
+    const body = panelEl.querySelector('.fbrm-ar-panel-body');
+    body.innerHTML = `<div class="fbrm-ar-error">${escapeHtml(msg)}</div>`;
+  }
+
+  function renderToast(msg, durationMs) {
+    if (!panelEl) return;
+    let toast = panelEl.querySelector('.fbrm-ar-toast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.className = 'fbrm-ar-toast';
+      panelEl.appendChild(toast);
+    }
+    toast.textContent = msg;
+    toast.classList.add('fbrm-ar-toast-visible');
+    clearTimeout(toast.__hide);
+    toast.__hide = setTimeout(() => {
+      toast.classList.remove('fbrm-ar-toast-visible');
+    }, durationMs || 2500);
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // Generate flow (scrape thread + fetch settings + SW proxy call)
+  // ──────────────────────────────────────────────────────────────────
+
+  async function getLeadByThreadId(threadId) {
+    if (!threadId) return null;
+    try {
+      const data = await chrome.storage.local.get('leads');
+      const leads = (data && data.leads) || {};
+      return leads[threadId] || null;
+    } catch (err) {
+      swlog('lead lookup failed: ' + (err?.message || err));
+      return null;
+    }
+  }
+
+  async function runGenerate() {
+    try {
+      const api = globalThis.FBRM_API;
+      const detect = api && api.detectThread ? api.detectThread() : null;
+      if (!detect || detect.status !== 'ok') {
+        renderError('No conversation detected. Make sure you are inside a Marketplace thread.');
+        return;
+      }
+      const settings = await chrome.storage.sync.get(['userName', 'config', 'context', 'location']);
+      const config = settings.config || {};
+      if (!config.endpoint || !config.secret) {
+        renderError('Configure API endpoint + secret in the extension Options page first.');
+        return;
+      }
+      const threadId = getThreadIdFromUrl(detect.url);
+      const lead = await getLeadByThreadId(threadId);
+
+      const payload = {
+        endpoint: config.endpoint,
+        secret: config.secret,
+        message: detect.latestIncoming || '',
+        context: settings.context || {},
+        categoryOverride: 'auto',
+        conversationHistory: detect.conversationHistory,
+        userName: settings.userName,
+        partnerName: detect.partnerName,
+        listingTitle: detect.listingTitle,
+        location: settings.location,
+        thread_id: threadId || undefined,
+        fb_thread_url: detect.url || undefined,
+        existing_captured_fields: lead?.capturedFields,
+        existing_products_of_interest: lead?.productsOfInterest,
+        existing_conversation_mode: lead?.conversationMode,
+        existing_last_customer_message_at: lead?.lastCustomerMessageAt,
+        existing_status: lead?.status,
+        existing_last_updated: lead?.lastUpdated,
+        existing_silence_duration_ms: lead?.silenceDurationMs,
+        existing_manual_options_log: lead?.manualOptionsLog
+      };
+
+      swlog('generate request thread=' + (threadId || '?') + ' history=' + (detect.conversationHistory?.length || 0));
+      const resp = await chrome.runtime.sendMessage({ type: 'GENERATE_REPLY', payload });
+      if (!resp || !resp.ok) {
+        renderError('Generate failed: ' + (resp?.reason || 'no response from service worker'));
+        return;
+      }
+      swlog('generate response received');
+      renderResult(resp.data);
+    } catch (err) {
+      swlog('runGenerate threw: ' + (err?.message || err));
+      renderError('Error: ' + (err?.message || err));
+    }
+  }
+
+  function renderResult(result) {
+    if (!panelEl) return;
+    const body = panelEl.querySelector('.fbrm-ar-panel-body');
+    body.innerHTML = `
+      <p class="fbrm-ar-tip">Tip: click @name in FB's reply box to convert it to a real tag before sending.</p>
+      <div class="fbrm-ar-variants"></div>
+    `;
+    const container = body.querySelector('.fbrm-ar-variants');
+    const attachImages = (result.inventory_meta && Array.isArray(result.inventory_meta.attach_images))
+      ? result.inventory_meta.attach_images.slice(0, 2)
+      : [];
+    const variants = result.variants || {};
+    for (const kind of ['quick', 'standard', 'detailed']) {
+      const text = variants[kind];
+      if (typeof text !== 'string' || !text.trim()) continue;
+      container.appendChild(renderVariantCard(kind, text, attachImages));
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // Variant card rendering (vanilla DOM, closure-based state)
+  // ──────────────────────────────────────────────────────────────────
+
+  async function blobToPng(blob) {
+    if (!blob) return null;
+    if (blob.type === 'image/png') return blob;
+    let drawable, width, height;
+    try {
+      const bmp = await createImageBitmap(blob);
+      drawable = bmp; width = bmp.width; height = bmp.height;
+    } catch {
+      // Lenient fallback via HTMLImageElement.
+      const url = URL.createObjectURL(blob);
+      try {
+        const img = await new Promise((resolve, reject) => {
+          const el = new Image();
+          el.onload = () => resolve(el);
+          el.onerror = () => reject(new Error('img decode failed'));
+          el.src = url;
+        });
+        drawable = img;
+        width = img.naturalWidth || img.width;
+        height = img.naturalHeight || img.height;
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }
+    if (!width || !height) throw new Error('zero-dimension image');
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext('2d').drawImage(drawable, 0, 0);
+    return await new Promise((resolve, reject) => {
+      canvas.toBlob(
+        (b) => (b ? resolve(b) : reject(new Error('toBlob null'))),
+        'image/png'
+      );
+    });
+  }
+
+  async function preloadBlob(url) {
+    const resp = await chrome.runtime.sendMessage({ type: 'FETCH_IMAGE_FOR_CLIPBOARD', url });
+    if (!resp || !resp.ok) throw new Error('sw fetch failed: ' + (resp?.reason || 'no_response'));
+    const binary = atob(resp.base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const srcBlob = new Blob([bytes], { type: resp.mime || 'image/jpeg' });
+    return await blobToPng(srcBlob);
+  }
+
+  function writeClipboardImage(blob) {
+    if (!blob) return Promise.reject(new Error('no blob'));
+    if (typeof ClipboardItem === 'undefined') return Promise.reject(new Error('no ClipboardItem'));
+    return navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+  }
+
+  function renderVariantCard(kind, text, attachImageUrls) {
+    const card = document.createElement('article');
+    card.className = 'fbrm-ar-variant-card';
+    const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
+    const previewUrls = attachImageUrls.slice(0, 2);
+    const imgCount = previewUrls.length;
+
+    card.innerHTML = `
+      <header class="fbrm-ar-variant-header">
+        <span class="fbrm-ar-variant-title">${kind.toUpperCase()}</span>
+        <span class="fbrm-ar-variant-meta">
+          ${imgCount > 0 ? `<span class="fbrm-ar-attach-chip">📎 ${imgCount}</span>` : ''}
+          <span class="fbrm-ar-word-count">${wordCount}w</span>
+        </span>
+      </header>
+      <p class="fbrm-ar-variant-body"></p>
+      <div class="fbrm-ar-image-preview"></div>
+      <p class="fbrm-ar-paste-hint" style="display:none"></p>
+      <div class="fbrm-ar-variant-actions">
+        <button type="button" class="fbrm-ar-btn-mini fbrm-ar-btn-copy">Copy</button>
+        <button type="button" class="fbrm-ar-btn-mini fbrm-ar-btn-insert">Insert</button>
+      </div>
+    `;
+    card.querySelector('.fbrm-ar-variant-body').textContent = text;
+
+    // Closure state for this card
+    const blobs = [];
+    const imgRowEls = [];
+    let inserted = null;
+
+    // Build image preview rows (and start preload)
+    const preview = card.querySelector('.fbrm-ar-image-preview');
+    previewUrls.forEach((url, i) => {
+      const wrap = document.createElement('div');
+      wrap.className = 'fbrm-ar-pick-wrap';
+      wrap.innerHTML = `
+        <img loading="lazy" alt="Tire photo ${i + 1}" />
+        <button type="button" class="fbrm-ar-pick-copy-btn" data-idx="${i}">📋 Copy</button>
+      `;
+      wrap.querySelector('img').src = url;
+      preview.appendChild(wrap);
+      imgRowEls.push(wrap);
+      blobs.push(null);
+      // Preload in background — fire-and-forget; surface failure on
+      // button click rather than blocking the card render.
+      preloadBlob(url).then((png) => {
+        blobs[i] = png;
+        swlog('preload[' + i + '] OK bytes=' + (png?.size || 0));
+      }).catch((err) => {
+        swlog('preload[' + i + '] FAILED: ' + (err?.message || err));
+      });
+    });
+
+    // Per-image 📋 button
+    preview.querySelectorAll('.fbrm-ar-pick-copy-btn').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        const idx = Number(btn.getAttribute('data-idx'));
+        await attachImageByIndex(card, idx, blobs, imgRowEls, btn);
+      });
+    });
+
+    // COPY (text)
+    card.querySelector('.fbrm-ar-btn-copy').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(text);
+        const b = card.querySelector('.fbrm-ar-btn-copy');
+        b.textContent = 'Copied';
+        setTimeout(() => { b.textContent = 'Copy'; }, 1200);
+      } catch {
+        renderToast('Copy failed — try again');
+      }
+    });
+
+    // INSERT
+    card.querySelector('.fbrm-ar-btn-insert').addEventListener('click', () => {
+      handleInsert(card, text, previewUrls, blobs, imgRowEls);
+    });
+
+    return card;
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // INSERT — text via FBRM_API.tryInsertReply, images via clipboard +
+  // SW chrome.debugger Ctrl+V. Mirrors the side panel VariantCard flow.
+  // ──────────────────────────────────────────────────────────────────
+
+  function setInsertState(card, state) {
+    const btn = card.querySelector('.fbrm-ar-btn-insert');
+    if (!btn) return;
+    if (state === 'pending') { btn.textContent = '…'; btn.disabled = true; }
+    else if (state === 'ok')  { btn.textContent = 'Inserted'; btn.disabled = true; }
+    else if (state === 'err') { btn.textContent = 'Failed'; btn.disabled = false; }
+    else                       { btn.textContent = 'Insert'; btn.disabled = false; }
+  }
+
+  function setImageRowState(rowEl, state) {
+    if (!rowEl) return;
+    const btn = rowEl.querySelector('.fbrm-ar-pick-copy-btn');
+    if (!btn) return;
+    btn.classList.remove('fbrm-ar-pick-state-pasted', 'fbrm-ar-pick-state-copied', 'fbrm-ar-pick-state-err', 'fbrm-ar-pick-state-pending');
+    if (state === 'pending') { btn.textContent = '…'; btn.disabled = true; btn.classList.add('fbrm-ar-pick-state-pending'); }
+    else if (state === 'pasted')  { btn.textContent = '✓ Attached'; btn.disabled = true; btn.classList.add('fbrm-ar-pick-state-pasted'); }
+    else if (state === 'copied')  { btn.textContent = '📋 On clipboard'; btn.disabled = false; btn.classList.add('fbrm-ar-pick-state-copied'); }
+    else if (state === 'err')     { btn.textContent = '⚠ Failed'; btn.disabled = false; btn.classList.add('fbrm-ar-pick-state-err'); }
+    else                          { btn.textContent = '📋 Copy'; btn.disabled = false; }
+  }
+
+  function setHint(card, msg) {
+    const hint = card.querySelector('.fbrm-ar-paste-hint');
+    if (!hint) return;
+    if (!msg) { hint.style.display = 'none'; hint.textContent = ''; return; }
+    hint.textContent = msg;
+    hint.style.display = 'block';
+  }
+
+  // Bypasses to ESC-trapping by FB: we send INSERT_REPLY through the SW
+  // route so the existing message path is used. The CS handler in
+  // marketplace.js is what executes — but we could also call
+  // FBRM_API.tryInsertReply directly here since we're in the same
+  // isolated world. Going through the message keeps a single code path.
+  async function callInsertReply(text, opts) {
+    return new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage(
+          { type: 'INSERT_REPLY', text, skip_humanized: true, ...(opts || {}) },
+          (res) => {
+            if (chrome.runtime.lastError) {
+              resolve({ ok: false, reason: chrome.runtime.lastError.message });
+              return;
+            }
+            resolve(res || { ok: false, reason: 'no_response' });
+          }
+        );
+      } catch (err) {
+        resolve({ ok: false, reason: err?.message || String(err) });
+      }
+    });
+  }
+
+  async function callDispatchCtrlV() {
+    try {
+      const resp = await chrome.runtime.sendMessage({ type: 'DISPATCH_CTRL_V' });
+      return !!(resp && resp.ok);
+    } catch (err) {
+      swlog('DISPATCH_CTRL_V threw: ' + (err?.message || err));
+      return false;
+    }
+  }
+
+  async function callFocusReplyBox() {
+    try {
+      await chrome.runtime.sendMessage({ type: 'FOCUS_REPLY_BOX' });
+    } catch {}
+  }
+
+  // Auto-close timer state — single-image variants close ~1.5s after
+  // image 1 attach; two-image variants stay open until image 2 attaches.
+  function scheduleAutoClose(ms) {
+    setTimeout(() => { if (panelEl) closePanel(); }, ms);
+  }
+
+  async function attachImageByIndex(card, idx, blobs, imgRowEls, _btn) {
+    const row = imgRowEls[idx];
+    setImageRowState(row, 'pending');
+    let blob = blobs[idx];
+    if (!blob) {
+      // Try to reload on the fly in case the background preload failed.
+      try {
+        const url = card.querySelectorAll('.fbrm-ar-pick-wrap img')[idx]?.src;
+        if (url) {
+          blob = await preloadBlob(url);
+          blobs[idx] = blob;
+        }
+      } catch (err) {
+        swlog('lazy preload failed idx=' + idx + ': ' + (err?.message || err));
+      }
+    }
+    if (!blob) {
+      setImageRowState(row, 'err');
+      return false;
+    }
+    try {
+      await writeClipboardImage(blob);
+    } catch (err) {
+      swlog('clipboard.write idx=' + idx + ' failed: ' + (err?.message || err));
+      // Retry with a focus nudge.
+      try { window.focus(); } catch {}
+      await sleep(80);
+      try {
+        await writeClipboardImage(blob);
+      } catch (err2) {
+        swlog('clipboard.write retry idx=' + idx + ' failed: ' + (err2?.message || err2));
+        setImageRowState(row, 'err');
+        return false;
+      }
+    }
+    await callFocusReplyBox();
+    const pasted = await callDispatchCtrlV();
+    setImageRowState(row, pasted ? 'pasted' : 'copied');
+    if (!pasted) {
+      renderToast('Image on clipboard — press Ctrl+V in the chat');
+    }
+    return pasted;
+  }
+
+  async function handleInsert(card, text, previewUrls, blobs, imgRowEls) {
+    setInsertState(card, 'pending');
+    setHint(card, '');
+
+    // 1. Text insert via the shared INSERT_REPLY pipeline.
+    const res = await callInsertReply(text);
+    if (!res || !res.ok) {
+      // Common cause: duplicate_send guard. Offer the rep a single
+      // retry that bypasses the guard.
+      if (res?.guard && res?.reason) {
+        setHint(card, 'Blocked by guard: ' + res.reason + '. Retrying with bypass…');
+        const retry = await callInsertReply(text, { bypass_guards: true });
+        if (!retry || !retry.ok) {
+          setInsertState(card, 'err');
+          // Fallback: text to clipboard so the rep can manually paste.
+          try { await navigator.clipboard.writeText(text); renderToast('Text copied — Ctrl+V in the chat'); } catch {}
+          return;
+        }
+      } else {
+        setInsertState(card, 'err');
+        try { await navigator.clipboard.writeText(text); renderToast('Text copied — Ctrl+V in the chat'); } catch {}
+        return;
+      }
+    }
+    setInsertState(card, 'ok');
+
+    if (previewUrls.length === 0) {
+      scheduleAutoClose(1200);
+      return;
+    }
+
+    // 2. Image 1: clipboard.write + trusted Ctrl+V via SW.
+    let image1Pasted = false;
+    try {
+      // Wait briefly for preload to complete if still in flight.
+      let waited = 0;
+      while (!blobs[0] && waited < 2500) { await sleep(120); waited += 120; }
+      if (!blobs[0]) {
+        try { blobs[0] = await preloadBlob(previewUrls[0]); } catch {}
+      }
+      if (blobs[0]) {
+        setImageRowState(imgRowEls[0], 'pending');
+        await writeClipboardImage(blobs[0]);
+        await callFocusReplyBox();
+        image1Pasted = await callDispatchCtrlV();
+        setImageRowState(imgRowEls[0], image1Pasted ? 'pasted' : 'copied');
+      } else {
+        setImageRowState(imgRowEls[0], 'err');
+      }
+    } catch (err) {
+      swlog('image 1 attach failed: ' + (err?.message || err));
+      setImageRowState(imgRowEls[0], 'err');
+    }
+
+    // 3. If there's a second image, leave the panel open and prompt for
+    // the 📋 click. Single-image variants auto-close.
+    if (previewUrls.length === 1) {
+      scheduleAutoClose(1500);
+      return;
+    }
+
+    setHint(card, image1Pasted
+      ? 'Image 1 attached ✓ — click 📋 below image 2 to attach the other.'
+      : 'Image 1 on clipboard — press Ctrl+V. Then click 📋 below image 2.');
+
+    // Watch for image 2 attach to trigger auto-close. We listen for a
+    // mutation on the second pick row's class list.
+    const row2 = imgRowEls[1];
+    if (row2) {
+      const obs = new MutationObserver(() => {
+        const btn2 = row2.querySelector('.fbrm-ar-pick-copy-btn');
+        if (btn2 && btn2.classList.contains('fbrm-ar-pick-state-pasted')) {
+          obs.disconnect();
+          setHint(card, 'Both images attached ✓');
+          scheduleAutoClose(2000);
+        }
+      });
+      obs.observe(row2.querySelector('.fbrm-ar-pick-copy-btn'), { attributes: true, attributeFilter: ['class'] });
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // Styles (terminal aesthetic, fbrm-ar- prefix, injected once)
+  // ──────────────────────────────────────────────────────────────────
+
+  function injectStylesOnce() {
+    if (document.getElementById('fbrm-ar-styles')) return;
+    const z = getSelectors().panelZIndex || 9999;
+    const style = document.createElement('style');
+    style.id = 'fbrm-ar-styles';
+    style.textContent = `
+      /* Compose-bar button */
+      .fbrm-ar-launch-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        height: 36px;
+        padding: 0 14px;
+        margin: 0 6px;
+        background: #0866FF;
+        color: #ffffff;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+        font-size: 13px;
+        font-weight: 600;
+        border-radius: 18px;
+        cursor: pointer;
+        user-select: none;
+        transition: background 120ms ease, transform 120ms ease;
+        white-space: nowrap;
+      }
+      .fbrm-ar-launch-btn:hover { background: #0a5fe0; }
+      .fbrm-ar-launch-btn:active { transform: scale(0.97); }
+      .fbrm-ar-sparkle { flex: 0 0 auto; color: #ffffff; }
+      .fbrm-ar-launch-label { line-height: 1; }
+
+      /* Panel root — covers the inbox column on the left */
+      .fbrm-ar-panel {
+        position: fixed;
+        top: 0;
+        left: 0;
+        height: 100vh;
+        width: 360px;
+        background: #0a0a0a;
+        color: #f0f0f0;
+        font-family: 'JetBrains Mono', 'Courier New', monospace;
+        border-right: 1px solid #2a2a2a;
+        z-index: ${z};
+        display: flex;
+        flex-direction: column;
+        animation: fbrm-ar-slidein 180ms ease-out;
+        box-shadow: 4px 0 18px rgba(0,0,0,0.6);
+      }
+      @keyframes fbrm-ar-slidein {
+        from { transform: translateX(-16px); opacity: 0; }
+        to   { transform: translateX(0);     opacity: 1; }
+      }
+
+      /* Panel header */
+      .fbrm-ar-panel-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 14px;
+        border-bottom: 1px solid #2a2a2a;
+        background: #050505;
+      }
+      .fbrm-ar-panel-title {
+        font-family: 'Oswald', 'Impact', sans-serif;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: #ef4444;
+      }
+      .fbrm-ar-panel-close {
+        background: transparent;
+        border: 1px solid #2a2a2a;
+        color: #f0f0f0;
+        width: 26px;
+        height: 26px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 16px;
+        line-height: 1;
+      }
+      .fbrm-ar-panel-close:hover { background: #1a1a1a; border-color: #ef4444; color: #ef4444; }
+
+      .fbrm-ar-panel-body {
+        flex: 1;
+        overflow-y: auto;
+        padding: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .fbrm-ar-loading {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        padding: 12px 0;
+      }
+      .fbrm-ar-loading-bar {
+        height: 90px;
+        background: linear-gradient(90deg, #1a1a1a 0%, #232323 50%, #1a1a1a 100%);
+        background-size: 200% 100%;
+        border-radius: 4px;
+        animation: fbrm-ar-shimmer 1200ms linear infinite;
+      }
+      @keyframes fbrm-ar-shimmer {
+        from { background-position: 200% 0; }
+        to   { background-position: -200% 0; }
+      }
+
+      .fbrm-ar-error {
+        padding: 12px;
+        background: rgba(180, 60, 60, 0.10);
+        border: 1px solid #b14848;
+        border-left: 3px solid #ef4444;
+        color: #ffb4b4;
+        font-size: 12px;
+        line-height: 1.45;
+        border-radius: 4px;
+      }
+
+      .fbrm-ar-tip {
+        margin: 0 0 4px;
+        font-size: 10.5px;
+        color: #8a8a8a;
+        letter-spacing: 0.02em;
+      }
+
+      .fbrm-ar-variants {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      /* Variant card */
+      .fbrm-ar-variant-card {
+        background: #111111;
+        border: 1px solid #2a2a2a;
+        border-left: 3px solid #ef4444;
+        padding: 10px 12px;
+        border-radius: 6px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .fbrm-ar-variant-header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .fbrm-ar-variant-title {
+        font-family: 'Oswald', 'Impact', sans-serif;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: #ef4444;
+      }
+      .fbrm-ar-variant-meta {
+        font-size: 10px;
+        color: #8a8a8a;
+        display: inline-flex;
+        gap: 6px;
+        align-items: center;
+      }
+      .fbrm-ar-attach-chip {
+        padding: 1px 5px;
+        border: 1px solid #2a2a2a;
+        border-radius: 3px;
+        color: #f87171;
+        background: rgba(255,255,255,0.03);
+      }
+      .fbrm-ar-variant-body {
+        margin: 0;
+        font-size: 12.5px;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        color: #e8e8e8;
+      }
+
+      .fbrm-ar-image-preview {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 6px;
+      }
+      .fbrm-ar-image-preview:empty { display: none; }
+      .fbrm-ar-pick-wrap {
+        position: relative;
+        aspect-ratio: 1 / 1;
+        background: #ffffff;
+        border: 1px solid #2a2a2a;
+        border-radius: 4px;
+        overflow: hidden;
+      }
+      .fbrm-ar-pick-wrap img {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        background: #ffffff;
+      }
+      .fbrm-ar-pick-copy-btn {
+        position: absolute;
+        bottom: 4px;
+        right: 4px;
+        background: rgba(0,0,0,0.78);
+        color: #ffffff;
+        border: 1px solid rgba(255,255,255,0.18);
+        padding: 3px 6px;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 10px;
+        font-weight: 700;
+        border-radius: 3px;
+        cursor: pointer;
+      }
+      .fbrm-ar-pick-copy-btn:hover { background: rgba(0,0,0,0.92); border-color: #f87171; }
+      .fbrm-ar-pick-copy-btn.fbrm-ar-pick-state-pasted { background: #16a34a; color: #000; border-color: #16a34a; }
+      .fbrm-ar-pick-copy-btn.fbrm-ar-pick-state-copied { background: #f87171; color: #000; border-color: #f87171; }
+      .fbrm-ar-pick-copy-btn.fbrm-ar-pick-state-err    { background: #b14848; color: #fff; border-color: #b14848; }
+
+      .fbrm-ar-paste-hint {
+        margin: 0;
+        padding: 6px 8px;
+        font-size: 10.5px;
+        line-height: 1.4;
+        color: #f87171;
+        background: rgba(255,255,255,0.03);
+        border: 1px solid #2a2a2a;
+        border-left: 2px solid #f87171;
+        border-radius: 3px;
+      }
+
+      .fbrm-ar-variant-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 6px;
+      }
+      .fbrm-ar-btn-mini {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        padding: 6px 12px;
+        background: #1a1a1a;
+        color: #f0f0f0;
+        border: 1px solid #2a2a2a;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      .fbrm-ar-btn-mini:hover { border-color: #ef4444; color: #ef4444; }
+      .fbrm-ar-btn-mini:disabled { opacity: 0.5; cursor: default; }
+      .fbrm-ar-btn-insert { background: #ef4444; color: #000; border-color: #ef4444; }
+      .fbrm-ar-btn-insert:hover { background: #f87171; border-color: #f87171; color: #000; }
+
+      /* Toast */
+      .fbrm-ar-toast {
+        position: absolute;
+        bottom: 14px;
+        left: 14px;
+        right: 14px;
+        padding: 8px 12px;
+        background: #1a1a1a;
+        border: 1px solid #ef4444;
+        color: #f87171;
+        font-size: 11px;
+        border-radius: 4px;
+        opacity: 0;
+        transition: opacity 180ms ease;
+        pointer-events: none;
+      }
+      .fbrm-ar-toast.fbrm-ar-toast-visible { opacity: 1; }
+    `;
+    document.head.appendChild(style);
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // Bootstrap
+  // ──────────────────────────────────────────────────────────────────
+
+  // Wait briefly for marketplace.js to publish FBRM_API. Both scripts
+  // load in the same isolated world; selectors.js → marketplace.js →
+  // auto-response.js is the documented order, but if anything in
+  // marketplace.js throws early, FBRM_API may not exist yet. The button
+  // can still mount because we don't need FBRM_API to MOUNT; we only
+  // need it when the rep clicks it. runGenerate() guards on its absence.
+
+  scheduleMount();
+  watchForNavigation();
+})();

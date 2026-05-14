@@ -1883,4 +1883,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 });
 
+// ── Public API for sibling content scripts (auto-response.js) ──────────
+//
+// Same isolated world, same IIFE scope is unreachable from sibling files.
+// We expose a small surface on globalThis.FBRM_API so the in-page Auto
+// Response panel can reuse the proven scrape/insert machinery without
+// duplicating it. Keep this list minimal — anything added here becomes
+// part of the inter-script contract.
+globalThis.FBRM_API = {
+  detectThread,
+  tryInsertReply,
+  scanThreadMessages,
+  extractThreadInfo,
+  swlog,
+  sleep
+};
+
 })(); // end idempotency-guarded IIFE

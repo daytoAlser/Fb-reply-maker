@@ -41,7 +41,12 @@ const CONTENT_SCRIPT_ID = 'marketplace';
 // marketplace.js runs. Same isolated world, sequential execution.
 const CONTENT_SCRIPT_FILES = [
   'content/selectors.js',
-  'content/marketplace.js'
+  'content/marketplace.js',
+  // Auto Response in-page surface — injects the FB-blue "Auto Response"
+  // button into the Messenger compose bar and the left-side variant
+  // panel. Same isolated world, runs after marketplace.js so it can
+  // read globalThis.FBRM_API.
+  'content/auto-response.js'
 ];
 const CONTENT_SCRIPT_MATCHES = [
   'https://*.facebook.com/*',
@@ -713,6 +718,61 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     console.log('[CS]', msg.message);
     sendResponse({ ok: true });
     return false;
+  }
+
+  // GENERATE_REPLY — proxies the side-panel API call from the content
+  // script's Auto Response panel. Content scripts can fetch the Netlify
+  // endpoint directly only with explicit host_permissions, which we
+  // don't want to add for a single endpoint. The SW already has fetch
+  // privileges via the extension origin, so we proxy: payload comes in
+  // pre-built (matching the side panel's generateReply() shape), we
+  // POST it, JSON.parse the response, return.
+  if (msg?.type === 'GENERATE_REPLY' && msg.payload && typeof msg.payload === 'object') {
+    (async () => {
+      const p = msg.payload;
+      if (!p.endpoint || !p.secret) {
+        sendResponse({ ok: false, reason: 'missing_endpoint_or_secret' });
+        return;
+      }
+      try {
+        const body = { message: p.message, context: p.context, categoryOverride: p.categoryOverride };
+        if (Array.isArray(p.conversationHistory) && p.conversationHistory.length > 0) body.conversation_history = p.conversationHistory;
+        if (typeof p.userName === 'string' && p.userName.trim()) body.userName = p.userName.trim();
+        if (typeof p.partnerName === 'string' && p.partnerName.trim()) body.partnerName = p.partnerName.trim();
+        if (typeof p.listingTitle === 'string' && p.listingTitle.trim()) body.listingTitle = p.listingTitle.trim();
+        if (p.location && typeof p.location === 'object') body.location = p.location;
+        if (p.overrideFlags === true) body.override_flags = true;
+        if (typeof p.thread_id === 'string' && p.thread_id) body.thread_id = p.thread_id;
+        if (typeof p.fb_thread_url === 'string' && p.fb_thread_url) body.fb_thread_url = p.fb_thread_url;
+        if (p.existing_captured_fields && typeof p.existing_captured_fields === 'object') body.existing_captured_fields = p.existing_captured_fields;
+        if (Array.isArray(p.existing_products_of_interest) && p.existing_products_of_interest.length > 0) body.existing_products_of_interest = p.existing_products_of_interest;
+        if (typeof p.existing_conversation_mode === 'string' && p.existing_conversation_mode) body.existing_conversation_mode = p.existing_conversation_mode;
+        if (typeof p.existing_last_customer_message_at === 'number' && p.existing_last_customer_message_at > 0) body.existing_last_customer_message_at = p.existing_last_customer_message_at;
+        if (typeof p.existing_status === 'string' && p.existing_status) body.existing_status = p.existing_status;
+        if (typeof p.existing_last_updated === 'number' && p.existing_last_updated > 0) body.existing_last_updated = p.existing_last_updated;
+        if (typeof p.existing_silence_duration_ms === 'number' && p.existing_silence_duration_ms >= 0) body.existing_silence_duration_ms = p.existing_silence_duration_ms;
+        if (Array.isArray(p.existing_manual_options_log) && p.existing_manual_options_log.length > 0) body.existing_manual_options_log = p.existing_manual_options_log;
+        if (p.focusedProduct && typeof p.focusedProduct === 'object') body.focused_product = p.focusedProduct;
+
+        console.log('[SW] GENERATE_REPLY → endpoint=', p.endpoint, ' thread=', p.thread_id || '?');
+        const res = await fetch(p.endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-api-secret': p.secret },
+          body: JSON.stringify(body)
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => '');
+          sendResponse({ ok: false, reason: `${res.status} ${text || res.statusText}` });
+          return;
+        }
+        const data = await res.json();
+        sendResponse({ ok: true, data });
+      } catch (err) {
+        console.warn('[SW] GENERATE_REPLY failed:', err?.message || err);
+        sendResponse({ ok: false, reason: err?.message || String(err) });
+      }
+    })();
+    return true;
   }
 
   // FETCH_IMAGE_FOR_CLIPBOARD — content script asks the SW to fetch a
