@@ -164,19 +164,33 @@
       logMountState('skip — composer textbox not found');
       return;
     }
-    // Insert the button as a sibling immediately BEFORE the textbox's
-    // closest div ancestor. This places it between the existing icon
-    // group on the left and the text input on the right. Documented as
-    // a structural insertion so a future FB DOM redesign can be patched
-    // in selectors.js + this single rule.
-    const before = textbox.closest('div');
-    if (!before || !before.parentElement) {
-      logMountState('skip — textbox has no parent div to anchor against');
+    // Insert the button in a NEW row immediately ABOVE the compose row
+    // (the row containing the textbox + mic/photo/emoji/send icons).
+    // Inline placement crowds the textbox; an above-row keeps the
+    // composer untouched and gives the button breathing room.
+    //
+    // Walk up from the textbox until we find a row that contains
+    // multiple button-role siblings — that's the compose row. Insert
+    // our launch row as the previous sibling.
+    let row = textbox.parentElement;
+    let depth = 0;
+    while (row && depth < 8) {
+      const buttonCount = row.querySelectorAll('[role="button"], button').length;
+      if (buttonCount >= 2 && row.parentElement) break;
+      row = row.parentElement;
+      depth++;
+    }
+    if (!row || !row.parentElement) {
+      logMountState('skip — no compose row found');
       return;
     }
+    const launchRow = document.createElement('div');
+    launchRow.setAttribute(marker, '');
+    launchRow.className = 'fbrm-ar-launch-row';
     const btn = buildButton();
-    before.parentElement.insertBefore(btn, before);
-    logMountState('mounted');
+    launchRow.appendChild(btn);
+    row.parentElement.insertBefore(launchRow, row);
+    logMountState('mounted above compose row');
   }
 
   function unmountButton() {
@@ -471,25 +485,42 @@
     const imgRowEls = [];
     let inserted = null;
 
-    // Build image preview rows (and start preload)
+    // Build image preview rows (and start preload). The <img>.src
+    // intentionally stays empty until preload completes — FB's page
+    // CSP blocks cross-origin images from canadacustomautoworks.com,
+    // so we wait for the SW-fetched blob and use a blob: URL instead.
     const preview = card.querySelector('.fbrm-ar-image-preview');
     previewUrls.forEach((url, i) => {
       const wrap = document.createElement('div');
       wrap.className = 'fbrm-ar-pick-wrap';
       wrap.innerHTML = `
-        <img loading="lazy" alt="Tire photo ${i + 1}" />
+        <div class="fbrm-ar-pick-skeleton"></div>
+        <img loading="lazy" alt="Tire photo ${i + 1}" style="display:none" />
         <button type="button" class="fbrm-ar-pick-copy-btn" data-idx="${i}">📋 Copy</button>
       `;
-      wrap.querySelector('img').src = url;
       preview.appendChild(wrap);
       imgRowEls.push(wrap);
       blobs.push(null);
-      // Preload in background — fire-and-forget; surface failure on
-      // button click rather than blocking the card render.
       preloadBlob(url).then((png) => {
         blobs[i] = png;
+        const imgEl = wrap.querySelector('img');
+        const skeleton = wrap.querySelector('.fbrm-ar-pick-skeleton');
+        try {
+          const objUrl = URL.createObjectURL(png);
+          if (imgEl) {
+            imgEl.src = objUrl;
+            imgEl.style.display = '';
+            imgEl.addEventListener('load', () => {
+              // Release the blob URL after the browser has decoded it.
+              setTimeout(() => { try { URL.revokeObjectURL(objUrl); } catch {} }, 1000);
+            }, { once: true });
+          }
+          if (skeleton) skeleton.remove();
+        } catch {}
         swlog('preload[' + i + '] OK bytes=' + (png?.size || 0));
       }).catch((err) => {
+        const skeleton = wrap.querySelector('.fbrm-ar-pick-skeleton');
+        if (skeleton) skeleton.classList.add('fbrm-ar-pick-skeleton-err');
         swlog('preload[' + i + '] FAILED: ' + (err?.message || err));
       });
     });
@@ -738,26 +769,34 @@
     const style = document.createElement('style');
     style.id = 'fbrm-ar-styles';
     style.textContent = `
-      /* Compose-bar button */
+      /* Launch row above the compose row */
+      .fbrm-ar-launch-row {
+        display: flex;
+        justify-content: flex-start;
+        align-items: center;
+        padding: 6px 12px 4px;
+        gap: 6px;
+      }
+      /* Compose-bar button — FB-native blue, sparkle icon, rounded pill */
       .fbrm-ar-launch-btn {
         display: inline-flex;
         align-items: center;
         gap: 6px;
-        height: 36px;
+        height: 32px;
         padding: 0 14px;
-        margin: 0 6px;
         background: #0866FF;
         color: #ffffff;
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
         font-size: 13px;
         font-weight: 600;
-        border-radius: 18px;
+        border-radius: 16px;
         cursor: pointer;
         user-select: none;
-        transition: background 120ms ease, transform 120ms ease;
+        transition: background 120ms ease, transform 120ms ease, box-shadow 120ms ease;
         white-space: nowrap;
+        box-shadow: 0 1px 3px rgba(8, 102, 255, 0.30);
       }
-      .fbrm-ar-launch-btn:hover { background: #0a5fe0; }
+      .fbrm-ar-launch-btn:hover { background: #0a5fe0; box-shadow: 0 2px 8px rgba(8, 102, 255, 0.45); }
       .fbrm-ar-launch-btn:active { transform: scale(0.97); }
       .fbrm-ar-sparkle { flex: 0 0 auto; color: #ffffff; }
       .fbrm-ar-launch-label { line-height: 1; }
@@ -870,11 +909,17 @@
         background: #111111;
         border: 1px solid #2a2a2a;
         border-left: 3px solid #ef4444;
-        padding: 10px 12px;
-        border-radius: 6px;
+        padding: 12px 14px;
+        border-radius: 12px;
         display: flex;
         flex-direction: column;
-        gap: 8px;
+        gap: 10px;
+        transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+      }
+      .fbrm-ar-variant-card:hover {
+        border-color: #3a3a3a;
+        border-left-color: #f87171;
+        box-shadow: 0 4px 12px rgba(239, 68, 68, 0.12);
       }
       .fbrm-ar-variant-header {
         display: flex;
@@ -923,7 +968,7 @@
         aspect-ratio: 1 / 1;
         background: #ffffff;
         border: 1px solid #2a2a2a;
-        border-radius: 4px;
+        border-radius: 8px;
         overflow: hidden;
       }
       .fbrm-ar-pick-wrap img {
@@ -932,19 +977,32 @@
         object-fit: contain;
         background: #ffffff;
       }
+      .fbrm-ar-pick-skeleton {
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(90deg, #1a1a1a 0%, #232323 50%, #1a1a1a 100%);
+        background-size: 200% 100%;
+        animation: fbrm-ar-shimmer 1200ms linear infinite;
+      }
+      .fbrm-ar-pick-skeleton-err {
+        background: repeating-linear-gradient(45deg, #2a1414 0 8px, #1a0a0a 8px 16px);
+        animation: none;
+      }
       .fbrm-ar-pick-copy-btn {
         position: absolute;
-        bottom: 4px;
-        right: 4px;
+        bottom: 6px;
+        right: 6px;
         background: rgba(0,0,0,0.78);
         color: #ffffff;
         border: 1px solid rgba(255,255,255,0.18);
-        padding: 3px 6px;
-        font-family: 'JetBrains Mono', monospace;
+        padding: 4px 8px;
+        font-family: 'JetBrains Mono', 'Courier New', monospace;
         font-size: 10px;
         font-weight: 700;
-        border-radius: 3px;
+        letter-spacing: 0.04em;
+        border-radius: 6px;
         cursor: pointer;
+        transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
       }
       .fbrm-ar-pick-copy-btn:hover { background: rgba(0,0,0,0.92); border-color: #f87171; }
       .fbrm-ar-pick-copy-btn.fbrm-ar-pick-state-pasted { background: #16a34a; color: #000; border-color: #16a34a; }
@@ -969,22 +1027,24 @@
         gap: 6px;
       }
       .fbrm-ar-btn-mini {
-        font-family: 'JetBrains Mono', monospace;
+        font-family: 'JetBrains Mono', 'Courier New', monospace;
         font-size: 11px;
         font-weight: 700;
         letter-spacing: 0.06em;
         text-transform: uppercase;
-        padding: 6px 12px;
+        padding: 7px 14px;
         background: #1a1a1a;
         color: #f0f0f0;
         border: 1px solid #2a2a2a;
-        border-radius: 4px;
+        border-radius: 6px;
         cursor: pointer;
+        transition: background 120ms ease, border-color 120ms ease, color 120ms ease, transform 120ms ease;
       }
       .fbrm-ar-btn-mini:hover { border-color: #ef4444; color: #ef4444; }
-      .fbrm-ar-btn-mini:disabled { opacity: 0.5; cursor: default; }
-      .fbrm-ar-btn-insert { background: #ef4444; color: #000; border-color: #ef4444; }
-      .fbrm-ar-btn-insert:hover { background: #f87171; border-color: #f87171; color: #000; }
+      .fbrm-ar-btn-mini:active { transform: scale(0.97); }
+      .fbrm-ar-btn-mini:disabled { opacity: 0.5; cursor: default; transform: none; }
+      .fbrm-ar-btn-insert { background: #ef4444; color: #000; border-color: #ef4444; box-shadow: 0 1px 3px rgba(239, 68, 68, 0.30); }
+      .fbrm-ar-btn-insert:hover { background: #f87171; border-color: #f87171; color: #000; box-shadow: 0 2px 8px rgba(239, 68, 68, 0.45); }
 
       /* Toast */
       .fbrm-ar-toast {
