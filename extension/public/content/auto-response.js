@@ -418,6 +418,9 @@
 
   let panelEl = null;
   let escHandler = null;
+  // Stash of the current panel's context (detect + lead) so renderResult
+  // can build the CONTEXT section without re-scraping.
+  let panelContext = { detect: null, threadId: null, lead: null };
 
   function openPanel() {
     if (panelEl) return;
@@ -542,11 +545,17 @@
       }
       const threadId = getThreadIdFromUrl(detect.url);
 
+      // Stash for the context panel renderer.
+      panelContext = { detect, threadId, lead: null };
+      // Kick off lead fetch in parallel so the context panel has it.
+      const leadP = getLeadByThreadId(threadId).then((l) => { panelContext.lead = l; });
+
       // CACHE HIT — render instantly. Prefetch ran on thread arrival
       // and produced variants for the same latestIncoming text.
       const cached = getCached(threadId, detect.latestIncoming);
       if (cached) {
         swlog('cache HIT thread=' + threadId);
+        await leadP;
         renderResult(cached);
         return;
       }
@@ -626,9 +635,19 @@
     if (!panelEl) return;
     const body = panelEl.querySelector('.fbrm-ar-panel-body');
     body.innerHTML = `
+      ${renderContextSection()}
       <p class="fbrm-ar-tip">Tip: click @name in FB's reply box to convert it to a real tag before sending.</p>
       <div class="fbrm-ar-variants"></div>
     `;
+    // Wire up the context section's collapse toggle.
+    const ctxHeader = body.querySelector('.fbrm-ar-context-header');
+    const ctxBody = body.querySelector('.fbrm-ar-context-body');
+    if (ctxHeader && ctxBody) {
+      ctxHeader.addEventListener('click', () => {
+        const open = ctxBody.classList.toggle('fbrm-ar-context-body-open');
+        ctxHeader.querySelector('.fbrm-ar-context-chevron').textContent = open ? '▼' : '▶';
+      });
+    }
     const container = body.querySelector('.fbrm-ar-variants');
     const attachImages = (result.inventory_meta && Array.isArray(result.inventory_meta.attach_images))
       ? result.inventory_meta.attach_images.slice(0, 2)
@@ -639,6 +658,51 @@
       if (typeof text !== 'string' || !text.trim()) continue;
       container.appendChild(renderVariantCard(kind, text, attachImages));
     }
+  }
+
+  // Renders the CONTEXT collapsible section above the variants. Shows
+  // the rep what the AI is actually working with — listing, last few
+  // messages, captured fields. Defaults to expanded so the rep sees
+  // everything at a glance; click to collapse.
+  function renderContextSection() {
+    const ctx = panelContext || {};
+    const detect = ctx.detect || {};
+    const lead = ctx.lead || {};
+    const history = Array.isArray(detect.conversationHistory) ? detect.conversationHistory : [];
+    const recent = history.slice(-6); // last 6 messages
+    const captured = lead.capturedFields || {};
+    const products = Array.isArray(lead.productsOfInterest) ? lead.productsOfInterest : [];
+    const capturedItems = Object.entries(captured)
+      .filter(([, v]) => v !== null && v !== undefined && String(v).trim() !== '')
+      .map(([k, v]) => `<span class="fbrm-ar-pill">${escapeHtml(k)}: ${escapeHtml(String(v))}</span>`)
+      .join('');
+    const productItems = products
+      .filter((p) => p && p.productType)
+      .map((p) => `<span class="fbrm-ar-pill fbrm-ar-pill-product">${escapeHtml(p.productType)}${p.productState ? ' · ' + escapeHtml(p.productState) : ''}</span>`)
+      .join('');
+    const messages = recent
+      .map((m) => {
+        const who = m.sender === 'me' ? 'rep' : (detect.partnerName || 'them');
+        const cls = m.sender === 'me' ? 'fbrm-ar-msg-me' : 'fbrm-ar-msg-them';
+        return `<div class="fbrm-ar-msg ${cls}"><span class="fbrm-ar-msg-who">${escapeHtml(who)}</span><span class="fbrm-ar-msg-text">${escapeHtml(m.text || '')}</span></div>`;
+      })
+      .join('');
+    return `
+      <section class="fbrm-ar-context">
+        <button type="button" class="fbrm-ar-context-header">
+          <span class="fbrm-ar-context-chevron">▼</span>
+          <span class="fbrm-ar-context-title">CONTEXT</span>
+          <span class="fbrm-ar-context-counter">${history.length} msg · ${capturedItems ? Object.keys(captured).filter((k) => captured[k]).length : 0} fields</span>
+        </button>
+        <div class="fbrm-ar-context-body fbrm-ar-context-body-open">
+          ${detect.listingTitle ? `<div class="fbrm-ar-context-row"><span class="fbrm-ar-context-label">Listing</span><span class="fbrm-ar-context-value">${escapeHtml(detect.listingTitle)}</span></div>` : ''}
+          ${detect.partnerName ? `<div class="fbrm-ar-context-row"><span class="fbrm-ar-context-label">Partner</span><span class="fbrm-ar-context-value">${escapeHtml(detect.partnerName)}</span></div>` : ''}
+          ${productItems ? `<div class="fbrm-ar-context-row"><span class="fbrm-ar-context-label">Products</span><span class="fbrm-ar-context-value">${productItems}</span></div>` : ''}
+          ${capturedItems ? `<div class="fbrm-ar-context-row"><span class="fbrm-ar-context-label">Captured</span><span class="fbrm-ar-context-value">${capturedItems}</span></div>` : ''}
+          ${messages ? `<div class="fbrm-ar-context-row fbrm-ar-context-row-msgs"><span class="fbrm-ar-context-label">Last ${recent.length}</span><div class="fbrm-ar-context-msgs">${messages}</div></div>` : ''}
+        </div>
+      </section>
+    `;
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -1112,7 +1176,9 @@
         transform: translate(-50%, -50%);
         width: 460px;
         max-width: calc(100vw - 32px);
-        max-height: calc(100vh - 64px);
+        height: calc(100vh - 80px);
+        max-height: 900px;
+        min-height: 600px;
         border: 1px solid #2a2a2a;
         border-radius: 12px;
         overflow: hidden;
@@ -1204,6 +1270,106 @@
         color: #8a8a8a;
         letter-spacing: 0.02em;
       }
+
+      /* Context section — collapsible, shows what the AI is working with */
+      .fbrm-ar-context {
+        border: 1px solid #2a2a2a;
+        border-radius: 8px;
+        background: #0d0d0d;
+        overflow: hidden;
+      }
+      .fbrm-ar-context-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        width: 100%;
+        padding: 8px 10px;
+        background: #111111;
+        border: 0;
+        color: #f0f0f0;
+        cursor: pointer;
+        font-family: 'JetBrains Mono', 'Courier New', monospace;
+      }
+      .fbrm-ar-context-header:hover { background: #161616; }
+      .fbrm-ar-context-chevron { font-size: 9px; color: #8a8a8a; }
+      .fbrm-ar-context-title {
+        font-family: 'Oswald', 'Impact', sans-serif;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: #ef4444;
+      }
+      .fbrm-ar-context-counter { margin-left: auto; font-size: 10px; color: #8a8a8a; }
+      .fbrm-ar-context-body {
+        display: none;
+        padding: 8px 10px 10px;
+        gap: 8px;
+        flex-direction: column;
+        max-height: 280px;
+        overflow-y: auto;
+      }
+      .fbrm-ar-context-body-open { display: flex; }
+      .fbrm-ar-context-row {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+      .fbrm-ar-context-row-msgs { gap: 4px; }
+      .fbrm-ar-context-label {
+        font-size: 9.5px;
+        color: #8a8a8a;
+        letter-spacing: 0.10em;
+        text-transform: uppercase;
+      }
+      .fbrm-ar-context-value {
+        font-size: 11.5px;
+        color: #e0e0e0;
+        word-break: break-word;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+      }
+      .fbrm-ar-pill {
+        display: inline-block;
+        padding: 2px 7px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid #2a2a2a;
+        border-radius: 10px;
+        font-size: 10px;
+        color: #c8c8c8;
+      }
+      .fbrm-ar-pill-product {
+        border-color: rgba(239, 68, 68, 0.30);
+        color: #f87171;
+      }
+      .fbrm-ar-context-msgs {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        padding-top: 2px;
+      }
+      .fbrm-ar-msg {
+        display: flex;
+        gap: 8px;
+        padding: 5px 8px;
+        border-radius: 4px;
+        font-size: 10.5px;
+        line-height: 1.35;
+      }
+      .fbrm-ar-msg-me   { background: rgba(120, 73, 219, 0.10); color: #b8a8e8; border-left: 2px solid rgba(120, 73, 219, 0.50); }
+      .fbrm-ar-msg-them { background: rgba(255, 255, 255, 0.03); color: #d0d0d0; border-left: 2px solid rgba(255, 255, 255, 0.15); }
+      .fbrm-ar-msg-who {
+        flex: 0 0 auto;
+        font-weight: 700;
+        text-transform: uppercase;
+        font-size: 9px;
+        letter-spacing: 0.06em;
+        opacity: 0.65;
+        padding-top: 1px;
+        min-width: 30px;
+      }
+      .fbrm-ar-msg-text { flex: 1; word-break: break-word; }
 
       .fbrm-ar-variants {
         display: flex;
