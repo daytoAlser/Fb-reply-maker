@@ -1151,12 +1151,14 @@ ABSOLUTE RULES — these override every other rule in this prompt. Violating the
       - "Lock in your estimate" / "build out your estimate"
       - "I'll get the deposit info over"
 
-    Correct framing once qualified — "I'm pulling options for you,
+    ${liveInventoryTopOverride
+      ? `Correct framing once qualified — SEE THE 🚨 LIVE INVENTORY OVERRIDE BLOCK AT THE TOP OF THIS PROMPT. A live, in-stock, named product has been auto-selected this turn — recommend IT directly with its sticker price. Do NOT use any "I'll pull options" / "shoot the pics + pricing in a sec" framing — those examples are SUSPENDED this turn.`
+      : `Correct framing once qualified — "I'm pulling options for you,
     pictures + pricing here in the chat":
       "Sweet — I'll pull a few [tire-type] options that fit the
        [vehicle] and shoot the pics + pricing right here in a sec."
       "Perfect, let me grab a couple of options for ya — pics and
-       pricing coming right here in the chat."
+       pricing coming right here in the chat."`}
 
     Phone/estimate framing is RESERVED for:
       - The price-haggle flag (existing quote-in-chat punt)
@@ -1319,9 +1321,11 @@ we are in the conversation:
 (2) Qualifier chain JUST completed (or already complete) and we
     have NOT yet sent specific options/pictures/pricing in the
     chat for the customer to react to.
-    → Use the OPTIONS DELIVERY VOICE: "I'll pull a few [tire-type
+    ${liveInventoryTopOverride
+      ? `→ RECOMMEND THE PRIMARY PICK from the 🚨 LIVE INVENTORY OVERRIDE block at the top of this prompt — named product, sticker price, brief feature, soft CTA. The picture attaches automatically. DO NOT defer with "I'll pull a few options" — they're already pulled and shown right above.`
+      : `→ Use the OPTIONS DELIVERY VOICE: "I'll pull a few [tire-type
        /wheel-style] options that fit the [vehicle] and shoot the
-       pics + pricing right here in a sec".
+       pics + pricing right here in a sec".`}
     → DO NOT use the phone-then-estimate punt yet. Pictures and
        pricing first; estimate after the customer reacts.
 
@@ -1552,7 +1556,9 @@ QUALIFY-BEFORE-OPTIONS GATE (HARD RULE):
    need tires to go with the wheels too? And we've also got a
    showroom here if you'd ever wanna come see them in real life."
 
-- Once every qualifier is captured, the next step is SENDING OPTIONS
+${liveInventoryTopOverride
+  ? `- Once every qualifier is captured, RECOMMEND THE PRIMARY PICK from the 🚨 LIVE INVENTORY OVERRIDE block at the TOP of this prompt. The product is named, priced, and in stock — the recommendation IS this turn's message. DO NOT use any "I'll pull options" or "shoot the pics + pricing in a sec" phrasing — those framings are SUSPENDED this turn because we already have the option pulled and the picture attaches automatically.`
+  : `- Once every qualifier is captured, the next step is SENDING OPTIONS
   (pictures + brief pricing) IN THE CHAT. NOT writing an estimate.
   NOT collecting a phone number yet. Estimates and phone capture
   come AFTER the customer picks an option from what we sent.
@@ -1564,7 +1570,7 @@ QUALIFY-BEFORE-OPTIONS GATE (HARD RULE):
    pics and pricing right here in the chat."
   "Right on — pulling some [snowflake-rated / A/T / mud / etc.]
    options for the [vehicle] now, sending pics + pricing here in a
-   sec."
+   sec."`}
 
   After the customer reacts to the options (picks one, asks about a
   specific one, asks for the total), THEN we collect phone for a
@@ -2013,6 +2019,7 @@ The full ELEMENT LIST and EXAMPLE STRUCTURE are in the LIVE INVENTORY CONTEXT (o
 `
     : '';
   console.log('[FN] live inventory top override:', {
+    build: 'live-inv-override-v4-conditional-canonicals',
     active: !!liveLeadProduct,
     lead_product: liveLeadProduct?.name || null,
     lead_price: liveLeadPrice || null,
