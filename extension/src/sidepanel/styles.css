@@ -2245,6 +2245,12 @@ select:focus-visible {
 }
 
 .pick-img-copy-copied {
+  background: var(--accent-hi);
+  color: #000;
+  border-color: var(--accent-hi);
+}
+
+.pick-img-copy-pasted {
   background: var(--success);
   color: #000;
   border-color: var(--success);

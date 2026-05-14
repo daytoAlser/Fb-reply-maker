@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import { copyImageToClipboard } from '../lib/clipboard.js';
 
 const TITLES = { quick: 'Quick', standard: 'Standard', detailed: 'Detailed' };
 
@@ -7,14 +6,10 @@ export default function VariantCard({ kind, text, attachImages }) {
   const [copied, setCopied] = useState(false);
   const [inserted, setInserted] = useState(null);
   const [isFiring, setIsFiring] = useState(false);
-  // imageCopyState[i] = 'idle' | 'pending' | 'copied' | 'err'
+  // imageCopyState[i] = 'idle' | 'pending' | 'pasted' | 'copied' | 'err'
   const [imageCopyState, setImageCopyState] = useState({});
-  // Indicates which image was just auto-copied during INSERT; drives the
-  // "Image 1 copied to clipboard — press Ctrl+V in the FB chat" hint.
-  const [autoCopiedIndex, setAutoCopiedIndex] = useState(null);
-  // Was the auto-paste accepted by FB on the last write? If true, we tell
-  // the rep the image attached automatically; if false, they need Ctrl+V.
-  const [autoPasted, setAutoPasted] = useState(false);
+  // Status banner state — set after INSERT runs the image attach chain.
+  const [attachSummary, setAttachSummary] = useState(null);
   const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
 
   const previewImages = Array.isArray(attachImages)
@@ -32,56 +27,47 @@ export default function VariantCard({ kind, text, attachImages }) {
     }
   }
 
-  async function copyImageByIndex(idx) {
+  // Per-thumbnail 📋 button. Routes through the content script's
+  // ATTACH_SINGLE_IMAGE handler so the clipboard write happens in the
+  // FB tab context (which is reliably focused). The side-panel-side
+  // clipboard write would fail with "Document is not focused" after
+  // the first paste shifted focus to FB.
+  function copyImageByIndex(idx) {
     const url = previewImages[idx];
-    if (!url) return { ok: false, reason: 'no_url' };
+    if (!url) return;
     setImageCopyState((prev) => ({ ...prev, [idx]: 'pending' }));
-    const res = await copyImageToClipboard(url);
-    if (res.ok) {
-      setImageCopyState((prev) => ({ ...prev, [idx]: 'copied' }));
-      setAutoCopiedIndex(idx);
-      // Tell the FB content script to focus the chat composer and try
-      // an auto-paste from clipboard. If execCommand('paste') cooperates,
-      // the image attaches automatically; if not, the box is at least
-      // focused for the rep to press Ctrl+V manually.
-      try {
-        chrome.runtime.sendMessage({ type: 'FOCUS_REPLY_BOX' }, (resp) => {
-          if (chrome.runtime.lastError) {
-            console.warn('[FB Reply Maker SP] FOCUS_REPLY_BOX failed:', chrome.runtime.lastError.message);
-            setAutoPasted(false);
-            return;
-          }
-          const pasted = !!(resp && resp.paste_accepted);
-          setAutoPasted(pasted);
-          console.log('[FB Reply Maker SP] focus+paste result:', resp);
-        });
-      } catch (err) {
-        console.warn('[FB Reply Maker SP] FOCUS_REPLY_BOX threw:', err);
-        setAutoPasted(false);
+    chrome.runtime.sendMessage({ type: 'ATTACH_SINGLE_IMAGE', url }, (res) => {
+      if (chrome.runtime.lastError || !res || !res.ok) {
+        console.warn('[FB Reply Maker SP] ATTACH_SINGLE_IMAGE failed:', chrome.runtime.lastError?.message || res?.reason);
+        setImageCopyState((prev) => ({ ...prev, [idx]: 'err' }));
+      } else if (res.pasted) {
+        setImageCopyState((prev) => ({ ...prev, [idx]: 'pasted' }));
+      } else {
+        // Clipboard was written but execCommand('paste') didn't land.
+        // The image is on the clipboard, FB chat is focused — rep can
+        // press Ctrl+V to finish.
+        setImageCopyState((prev) => ({ ...prev, [idx]: 'copied' }));
       }
       setTimeout(() => {
         setImageCopyState((prev) => ({ ...prev, [idx]: 'idle' }));
-      }, 2500);
-    } else {
-      console.warn('[FB Reply Maker SP] image clipboard write failed:', res.reason);
-      setImageCopyState((prev) => ({ ...prev, [idx]: 'err' }));
-      setTimeout(() => {
-        setImageCopyState((prev) => ({ ...prev, [idx]: 'idle' }));
-      }, 2000);
-    }
-    return res;
+      }, 3000);
+    });
   }
 
-  async function handleInsert() {
+  function handleInsert() {
     if (isFiring) return;
     setIsFiring(true);
     setTimeout(() => setIsFiring(false), 1000);
     setInserted('pending');
-    setAutoCopiedIndex(null);
+    setAttachSummary(null);
     try {
-      // Step 1: ask the content script to paste the text reply into the
-      // FB chat composer. skip_humanized: true → instant bulk insert.
-      chrome.runtime.sendMessage({ type: 'INSERT_REPLY', text, skip_humanized: true }, async (res) => {
+      // Send text + images together. The content script inserts the
+      // text, then runs the clipboard-and-paste chain for each image
+      // (fetch → PNG → clipboard.write → focus chat → execCommand
+      // paste → 800ms gap → next image). All clipboard work happens
+      // in the FB tab context where focus is reliable.
+      const images = previewImages.length > 0 ? previewImages : undefined;
+      chrome.runtime.sendMessage({ type: 'INSERT_REPLY', text, images, skip_humanized: true }, (res) => {
         if (chrome.runtime.lastError) {
           console.error('[FB Reply Maker SP] INSERT_REPLY failed:', chrome.runtime.lastError.message);
           setInserted('err');
@@ -95,24 +81,13 @@ export default function VariantCard({ kind, text, attachImages }) {
         }
         setInserted('ok');
 
-        // Step 2: copy + auto-paste the FIRST product image. FB blocks
-        // synthetic ClipboardEvent/drag-drop, but the content script's
-        // FOCUS_REPLY_BOX handler attempts document.execCommand('paste')
-        // which has been landing on FB Messenger's composer.
-        if (previewImages.length > 0) {
-          await copyImageByIndex(0);
-        }
-
-        // Step 3: if there's a second image, wait long enough for FB's
-        // composer to commit the first paste, then auto-copy + auto-paste
-        // image 2. The 700ms delay is empirical — too short and FB drops
-        // the second paste (still processing the first); 700ms is reliable.
-        // Extension contexts with clipboardWrite permission keep the
-        // user-gesture token alive long enough for this chained write.
-        if (previewImages.length > 1) {
-          setTimeout(async () => {
-            await copyImageByIndex(1);
-          }, 700);
+        // Summarize the attach chain so the rep knows which images
+        // landed and which need a manual Ctrl+V.
+        const attached = typeof res.imagesAttached === 'number' ? res.imagesAttached : 0;
+        const total = previewImages.length;
+        if (total > 0) {
+          setAttachSummary({ attached, total, results: res.imageAttachResults || [] });
+          setTimeout(() => setAttachSummary(null), 6000);
         }
 
         setTimeout(() => setInserted(null), 1500);
@@ -133,19 +108,18 @@ export default function VariantCard({ kind, text, attachImages }) {
   const cardClass = `variant-card${inserted === 'ok' ? ' variant-card-flash' : ''}`;
 
   const pasteHint = (() => {
-    if (autoCopiedIndex === null) return null;
-    const which = autoCopiedIndex + 1;
-    const total = previewImages.length;
-    if (autoPasted) {
-      // execCommand('paste') worked — image is already attached.
-      if (total === 1) return `Image attached automatically ✓`;
-      return `Image ${which}/${total} attached automatically ✓ — click the next 📋 below for the other.`;
+    if (!attachSummary) return null;
+    const { attached, total } = attachSummary;
+    if (total === 0) return null;
+    if (attached === total) {
+      return total === 1
+        ? 'Image attached automatically ✓'
+        : `Both images attached automatically ✓ — ready to send.`;
     }
-    // Auto-paste didn't land; chat is focused, rep presses Ctrl+V.
-    if (total === 1) {
-      return 'Image copied + chat focused. Press Ctrl+V to attach.';
+    if (attached > 0) {
+      return `${attached}/${total} attached automatically. The remaining ${total - attached} ${total - attached === 1 ? 'is' : 'are'} on the clipboard — click into FB chat and press Ctrl+V (or click 📋 below to retry).`;
     }
-    return `Image ${which}/${total} copied + chat focused. Press Ctrl+V. Then click the next 📋 below.`;
+    return `Clipboard loaded but FB didn't auto-paste. Click into the FB chat and press Ctrl+V, or click 📋 below to retry.`;
   })();
 
   return (
@@ -154,7 +128,7 @@ export default function VariantCard({ kind, text, attachImages }) {
         <span className="variant-title">{TITLES[kind] || kind}</span>
         <span className="variant-meta">
           {imgCount > 0 && (
-            <span className="variant-attach-chip" title={`Insert auto-copies image 1; use the 📋 button on each thumbnail to copy others to the clipboard. Paste into FB chat with Ctrl+V.`}>
+            <span className="variant-attach-chip" title={`Insert auto-attaches ${imgCount} product photo${imgCount > 1 ? 's' : ''} into the FB chat (fetches → clipboard → paste). 📋 buttons below re-copy any single image.`}>
               📎 {imgCount}
             </span>
           )}
@@ -165,13 +139,14 @@ export default function VariantCard({ kind, text, attachImages }) {
       {previewImages.length > 0 && (
         <div
           className="variant-image-preview"
-          aria-label={`${previewImages.length} product photo${previewImages.length > 1 ? 's' : ''} — click 📋 to copy to clipboard`}
+          aria-label={`${previewImages.length} product photo${previewImages.length > 1 ? 's' : ''} — Insert auto-attaches them`}
         >
           {previewImages.map((url, i) => {
             const state = imageCopyState[i] || 'idle';
             const btnLabel =
               state === 'pending' ? '…' :
-              state === 'copied' ? '✓ Copied' :
+              state === 'pasted' ? '✓ Attached' :
+              state === 'copied' ? '📋 On clipboard' :
               state === 'err' ? '⚠ Failed' :
               '📋 Copy';
             return (
@@ -181,14 +156,14 @@ export default function VariantCard({ kind, text, attachImages }) {
                   alt={`Recommended tire photo ${i + 1} of ${previewImages.length}`}
                   loading="lazy"
                   draggable
-                  title="📋 button puts this image on the clipboard — then Ctrl+V into the FB chat."
+                  title="Insert auto-attaches both photos. Use 📋 to re-copy a single image to the clipboard."
                 />
                 <button
                   type="button"
                   className={`pick-img-copy-btn pick-img-copy-${state}`}
                   onClick={() => copyImageByIndex(i)}
                   disabled={state === 'pending'}
-                  title={`Copy this image to clipboard, then Ctrl+V in the FB chat`}
+                  title="Copy + attempt auto-paste of this single image"
                 >
                   {btnLabel}
                 </button>

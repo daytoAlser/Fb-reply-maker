@@ -752,14 +752,93 @@ async function bulkInsertReply(text) {
   return { ok: true, method: 'execCommand' };
 }
 
-// Pastes one or more product images into the FB chat reply box by
-// fetching each URL as a blob, wrapping in a File, attaching to a
-// DataTransfer, and dispatching a synthetic ClipboardEvent('paste') on
-// the contenteditable. FB Messenger's compose handles paste events with
-// image clipboardData the same way as a real Ctrl+V on a screenshot.
+// Fetches an image URL and returns a PNG Blob. Run from the FB tab's
+// content script — host_permissions for canadacustomautoworks.com let
+// the extension fetch it without CORS issues. Chrome's clipboard prefers
+// PNG for image data; normalizing via OffscreenCanvas is the safest path.
+async function fetchAsPngBlobInCS(url) {
+  if (typeof url !== 'string' || !url) throw new Error('no_url');
+  const res = await fetch(url, { credentials: 'omit', mode: 'cors' });
+  if (!res.ok) throw new Error(`fetch ${res.status}`);
+  const srcBlob = await res.blob();
+  if (srcBlob.type === 'image/png') return srcBlob;
+  const bmp = await createImageBitmap(srcBlob);
+  const canvas = new OffscreenCanvas(bmp.width, bmp.height);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('no_canvas_2d_context');
+  ctx.drawImage(bmp, 0, 0);
+  return await canvas.convertToBlob({ type: 'image/png' });
+}
+
+// Activates the FB chat composer (focus + caret to end). Same synthetic
+// mouse activation pattern bulkInsertReply uses to wake React state.
+function activateReplyBox() {
+  const box = document.querySelector(SELECTORS.replyTextbox);
+  if (!box) return null;
+  try {
+    const rect = box.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    for (const type of ['mousedown', 'mouseup', 'click']) {
+      box.dispatchEvent(new MouseEvent(type, {
+        bubbles: true, cancelable: true, view: window,
+        clientX: x, clientY: y, button: 0
+      }));
+    }
+    box.focus();
+    const sel = window.getSelection();
+    const r = document.createRange();
+    r.selectNodeContents(box);
+    r.collapse(false);
+    sel.removeAllRanges();
+    sel.addRange(r);
+  } catch {}
+  return box;
+}
+
+// Copies ONE image URL to the system clipboard from the content script
+// context (FB tab is reliably focused, no side-panel focus juggling),
+// then activates the chat composer and attempts execCommand('paste').
 //
-// Returns { attached: number, errors: string[] }. Tolerates per-image
-// fetch failures (CORS, 404) — partial success still attaches what loaded.
+// Returns { ok, pasted, reason }. pasted=true means execCommand returned
+// true; the image is in the composer. pasted=false means the clipboard
+// IS loaded — the rep can finish with a manual Ctrl+V.
+async function copyAndPasteOneImage(url) {
+  try {
+    const pngBlob = await fetchAsPngBlobInCS(url);
+    if (typeof ClipboardItem === 'undefined') {
+      return { ok: false, reason: 'clipboard_item_unavailable' };
+    }
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })]);
+  } catch (err) {
+    return { ok: false, reason: err?.message || String(err) };
+  }
+  const box = activateReplyBox();
+  if (!box) return { ok: true, pasted: false, reason: 'no_textbox_for_paste' };
+  let pasted = false;
+  let pasteErr = null;
+  try { pasted = document.execCommand('paste'); }
+  catch (err) { pasteErr = err?.message || String(err); }
+  return { ok: true, pasted, paste_err: pasteErr, byteSize: pngBlob => undefined };
+}
+
+// Chains copy-and-paste across an array of URLs, with a delay between
+// each so FB's composer commits the previous attach before the next one
+// arrives. Returns per-image results. Run on the FB tab's content script.
+async function attachImagesViaClipboardChain(urls) {
+  const results = [];
+  for (let i = 0; i < urls.length; i++) {
+    const r = await copyAndPasteOneImage(urls[i]);
+    results.push(r);
+    if (i < urls.length - 1) await sleep(800);
+  }
+  return results;
+}
+
+// LEGACY synthetic-paste path. Kept around as documentation of why we
+// switched approaches but no longer called from INSERT_REPLY. FB rejects
+// synthetic ClipboardEvent('paste') with image clipboardData (event is
+// not trusted), so we moved to navigator.clipboard.write + execCommand.
 async function pasteImagesIntoReplyBox(urls) {
   const result = { attached: 0, errors: [] };
   if (!Array.isArray(urls) || urls.length === 0) return result;
@@ -1537,12 +1616,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         // same way it handles a real Ctrl+V on a clipboard image.
         if (imageUrls.length > 0 && !result.sent) {
           try {
-            const attached = await pasteImagesIntoReplyBox(imageUrls);
-            result.imagesAttached = attached.attached;
-            result.imageErrors = attached.errors;
-            console.log('[FB Reply Maker] images attached:', attached);
+            // Brief delay so the text insertion lands first — pasting an
+            // image into a box that's still committing text occasionally
+            // drops the paste on FB's React composer.
+            await sleep(150);
+            const attachResults = await attachImagesViaClipboardChain(imageUrls);
+            const pastedCount = attachResults.filter((r) => r && r.pasted).length;
+            result.imagesAttached = pastedCount;
+            result.imageAttachResults = attachResults;
+            console.log('[FB Reply Maker] images attached via clipboard chain:', {
+              total: imageUrls.length, pasted: pastedCount, details: attachResults
+            });
           } catch (err) {
-            console.warn('[FB Reply Maker] image attach failed:', err?.message || err);
+            console.warn('[FB Reply Maker] image attach chain failed:', err?.message || err);
             result.imageErrors = [err?.message || String(err)];
           }
         }
@@ -1553,6 +1639,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     })();
     return true;
   }
+  // Single-image attach driven by the side panel's 📋 button. Runs
+  // entirely in the content script (FB tab) so the clipboard write
+  // doesn't need the side panel to be focused. Used for manual
+  // re-copies after the auto-chain has finished.
+  if (msg?.type === 'ATTACH_SINGLE_IMAGE' && typeof msg.url === 'string') {
+    (async () => {
+      try {
+        const r = await copyAndPasteOneImage(msg.url);
+        sendResponse(r);
+      } catch (err) {
+        sendResponse({ ok: false, reason: err?.message || String(err) });
+      }
+    })();
+    return true;
+  }
+
   // Side panel writes an image to the system clipboard, then asks us
   // to put the FB chat composer in focus so the rep can Ctrl+V. As a
   // best-effort bonus, we also try document.execCommand('paste') — if

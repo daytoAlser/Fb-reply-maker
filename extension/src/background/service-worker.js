@@ -480,6 +480,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  // ATTACH_SINGLE_IMAGE — side panel asks the active FB tab to copy
+  // one image URL to clipboard from the FB tab's content-script context
+  // (where the tab is reliably focused) and attempt execCommand('paste').
+  // Used by the per-thumbnail 📋 button after the auto-chain runs.
+  if (msg?.type === 'ATTACH_SINGLE_IMAGE') {
+    (async () => {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab?.id) { sendResponse({ ok: false, reason: 'no_active_tab' }); return; }
+      try {
+        const res = await chrome.tabs.sendMessage(tab.id, {
+          type: 'ATTACH_SINGLE_IMAGE',
+          url: msg.url
+        });
+        sendResponse(res || { ok: false, reason: 'no_response' });
+      } catch (err) {
+        sendResponse({ ok: false, reason: err?.message || 'no_content_script' });
+      }
+    })();
+    return true;
+  }
+
   // FOCUS_REPLY_BOX — side panel asks the active FB tab to focus its
   // chat composer + attempt an auto-paste from clipboard. Used after
   // the side panel writes a product image to the clipboard so the rep
