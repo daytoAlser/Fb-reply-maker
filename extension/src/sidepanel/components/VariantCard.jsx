@@ -95,13 +95,24 @@ export default function VariantCard({ kind, text, attachImages }) {
         }
         setInserted('ok');
 
-        // Step 2: copy the FIRST product image onto the clipboard so
-        // the rep can paste it into FB with a real Ctrl+V. FB blocks
-        // synthetic ClipboardEvent/drag-drop, but a genuine user keypress
-        // pulls from the system clipboard fine. Second image is
-        // available via the per-thumbnail 📋 button.
+        // Step 2: copy + auto-paste the FIRST product image. FB blocks
+        // synthetic ClipboardEvent/drag-drop, but the content script's
+        // FOCUS_REPLY_BOX handler attempts document.execCommand('paste')
+        // which has been landing on FB Messenger's composer.
         if (previewImages.length > 0) {
           await copyImageByIndex(0);
+        }
+
+        // Step 3: if there's a second image, wait long enough for FB's
+        // composer to commit the first paste, then auto-copy + auto-paste
+        // image 2. The 700ms delay is empirical — too short and FB drops
+        // the second paste (still processing the first); 700ms is reliable.
+        // Extension contexts with clipboardWrite permission keep the
+        // user-gesture token alive long enough for this chained write.
+        if (previewImages.length > 1) {
+          setTimeout(async () => {
+            await copyImageByIndex(1);
+          }, 700);
         }
 
         setTimeout(() => setInserted(null), 1500);
