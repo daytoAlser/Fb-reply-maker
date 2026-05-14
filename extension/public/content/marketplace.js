@@ -1003,11 +1003,16 @@ async function tryInsertReply(text, opts) {
   const options = opts || {};
   const autoSend = !!options.auto_send;
   const threadHint = options.thread_id || null;
+  const bypassGuards = !!options.bypass_guards;
 
-  const guard = checkPreSendGuards({ text, threadHint });
-  if (!guard.ok) {
-    console.warn('[FB Reply Maker] pre-send guard:', guard.reason, guard);
-    return { ok: false, reason: guard.reason, guard: true };
+  if (!bypassGuards) {
+    const guard = checkPreSendGuards({ text, threadHint });
+    if (!guard.ok) {
+      console.warn('[FB Reply Maker] pre-send guard:', guard.reason, guard);
+      return { ok: false, reason: guard.reason, guard: true };
+    }
+  } else {
+    console.log('[FB Reply Maker] pre-send guards bypassed by caller');
   }
 
   const box = document.querySelector(SELECTORS.replyTextbox);
@@ -1658,7 +1663,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     const opts = {
       auto_send: !!msg.auto_send,
       thread_id: typeof msg.thread_id === 'string' ? msg.thread_id : null,
-      skip_humanized: !!msg.skip_humanized
+      skip_humanized: !!msg.skip_humanized,
+      bypass_guards: !!msg.bypass_guards
     };
     const imageUrls = Array.isArray(msg.images) ? msg.images.filter(Boolean) : [];
     console.log('[FB Reply Maker] INSERT_REPLY received', {

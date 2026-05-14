@@ -713,6 +713,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           auto_send: !!msg.auto_send,
           thread_id: typeof msg.thread_id === 'string' ? msg.thread_id : undefined,
           skip_humanized: !!msg.skip_humanized,
+          // Skip pre-send guards (duplicate_send detection, etc.). Used
+          // when the rep clicks "Insert anyway" after the side panel
+          // surfaces a guard failure they want to override.
+          bypass_guards: !!msg.bypass_guards,
           // Optional list of image URLs to paste alongside the text reply.
           // Content script fetches each, builds a DataTransfer of File
           // objects, and dispatches a synthetic paste event on FB's

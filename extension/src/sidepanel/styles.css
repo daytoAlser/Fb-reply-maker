@@ -2261,6 +2261,26 @@ select:focus-visible {
   border-color: var(--danger, #b14848);
 }
 
+/* Guard-failure banner — Insert blocked by checkPreSendGuards. Shows
+   the reason and offers an "Insert anyway" override. */
+.variant-guard-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.4;
+  color: #ffd9b0;
+  background: rgba(180, 90, 20, 0.12);
+  border: 1px solid #b96a23;
+  border-left: 2px solid #ff9a3c;
+  border-radius: var(--radius-sm, 4px);
+}
+.variant-guard-banner p { margin: 0; }
+.variant-guard-banner button { align-self: flex-start; }
+
 /* Hint banner shown after Insert auto-copies image 1 to clipboard. */
 .variant-paste-hint {
   margin: 0;

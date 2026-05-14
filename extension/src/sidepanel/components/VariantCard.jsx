@@ -10,6 +10,10 @@ export default function VariantCard({ kind, text, attachImages }) {
   const [imageCopyState, setImageCopyState] = useState({});
   // Status banner state — set after INSERT runs the image attach chain.
   const [attachSummary, setAttachSummary] = useState(null);
+  // Surfaces guard failures (duplicate_send, thread_url_drift, etc.) with
+  // an "Insert anyway" button so the rep can override without digging
+  // through dev consoles.
+  const [guardFailure, setGuardFailure] = useState(null);
   const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
 
   const previewImages = Array.isArray(attachImages)
@@ -54,20 +58,19 @@ export default function VariantCard({ kind, text, attachImages }) {
     });
   }
 
-  function handleInsert() {
+  function handleInsert(extraOpts) {
     if (isFiring) return;
+    const bypassGuards = !!(extraOpts && extraOpts.bypassGuards);
     setIsFiring(true);
     setTimeout(() => setIsFiring(false), 1000);
     setInserted('pending');
     setAttachSummary(null);
+    if (!bypassGuards) setGuardFailure(null);
     try {
-      // Send text + images together. The content script inserts the
-      // text, then runs the clipboard-and-paste chain for each image
-      // (fetch → PNG → clipboard.write → focus chat → execCommand
-      // paste → 800ms gap → next image). All clipboard work happens
-      // in the FB tab context where focus is reliable.
       const images = previewImages.length > 0 ? previewImages : undefined;
-      chrome.runtime.sendMessage({ type: 'INSERT_REPLY', text, images, skip_humanized: true }, (res) => {
+      const payload = { type: 'INSERT_REPLY', text, images, skip_humanized: true };
+      if (bypassGuards) payload.bypass_guards = true;
+      chrome.runtime.sendMessage(payload, (res) => {
         if (chrome.runtime.lastError) {
           console.error('[FB Reply Maker SP] INSERT_REPLY failed:', chrome.runtime.lastError.message);
           setInserted('err');
@@ -76,13 +79,17 @@ export default function VariantCard({ kind, text, attachImages }) {
         }
         if (!res?.ok) {
           setInserted('err');
+          // Guard failures are recoverable — surface them with an
+          // "Insert anyway" button so the rep can override.
+          if (res?.guard && res?.reason) {
+            setGuardFailure({ reason: res.reason, detail: res });
+          }
           setTimeout(() => setInserted(null), 1500);
           return;
         }
         setInserted('ok');
+        setGuardFailure(null);
 
-        // Summarize the attach chain so the rep knows which images
-        // landed and which need a manual Ctrl+V.
         const attached = typeof res.imagesAttached === 'number' ? res.imagesAttached : 0;
         const total = previewImages.length;
         if (total > 0) {
@@ -185,6 +192,32 @@ export default function VariantCard({ kind, text, attachImages }) {
               </div>
             );
           })}
+        </div>
+      )}
+      {guardFailure && (
+        <div className="variant-guard-banner" role="alert">
+          <p>
+            <strong>Insert blocked:</strong>{' '}
+            {guardFailure.reason === 'duplicate_send'
+              ? 'this exact text was already sent in this thread (FB Reply Maker’s duplicate-protection guard fired). Regenerate for a slightly different reply, or click Insert anyway below to override.'
+              : guardFailure.reason === 'thread_url_drift'
+                ? 'you switched threads since this variant was generated. Refresh and regenerate, or click Insert anyway.'
+                : guardFailure.reason === 'placeholder_leak'
+                  ? 'the reply still contains an unfilled placeholder. Edit it before inserting.'
+                  : guardFailure.reason === 'empty'
+                    ? 'the reply is empty.'
+                    : `pre-send guard fired: ${guardFailure.reason}`}
+          </p>
+          {guardFailure.reason !== 'placeholder_leak' && guardFailure.reason !== 'empty' && (
+            <button
+              type="button"
+              className="btn-mini"
+              onClick={() => handleInsert({ bypassGuards: true })}
+              disabled={isFiring}
+            >
+              Insert anyway
+            </button>
+          )}
         </div>
       )}
       {pasteHint && (
