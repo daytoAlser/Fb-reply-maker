@@ -812,30 +812,37 @@ function activateReplyBox() {
 // bar appears on the FB tab while the debugger is attached, then
 // disappears ~2.5s after the last Ctrl+V (auto-detach in SW).
 async function copyAndPasteOneImage(url) {
+  console.log('[FB Reply Maker] copyAndPasteOneImage starting for', url);
   try {
     const pngBlob = await fetchAsPngBlobInCS(url);
     if (typeof ClipboardItem === 'undefined') {
       return { ok: false, reason: 'clipboard_item_unavailable' };
     }
     await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })]);
+    console.log('[FB Reply Maker] clipboard.write OK, bytes=', pngBlob.size);
   } catch (err) {
+    console.warn('[FB Reply Maker] clipboard.write failed:', err?.message || err);
     return { ok: false, reason: err?.message || String(err) };
   }
   const box = activateReplyBox();
-  if (!box) return { ok: true, pasted: false, reason: 'no_textbox_for_paste' };
-  // Brief gap so FB's composer registers focus before the keypress lands.
+  if (!box) {
+    console.warn('[FB Reply Maker] activateReplyBox returned null — no textbox');
+    return { ok: true, pasted: false, reason: 'no_textbox_for_paste' };
+  }
+  console.log('[FB Reply Maker] composer activated; sending DISPATCH_CTRL_V to SW');
   await sleep(60);
-  // Ask the service worker to dispatch a trusted Ctrl+V on this tab.
   let pasted = false;
   let pasteErr = null;
   try {
     const resp = await chrome.runtime.sendMessage({ type: 'DISPATCH_CTRL_V' });
+    console.log('[FB Reply Maker] DISPATCH_CTRL_V response:', resp);
     if (resp && resp.ok) {
       pasted = true;
     } else {
       pasteErr = (resp && resp.reason) || 'no_response';
     }
   } catch (err) {
+    console.warn('[FB Reply Maker] DISPATCH_CTRL_V threw:', err?.message || err);
     pasteErr = err?.message || String(err);
   }
   return { ok: true, pasted, paste_err: pasteErr };
@@ -1662,7 +1669,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           }
         }
       } else {
-        console.warn('[FB Reply Maker] INSERT_REPLY failed:', result);
+        // Stringify the result so we can actually read it in the Errors
+        // panel / chrome://extensions error page (which collapses
+        // objects to "[object Object]" otherwise).
+        let resultStr;
+        try { resultStr = JSON.stringify(result); }
+        catch { resultStr = String(result); }
+        console.warn('[FB Reply Maker] INSERT_REPLY failed — reason:', resultStr);
       }
       sendResponse(result);
     })();

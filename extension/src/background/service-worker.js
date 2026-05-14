@@ -578,6 +578,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // and synthetic events fail.
   if (msg?.type === 'DISPATCH_CTRL_V') {
     (async () => {
+      console.log('[SW] DISPATCH_CTRL_V received, sender.tab.id=', sender?.tab?.id);
+      if (!chrome.debugger || typeof chrome.debugger.attach !== 'function') {
+        const reason = 'chrome.debugger API unavailable in this browser/profile. ' +
+          'Likely causes: the `debugger` permission was not granted on reload, ' +
+          'or an enterprise/managed-device policy is blocking the API.';
+        console.error('[SW]', reason);
+        sendResponse({ ok: false, reason });
+        return;
+      }
       let tabId = sender?.tab?.id;
       if (!tabId) {
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
