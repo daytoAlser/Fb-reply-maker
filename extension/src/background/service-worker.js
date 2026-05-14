@@ -372,6 +372,88 @@ async function maybeAutoGenerate({ threadId, payload }) {
 }
 
 // ============================================================
+// chrome.debugger — trusted Ctrl+V dispatcher
+// ============================================================
+//
+// FB Messenger's composer rejects synthetic ClipboardEvent('paste') and
+// document.execCommand('paste') is unreliable for image clipboard data.
+// chrome.debugger lets us dispatch a TRUSTED keyboard event (isTrusted:
+// true) via the Chrome DevTools Protocol, which the browser handles
+// exactly like a real Ctrl+V on physical hardware — and FB accepts it.
+//
+// Trade-off: Chrome shows a yellow "FB Reply Maker started debugging
+// this browser" bar at the top of the tab while the debugger is
+// attached. We auto-detach 2.5s after the last Ctrl+V request so the
+// bar disappears between INSERT clicks rather than staying permanent.
+
+let debuggerAttachedTabId = null;
+let debuggerDetachTimer = null;
+
+async function ensureDebuggerAttached(tabId) {
+  if (debuggerDetachTimer) {
+    clearTimeout(debuggerDetachTimer);
+    debuggerDetachTimer = null;
+  }
+  if (debuggerAttachedTabId === tabId) return;
+  if (debuggerAttachedTabId !== null && debuggerAttachedTabId !== tabId) {
+    try { await chrome.debugger.detach({ tabId: debuggerAttachedTabId }); } catch {}
+  }
+  await chrome.debugger.attach({ tabId }, '1.3');
+  debuggerAttachedTabId = tabId;
+}
+
+function scheduleDebuggerDetach() {
+  if (debuggerDetachTimer) clearTimeout(debuggerDetachTimer);
+  debuggerDetachTimer = setTimeout(async () => {
+    if (debuggerAttachedTabId !== null) {
+      try { await chrome.debugger.detach({ tabId: debuggerAttachedTabId }); } catch {}
+      debuggerAttachedTabId = null;
+    }
+    debuggerDetachTimer = null;
+  }, 2500);
+}
+
+// Mac uses Cmd+V; everything else Ctrl+V. CDP modifier flags:
+// Alt=1, Ctrl=2, Meta/Cmd=4, Shift=8.
+const IS_MAC = (() => {
+  try {
+    const ua = (typeof navigator !== 'undefined' && navigator.userAgent) || '';
+    const plat = (typeof navigator !== 'undefined' && navigator.platform) || '';
+    return /Mac/i.test(ua) || /Mac/i.test(plat);
+  } catch { return false; }
+})();
+const PASTE_MODIFIERS = IS_MAC ? 4 : 2;
+
+async function dispatchTrustedPaste(tabId) {
+  await ensureDebuggerAttached(tabId);
+  const keyArgs = {
+    modifiers: PASTE_MODIFIERS,
+    key: 'v',
+    code: 'KeyV',
+    windowsVirtualKeyCode: 86,
+    nativeVirtualKeyCode: 86,
+    isKeypad: false
+  };
+  await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', { type: 'keyDown', ...keyArgs });
+  await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', { type: 'keyUp', ...keyArgs });
+  scheduleDebuggerDetach();
+}
+
+// If the user closes the FB tab while the debugger is attached, clean
+// up our state — otherwise the next attach attempt may target a dead
+// tab id.
+chrome.debugger.onDetach.addListener((source, reason) => {
+  if (source.tabId === debuggerAttachedTabId) {
+    console.log('[SW] debugger detached:', { tabId: source.tabId, reason });
+    debuggerAttachedTabId = null;
+    if (debuggerDetachTimer) {
+      clearTimeout(debuggerDetachTimer);
+      debuggerDetachTimer = null;
+    }
+  }
+});
+
+// ============================================================
 // Message handlers
 // ============================================================
 
@@ -476,6 +558,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         source: msg.source
       });
       sendResponse(res);
+    })();
+    return true;
+  }
+
+  // DISPATCH_CTRL_V — content script (or side panel) asks us to fire a
+  // trusted Ctrl+V keypress on the FB tab via chrome.debugger. Used by
+  // the image-attach chain when clipboard.write has loaded an image and
+  // the chat composer is focused — the trusted keypress triggers the
+  // browser's native paste, which FB accepts even though execCommand
+  // and synthetic events fail.
+  if (msg?.type === 'DISPATCH_CTRL_V') {
+    (async () => {
+      let tabId = sender?.tab?.id;
+      if (!tabId) {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        tabId = tab?.id;
+      }
+      if (!tabId) { sendResponse({ ok: false, reason: 'no_tab' }); return; }
+      try {
+        await dispatchTrustedPaste(tabId);
+        sendResponse({ ok: true });
+      } catch (err) {
+        console.warn('[SW] dispatchTrustedPaste failed:', err?.message || err);
+        sendResponse({ ok: false, reason: err?.message || String(err) });
+      }
     })();
     return true;
   }

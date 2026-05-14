@@ -796,13 +796,16 @@ function activateReplyBox() {
   return box;
 }
 
-// Copies ONE image URL to the system clipboard from the content script
-// context (FB tab is reliably focused, no side-panel focus juggling),
-// then activates the chat composer and attempts execCommand('paste').
+// Copies ONE image URL to the system clipboard from the content script,
+// activates the chat composer, then asks the service worker to dispatch
+// a TRUSTED Ctrl+V via chrome.debugger. The trusted keypress triggers
+// the browser's native paste, which FB Messenger accepts (synthetic
+// paste events and execCommand are unreliable for image data).
 //
-// Returns { ok, pasted, reason }. pasted=true means execCommand returned
-// true; the image is in the composer. pasted=false means the clipboard
-// IS loaded — the rep can finish with a manual Ctrl+V.
+// Returns { ok, pasted, reason }. pasted=true means the trusted Ctrl+V
+// was dispatched successfully. The yellow "X is debugging this browser"
+// bar appears on the FB tab while the debugger is attached, then
+// disappears ~2.5s after the last Ctrl+V (auto-detach in SW).
 async function copyAndPasteOneImage(url) {
   try {
     const pngBlob = await fetchAsPngBlobInCS(url);
@@ -815,11 +818,22 @@ async function copyAndPasteOneImage(url) {
   }
   const box = activateReplyBox();
   if (!box) return { ok: true, pasted: false, reason: 'no_textbox_for_paste' };
+  // Brief gap so FB's composer registers focus before the keypress lands.
+  await sleep(60);
+  // Ask the service worker to dispatch a trusted Ctrl+V on this tab.
   let pasted = false;
   let pasteErr = null;
-  try { pasted = document.execCommand('paste'); }
-  catch (err) { pasteErr = err?.message || String(err); }
-  return { ok: true, pasted, paste_err: pasteErr, byteSize: pngBlob => undefined };
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: 'DISPATCH_CTRL_V' });
+    if (resp && resp.ok) {
+      pasted = true;
+    } else {
+      pasteErr = (resp && resp.reason) || 'no_response';
+    }
+  } catch (err) {
+    pasteErr = err?.message || String(err);
+  }
+  return { ok: true, pasted, paste_err: pasteErr };
 }
 
 // Chains copy-and-paste across an array of URLs. If an auto-paste lands,
