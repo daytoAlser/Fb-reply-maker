@@ -835,19 +835,23 @@ function activateReplyBox() {
 // disappears ~2.5s after the last Ctrl+V (auto-detach in SW).
 async function copyAndPasteOneImage(url) {
   swlog('copyAndPasteOneImage START url=' + url);
+  // 1. Ask SW to fetch the image and write it to the clipboard via
+  //    the offscreen document (which has the focus-check bypass).
+  let writeResp;
   try {
-    const pngBlob = await fetchAsPngBlobInCS(url);
-    swlog('fetch+png OK bytes=' + pngBlob.size + ' type=' + pngBlob.type);
-    if (typeof ClipboardItem === 'undefined') {
-      swlog('ABORT: ClipboardItem unavailable');
-      return { ok: false, reason: 'clipboard_item_unavailable' };
-    }
-    await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })]);
-    swlog('clipboard.write OK');
+    writeResp = await chrome.runtime.sendMessage({ type: 'WRITE_IMAGE_TO_CLIPBOARD', url });
   } catch (err) {
-    swlog('FAILED at fetch/png/clipboard.write: ' + (err?.message || err));
+    swlog('WRITE_IMAGE_TO_CLIPBOARD threw: ' + (err?.message || err));
     return { ok: false, reason: err?.message || String(err) };
   }
+  if (!writeResp || !writeResp.ok) {
+    const reason = (writeResp && writeResp.reason) || 'no_response';
+    swlog('WRITE_IMAGE_TO_CLIPBOARD failed: ' + reason);
+    return { ok: false, reason };
+  }
+  swlog('offscreen clipboard.write OK');
+  // 2. Activate FB compose box so the trusted Ctrl+V lands in the right
+  //    element. activateReplyBox does the synthetic mouse + focus dance.
   const box = activateReplyBox();
   if (!box) {
     swlog('FAILED: activateReplyBox returned null (no textbox)');
@@ -855,6 +859,7 @@ async function copyAndPasteOneImage(url) {
   }
   swlog('composer activated; sending DISPATCH_CTRL_V to SW');
   await sleep(60);
+  // 3. SW dispatches a trusted Ctrl+V via chrome.debugger.
   let pasted = false;
   let pasteErr = null;
   try {

@@ -3,7 +3,7 @@
   "name": "FB Reply Maker",
   "version": "1.0.0",
   "description": "AI reply assistant for FB Marketplace messages",
-  "permissions": ["storage", "sidePanel", "activeTab", "scripting", "clipboardWrite", "clipboardRead", "debugger"],
+  "permissions": ["storage", "sidePanel", "activeTab", "scripting", "clipboardWrite", "clipboardRead", "debugger", "offscreen"],
   "host_permissions": [
     "https://*.facebook.com/*",
     "https://*.messenger.com/*",

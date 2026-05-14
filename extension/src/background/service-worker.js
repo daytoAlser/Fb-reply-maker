@@ -372,6 +372,80 @@ async function maybeAutoGenerate({ threadId, payload }) {
 }
 
 // ============================================================
+// chrome.offscreen — clipboard writer
+// ============================================================
+//
+// navigator.clipboard.write requires the calling document to be focused.
+// Side-panel and content-script contexts both lose focus to/from each
+// other during the INSERT flow, so neither can reliably write images.
+// Chrome's documented workaround: an offscreen document created with
+// reason: 'CLIPBOARD' gets a focus-check bypass specifically for
+// extension clipboard operations.
+
+const OFFSCREEN_PATH = 'offscreen.html';
+let offscreenReady = null; // Promise that resolves when the offscreen doc exists
+
+async function ensureOffscreenDocument() {
+  if (offscreenReady) return offscreenReady;
+  offscreenReady = (async () => {
+    if (!chrome.offscreen || !chrome.offscreen.createDocument) {
+      throw new Error('chrome.offscreen API unavailable (Chrome <117?)');
+    }
+    // Check if it already exists (SW can restart).
+    if (chrome.offscreen.hasDocument) {
+      const has = await chrome.offscreen.hasDocument();
+      if (has) return;
+    } else {
+      // Older API fallback — try createDocument and ignore "already exists".
+    }
+    try {
+      await chrome.offscreen.createDocument({
+        url: OFFSCREEN_PATH,
+        reasons: ['CLIPBOARD'],
+        justification: 'Write product images to the system clipboard for FB Marketplace replies (focus-check bypass).'
+      });
+    } catch (err) {
+      const msg = err?.message || String(err);
+      if (!/single offscreen document|already (exists|has)/i.test(msg)) throw err;
+    }
+  })();
+  try {
+    await offscreenReady;
+  } catch (err) {
+    offscreenReady = null; // allow retry
+    throw err;
+  }
+  return offscreenReady;
+}
+
+// Fetches an image URL and writes it to the system clipboard via the
+// offscreen document. SW host_permissions bypass CORS for the fetch;
+// offscreen reason:'CLIPBOARD' bypasses the focus check for the write.
+async function fetchAndWriteImageToClipboard(url) {
+  const res = await fetch(url, { credentials: 'omit' });
+  if (!res.ok) throw new Error(`fetch ${res.status}`);
+  const blob = await res.blob();
+  const buf = await blob.arrayBuffer();
+  let binary = '';
+  const bytes = new Uint8Array(buf);
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  const base64 = btoa(binary);
+  await ensureOffscreenDocument();
+  const resp = await chrome.runtime.sendMessage({
+    type: 'OFFSCREEN_WRITE_IMAGE',
+    base64,
+    mime: blob.type || 'image/jpeg'
+  });
+  if (!resp || !resp.ok) {
+    throw new Error('offscreen write failed: ' + (resp && resp.reason ? resp.reason : 'no_response'));
+  }
+  return resp;
+}
+
+// ============================================================
 // chrome.debugger — trusted Ctrl+V dispatcher
 // ============================================================
 //
@@ -576,6 +650,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // the chat composer is focused — the trusted keypress triggers the
   // browser's native paste, which FB accepts even though execCommand
   // and synthetic events fail.
+  // WRITE_IMAGE_TO_CLIPBOARD — content script asks the SW to fetch the
+  // image URL and write the bytes to the system clipboard via the
+  // offscreen document. This is the focus-immune path: the offscreen
+  // doc with reason: 'CLIPBOARD' bypasses the "Document is not focused"
+  // check that breaks side-panel and FB-tab CS clipboard.write attempts.
+  if (msg?.type === 'WRITE_IMAGE_TO_CLIPBOARD' && typeof msg.url === 'string') {
+    (async () => {
+      console.log('[SW] WRITE_IMAGE_TO_CLIPBOARD url=', msg.url);
+      try {
+        const resp = await fetchAndWriteImageToClipboard(msg.url);
+        console.log('[SW] WRITE_IMAGE_TO_CLIPBOARD OK bytes=', resp?.byteSize);
+        sendResponse({ ok: true, byteSize: resp?.byteSize });
+      } catch (err) {
+        console.warn('[SW] WRITE_IMAGE_TO_CLIPBOARD failed:', err?.message || err);
+        sendResponse({ ok: false, reason: err?.message || String(err) });
+      }
+    })();
+    return true;
+  }
+
   // LOG_FROM_CS — content scripts can't easily surface logs to the user
   // (FB tab DevTools conflicts with chrome.debugger). Streaming key
   // diagnostic lines through the SW means we see the full trace in
