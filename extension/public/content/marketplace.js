@@ -1687,12 +1687,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         // succeeded. Pasted via a synthetic paste event with a DataTransfer
         // containing image File objects — FB Messenger handles this the
         // same way it handles a real Ctrl+V on a clipboard image.
-        if (imageUrls.length > 0 && !result.sent) {
+        // NOTE: The image-attach chain used to run here. It's been moved
+        // to the side panel because navigator.clipboard.write requires
+        // document focus AT CALL TIME — and the side panel has focus
+        // synchronously inside its own click handler. By contrast the
+        // content script never has focus when called via runtime message
+        // from the side panel, so every CS-side clipboard.write was
+        // rejected. The side panel now pre-loads blobs on render and
+        // calls clipboard.write synchronously, then asks the SW to fire
+        // a trusted Ctrl+V via chrome.debugger.
+        if (false && imageUrls.length > 0 && !result.sent) {
           try {
             swlog('starting image chain count=' + imageUrls.length);
-            // Brief delay so the text insertion lands first — pasting an
-            // image into a box that's still committing text occasionally
-            // drops the paste on FB's React composer.
             await sleep(150);
             const attachResults = await attachImagesViaClipboardChain(imageUrls);
             swlog('chain finished results=' + JSON.stringify(attachResults));
