@@ -588,8 +588,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await dispatchTrustedPaste(tabId);
         sendResponse({ ok: true });
       } catch (err) {
-        console.warn('[SW] dispatchTrustedPaste failed:', err?.message || err);
-        sendResponse({ ok: false, reason: err?.message || String(err) });
+        const raw = err?.message || String(err);
+        console.warn('[SW] dispatchTrustedPaste failed:', raw);
+        // The most common failure cause: DevTools is open on the FB tab,
+        // which is already holding the only debugger-attach slot. Map
+        // Chrome's terse error into something actionable in the UI.
+        let friendly = raw;
+        if (/another debugger is already attached|cannot access a chrome|devtools/i.test(raw)) {
+          friendly = 'DevTools is open on the FB tab — close it (F12) and try again. Chrome only allows one debugger per tab.';
+        } else if (/no tab with given id/i.test(raw)) {
+          friendly = 'FB tab not found (was it closed?). Re-open the chat and try again.';
+        }
+        sendResponse({ ok: false, reason: friendly, raw });
       }
     })();
     return true;
