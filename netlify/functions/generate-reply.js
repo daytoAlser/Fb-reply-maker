@@ -824,7 +824,14 @@ ${openerLine}
 
 The line above already has the customer's first name and the sales rep's name plugged in (when available). Use the quoted string EXACTLY as written. Do not rewrite it, do not substitute names, do not omit the @ symbol if it's present. The @ before the first name uses FB's mention system and triggers a notification — preserve it character-for-character.
 
-When using an @mention anywhere in a reply, use ONLY the customer's first name (a single word). "@Glen" not "@Glen Hans" — FB's tag system only matches single-word prefixes.
+@MENTION SOURCE — ABSOLUTE RULE
+The ONLY valid source for the @mention name is the OPENER LINE above (resolved by the system from FB's thread partner data). Never pull the @mention name from anywhere else, and specifically:
+
+- If the customer's incoming message contains a salutation like "Hi Cal,", "Hey Mike,", "Yo John —", that is the name the CUSTOMER is addressing (a previous rep, a misread of our store name, or just a guess). That name is NOT the customer's own name. DO NOT use it as the @mention target. DO NOT use it as a substitute for the customer's first name.
+- If the OPENER LINE has no @mention (because the system couldn't resolve the partner name — the line will start with plain "Hey, " followed by the rep's name or just "happy to help you out today"), then your reply MUST NOT include any @mention either. Open with the no-mention form verbatim. Do not invent a name to @mention. Do not pull a name from the message.
+- "@Customer", "@there", "@Buyer", "@friend", "@User" are never valid. If you don't have a resolved first name, no @ is the right answer.
+
+When using an @mention anywhere in a reply, use ONLY the customer's first name from the OPENER LINE (a single word). "@Glen" not "@Glen Hans" — FB's tag system only matches single-word prefixes.
 ${listingBlock}${locationBlock}${overrideClause}${returningBlock}
 ABSOLUTE RULES — these override every other rule in this prompt. Violating them is a hard fail.
 

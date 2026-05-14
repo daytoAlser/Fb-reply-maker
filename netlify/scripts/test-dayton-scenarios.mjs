@@ -77,6 +77,32 @@ const scenarios = {
       conversation_history: []
     }
   },
+  'rhean-salutation': {
+    label: 'Rhean (partnerName=Rhean, message addresses "Cal")',
+    expect: 'reply MUST @mention Rhean (or no @ if not resolved), NEVER @Cal',
+    body: {
+      message: 'Hi Cal, do you have deals for wheels and tires set plus install? Thanks',
+      context: 'FB Marketplace inquiry. Customer Rhean is addressing "Cal" (probably a previous rep or store guess).',
+      partnerName: 'Rhean',
+      userName: 'Dayton',
+      listingTitle: 'NEW!!! MATTE BRONZE + BLACK WHEELS 18x8 INCH Multi-Spoke rims!! ONLY $990/SET - $990 Calgary',
+      location: 'Calgary',
+      conversation_history: []
+    }
+  },
+  'unknown-partner': {
+    label: 'Unknown partner (partnerName=null, message addresses "Cal")',
+    expect: 'reply MUST NOT have any @mention. No @Cal, no @there, no @Customer.',
+    body: {
+      message: 'Hi Cal, do you have deals for wheels and tires set plus install? Thanks',
+      context: 'FB Marketplace inquiry. Extension failed to extract partner name.',
+      partnerName: null,
+      userName: 'Dayton',
+      listingTitle: 'NEW!!! MATTE BRONZE + BLACK WHEELS 18x8 INCH Multi-Spoke rims!! ONLY $990/SET',
+      location: 'Calgary',
+      conversation_history: []
+    }
+  },
   'tanya-turn2': {
     label: 'Tanya turn 2 (size + personal context drop)',
     expect: 'should reach for personal-context timing hook (birthday) and/or confirm-and-extend on size',
