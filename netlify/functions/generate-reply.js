@@ -705,11 +705,45 @@ function buildInventoryBlock(inv) {
     : '';
 
   // PRIMARY PICK rule — when auto_primary is set, all variants lead with
-  // this product by name. This is the ready-to-go path: in stock, season-
-  // appropriate, house brand preferred.
+  // this product by name. This OVERRIDES the canonical "I'll pull options"
+  // pattern hardcoded in THE STANDARD FLOW (lines ~1105-1118, 1511-1518),
+  // which exists for when no live inventory is available. We have live
+  // inventory — the option is named, priced, in stock RIGHT NOW.
   const primary = inv.auto_primary || null;
+  const primaryPrice = primary && (primary.priceFormatted || (primary.price ? `$${primary.price.toFixed(2)}` : ''));
+  const primaryIsHouse = primary && /\bilink\b/i.test(primary.brand || '');
   const primaryRule = primary
-    ? `\n- ⭐ PRIMARY PICK (auto-selected: in stock locally + season-appropriate + ${/\bilink\b/i.test(primary.brand || '') ? 'house brand' : 'best fit'}): ${primary.name}${primary.priceFormatted ? ` — ${primary.priceFormatted}` : ''}. ALL THREE VARIANTS MUST LEAD WITH THIS PRODUCT BY NAME. Do not hedge with "let me pull some options" — the option is right here, named, in stock, ready to ship. Anchor the sticker price in one variant (any of quick/standard/detailed). Use the availability framing from the line above. The rep can click a different pick if they want to override; otherwise this is the recommendation.`
+    ? `
+
+⭐ PRIMARY PICK — REPLACES THE CANONICAL "PULLING OPTIONS" FRAMING THIS TURN
+Auto-selected: ${primary.name}${primaryPrice ? ` — ${primaryPrice}` : ''} (in stock locally${homeName ? ` at ${homeName}` : ''} + season-appropriate${primaryIsHouse ? ' + house brand' : ''}).
+
+This block OVERRIDES the canonical "I'll pull a few options / shoot the pics + pricing in a sec" framing elsewhere in THE STANDARD FLOW. That framing exists for when no live inventory is available. We DO have live inventory this turn — the option is named, priced, and in stock. Use it directly.
+
+ALL THREE VARIANTS MUST INCLUDE ALL OF:
+1. Short acknowledgment of the customer's stated preference (e.g. "all-seasons are a solid call", "snowflake-rated for year-round is the move", "for daily on the CR-V that's the right call").
+2. The PRIMARY PICK named explicitly by full product name: "${primary.name}".
+3. Size confirmation: "${inv.fired_from_size}".
+4. ONE short feature or reason that fits the customer's use case — pull from your general tire knowledge: 3PMS rating, tread pattern type (directional/symmetric/asymmetric), warranty length, ride feel, treadwear, what kind of driving it's calibrated for. ONE phrase, not a paragraph.
+5. The sticker price anchor: "${primaryPrice || '(no price on file)'} each" or "${primaryPrice ? primaryPrice + '/tire' : '(no price on file)'}". This is the ONE price you may quote — total package pricing still stays in the phone-then-estimate punt for later.
+6. A soft CTA (e.g. "want me to put a quote together for the set?", "wanna lock it in?", "good to roll on those?").
+
+PROHIBITED PHRASES THIS TURN (these are the canonical hedges the live inventory eliminates):
+- "I'll pull a few options" / "I'll pull a couple of options" / "let me pull options"
+- "let me grab a couple"
+- "shoot the pics + pricing right here in a sec"
+- "send the pics and pricing right here in the chat"
+- "pulling options for ya" / "pulling some options"
+- "in a sec so you can see what we're working with"
+- "let me see what fits" / "let me find some options"
+- Any phrasing that defers the recommendation to a later message — the recommendation IS this message.
+
+EXAMPLE STRUCTURE (Dayton voice — adapt phrasing, do NOT copy verbatim):
+${primaryIsHouse
+  ? `"Perfect, all-seasons are a solid call for the ${inv.fired_from_size.includes('R18') || inv.fired_from_size.includes('R20') ? 'CR-V' : 'rig'}. We've got the ${primary.name.split(' ').slice(0, 4).join(' ')} in ${inv.fired_from_size} — 3PMS-rated touring all-season, smooth ride for daily, ${primaryPrice} each ready to rock. Wanna lock it in?"`
+  : `"For sure, the ${primary.name.split(' ').slice(0, 4).join(' ')} is a solid pick. We've got it in ${inv.fired_from_size}, ${primaryPrice} each. Wanna lock it in?"`}
+
+The rep can click a different inventory pick to override this auto-selection. Otherwise: this IS the recommendation.`
     : '';
 
   // Brand-requested + zero matches -> honest punt + house fallback.
@@ -801,9 +835,10 @@ function buildFocusedRecommendationBlock(focus) {
   const winterRule = focus.winterOnly
     ? '\n- THIS IS A WINTER-ONLY TIRE. Frame it explicitly for winter use ("for the winter set this is the move", "if you\'re running a dedicated winter setup"). Do NOT pitch it as a year-round / all-season option. If the customer hasn\'t said they want dedicated winters, briefly call out that this is a winter-only choice so they know what they\'re getting.'
     : '';
+  const shortName = focus.name.split(' ').slice(0, 4).join(' ');
   return `
-FOCUSED RECOMMENDATION (rep clicked this product — write all 3 variants centered on it)
-The rep selected this specific product from the live inventory picks. All variants must recommend it by name and frame it positively.
+FOCUSED RECOMMENDATION — REPLACES THE CANONICAL "PULLING OPTIONS" FRAMING THIS TURN
+The rep clicked this specific product from the live inventory picks. All three variants must recommend it by name with the sticker price and a brief reason.
 
 Product: ${focus.name}${winterTag}
 Brand: ${focus.brand || '(not parsed)'}
@@ -811,15 +846,29 @@ Sticker: ${price}
 Availability framing to use: ${framing}
 Product URL (for reference, do NOT paste into reply): ${focus.url || '(none)'}
 
-HARD RULES (this turn — OVERRIDES iLink-first / qualifier-first / category defaults):
-- Lead each variant with this product by name. The rep has already made the pick; you are writing the customer-facing pitch.
-- Quick: one short line naming the product + sticker anchor + availability framing + soft CTA.
-- Standard: 2–3 sentences naming the product, giving ONE specific reason it fits the customer's stated context (use case, vehicle type, tire type they mentioned).
-- Detailed: 3–4 sentences with rationale + soft fit-confirmation question or next-step CTA.${winterRule}
+This block OVERRIDES the canonical "I'll pull a few options / shoot the pics + pricing in a sec" framing elsewhere in THE STANDARD FLOW. The rep already picked the product — write the customer-facing pitch directly.
+
+ALL THREE VARIANTS MUST INCLUDE ALL OF:
+1. Short acknowledgment of the customer's stated preference (one phrase).
+2. The PRODUCT named explicitly by full product name: "${focus.name}".
+3. ONE short feature or reason that fits — pull from your tire knowledge (3PMS rating, tread pattern, warranty, ride feel, treadwear). ONE phrase.
+4. The sticker price anchor: "${price} each" or "${price}/tire". This is the ONE price you may quote — total package pricing still stays in the phone-then-estimate punt for later.
+5. A soft CTA ("wanna lock it in?", "want me to put a quote together for the set?", "good to roll on those?").${winterRule}
+
+PROHIBITED PHRASES THIS TURN:
+- "I'll pull a few options" / "let me pull options"
+- "let me grab a couple"
+- "shoot the pics + pricing right here in a sec"
+- "send the pics and pricing right here in the chat"
+- "pulling options for ya"
+- Any phrasing that defers the recommendation to a later message.
+
+EXAMPLE STRUCTURE (Dayton voice — adapt phrasing, do NOT copy verbatim):
+"For sure, the ${shortName} is a solid pick. Smooth ride, ${price} each, ${framing}. Wanna lock it in?"
+
 - Do NOT reference other inventory items this turn. Single-product focus.
 - Do NOT push iLink as an alternative even if this is NOT iLink — the rep has chosen this product on purpose.
-- Use the availability framing above ("ready to rock" / "we can get those for ya"). NEVER say "in stock" or pin to a specific location — ABSOLUTE RULE D2 still applies.
-- Do NOT quote totals in chat. The sticker is one data point ("the ${focus.name.split(' ').slice(0, 3).join(' ')} runs ${price} ea"). Full package pricing stays in the phone-then-estimate punt.
+- Use the availability framing above. NEVER say "in stock" or pin to a specific location — ABSOLUTE RULE D2 still applies.
 - Stay in Dayton voice. Casual, "we got you", soft close.
 `;
 }
