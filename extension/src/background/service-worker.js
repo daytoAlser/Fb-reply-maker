@@ -476,6 +476,19 @@ async function ensureDebuggerAttached(tabId) {
     console.log('[SW] detaching debugger from previous tab', debuggerAttachedTabId);
     try { await chrome.debugger.detach({ tabId: debuggerAttachedTabId }); } catch {}
   }
+  // ALWAYS try a detach on the target tab first. If the SW restarted
+  // between INSERT clicks, our in-memory debuggerAttachedTabId reset
+  // to null but Chrome may still hold the actual debugger session open
+  // from our previous attach — the next attach() call would then fail
+  // with "Another debugger is already attached". chrome.debugger.detach
+  // succeeds when we have a stale session and is a harmless no-op
+  // (throws synchronously) when we don't.
+  try {
+    await chrome.debugger.detach({ tabId });
+    console.log('[SW] cleared stale debugger session on tab', tabId);
+  } catch (err) {
+    // Expected when we genuinely weren't attached. Ignore.
+  }
   console.log('[SW] attempting chrome.debugger.attach on tab', tabId);
   await chrome.debugger.attach({ tabId }, '1.3');
   console.log('[SW] debugger ATTACHED to tab', tabId, '— yellow bar should be visible');
@@ -740,8 +753,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // which is already holding the only debugger-attach slot. Map
         // Chrome's terse error into something actionable in the UI.
         let friendly = raw;
-        if (/another debugger is already attached|cannot access a chrome|devtools/i.test(raw)) {
-          friendly = 'DevTools is open on the FB tab — close it (F12) and try again. Chrome only allows one debugger per tab.';
+        if (/another debugger is already attached/i.test(raw)) {
+          friendly = 'Another debugger is attached to the FB tab. Possible causes: (1) DevTools is open on the FB tab — close it (F12). (2) Another extension with debugger access (e.g., Puppeteer Recorder, React DevTools standalone) — disable it. (3) A stale session from this extension — try reloading the extension at chrome://extensions.';
+        } else if (/cannot access a chrome|devtools/i.test(raw)) {
+          friendly = 'DevTools is open on the FB tab — close it (F12) and try again.';
         } else if (/no tab with given id/i.test(raw)) {
           friendly = 'FB tab not found (was it closed?). Re-open the chat and try again.';
         }
