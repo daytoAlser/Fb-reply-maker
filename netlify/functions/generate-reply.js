@@ -10,6 +10,8 @@ import { detectWrongProduct } from './lib/interpretation/wrongProduct.js';
 // Phase E.7 — financing-mode detection + deterministic FAQ.
 import { detectFinancingMode } from './lib/interpretation/financing.js';
 import { FINANCING_FAQ } from './lib/data/financing-faq.js';
+// Live inventory lookup — fires when a tire size is in play.
+import { lookupInventory } from './lib/interpretation/inventoryLookup.js';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -639,6 +641,112 @@ TIE-IN:
 `;
 }
 
+// LIVE INVENTORY CONTEXT prompt block. Emitted when lookupInventory()
+// returns triggered:true. Surfaces ranked iLink + optional brand-requested
+// matches from the live CCAW catalog so the LLM can name real products
+// with real prices and real stock framing — no invented SKUs.
+//
+// Three layouts:
+//   - brand_requested === null         -> iLink-led, with OTHER picks
+//   - brand_requested set + matches    -> side-by-side REQUESTED + HOUSE
+//   - brand_requested set + 0 matches  -> zero-match honest punt + HOUSE fallback
+function buildInventoryBlock(inv) {
+  if (!inv || !inv.triggered) return '';
+  const ilink = Array.isArray(inv.ilink_items) ? inv.ilink_items : [];
+  const requested = Array.isArray(inv.brand_requested_items) ? inv.brand_requested_items : [];
+  const other = Array.isArray(inv.other_items) ? inv.other_items : [];
+  const totals = inv.totals || {};
+  const homeShort = inv.home_location_short || null;
+  const homeName = inv.home_location || (homeShort ? homeShort : null);
+
+  let idx = 0;
+  const renderItem = (it) => {
+    idx += 1;
+    const priceStr = it.priceFormatted || (it.price ? `$${it.price.toFixed(2)}` : '(no price)');
+    const homeQty = it.homeStock ? it.homeStock.qty : 0;
+    const homeLabel = it.homeStock ? it.homeStock.name : (homeName || 'home store');
+    const framing = it.availabilityFraming === 'ready_to_rock'
+      ? 'ready to rock'
+      : it.availabilityFraming === 'we_can_get_those'
+        ? 'we can get those for ya'
+        : null;
+    const framingTag = framing ? ` (${framing})` : '';
+    const totalStock = typeof it.totalStock === 'number' ? it.totalStock : 0;
+    const external = typeof it.external === 'number' ? it.external : 0;
+    const networkParts = [`Network: ${totalStock}`];
+    if (external > 0) networkParts.push(`Warehouse: ${external}`);
+    const homeLine = `    ${homeLabel}: ${homeQty}${framingTag} · ${networkParts.join(' · ')}`;
+    const urlLine = it.url ? `\n    ${it.url}` : '';
+    return `[${idx}] ${it.name} — ${priceStr}\n${homeLine}${urlLine}`;
+  };
+
+  // Brand-requested + zero matches -> honest punt + house fallback.
+  if (inv.brand_requested && requested.length === 0) {
+    const houseSection = ilink.length
+      ? `\n\n[HOUSE — iLink]\n${ilink.map(renderItem).join('\n')}`
+      : '';
+    return `
+LIVE INVENTORY CONTEXT — BRAND-REQUESTED HAS ZERO MATCHES
+
+Customer asked about ${inv.brand_requested} in ${inv.fired_from_size}. We have 0 ${inv.brand_requested} matches in that size right now.${ilink.length ? ' House alternative available:' : ''}${houseSection}
+
+HARD RULES (this turn):
+- Be honest: "we don't have ${inv.brand_requested} in that size right now". Do NOT pretend we do.
+- Offer iLink as a value-tier alternative ONLY if the customer's tone suggests they're open ("anything close?", "what do you have?"). If they explicitly want ${inv.brand_requested}, punt to "let me see what we can pull in" voice — don't force the alternative.
+- Use the availability framing from each item ("ready to rock" / "we can get those for ya"). NEVER say "in stock" or pin to a specific location — ABSOLUTE RULE D2 still applies.
+- Do NOT invent ${inv.brand_requested} SKUs / prices / stock claims.
+`;
+  }
+
+  // Brand-requested + matches -> side-by-side.
+  if (inv.brand_requested) {
+    const requestedSection = `[REQUESTED — ${inv.brand_requested}]\n${requested.map(renderItem).join('\n')}`;
+    const houseSection = ilink.length
+      ? `\n\n[HOUSE — iLink]\n${ilink.map(renderItem).join('\n')}`
+      : '';
+    return `
+LIVE INVENTORY CONTEXT — BRAND-REQUESTED + HOUSE OPTIONS SIDE-BY-SIDE
+
+Customer asked about ${inv.brand_requested} in ${inv.fired_from_size}. Showing both the requested brand AND our house option so you can pick what fits the customer's tone.
+Source: ${inv.source} · Query: "${inv.query}" · Found ${totals.matched || 0} matches total (${totals.brand_requested || 0} ${inv.brand_requested}, ${totals.ilink || 0} iLink).
+
+${requestedSection}${houseSection}
+
+HARD RULES (this turn):
+- Customer named ${inv.brand_requested}. Lead with the ${inv.brand_requested} options. Do NOT push iLink as a default — the iLink block is here ONLY so you can mention it as a value alternative if the customer's tone is price-sensitive ("anything close?", "what do you have under $X?", explicit budget mention).
+- If you reference a specific product in your reply, it MUST be one of the items above. Do NOT invent SKUs, model names, prices, or stock claims.
+- Use the availability framing from each item ("ready to rock" / "we can get those for ya"). NEVER say "in stock" or pin to a specific location — ABSOLUTE RULE D2 still applies.
+- Do NOT quote totals in chat. You may anchor ONE sticker price by product ("the ${inv.brand_requested} Open Country is $324 ea") as a single data point. Full package pricing stays in the phone-then-estimate punt.
+- Reference at most 1–2 products by name. The full catalog is the rep's tool, not the reply text.
+- Stay in qualifier-first voice. If qualifiers are still missing for this product, this block is BACKGROUND knowledge — finish qualifying before naming products by sticker.
+`;
+  }
+
+  // No brand named -> iLink-led with OTHER picks.
+  const houseSection = ilink.length
+    ? `[HOUSE — iLink]\n${ilink.map(renderItem).join('\n')}`
+    : '';
+  const otherSection = other.length
+    ? `\n\n[OTHER]\n${other.map(renderItem).join('\n')}`
+    : '';
+  return `
+LIVE INVENTORY CONTEXT (real-time CCAW catalog lookup — products physically available right now; use as SOURCE OF TRUTH if you reference specific tires)
+
+Query: "${inv.query}" · iLink prioritized (customer did not name a brand) · Source: ${inv.source}
+Found ${totals.matched || 0} matches total (${totals.ilink || 0} iLink, ${totals.other || 0} other brands). Top picks:
+
+${houseSection}${otherSection}
+
+HARD RULES (this turn):
+- If you reference a specific product in your reply, it MUST be one of the items above. Do NOT invent SKUs, model names, prices, or stock claims.
+- iLink is our house brand and default value tier. Since the customer did not name a brand, lead with iLink unless the conversation strongly signals a premium tier (off-road, hard use, "I want the best", etc.).
+- Use the availability framing from each item ("ready to rock" / "we can get those for ya"). NEVER say "in stock" or pin to a specific location — ABSOLUTE RULE D2 still applies.
+- Do NOT quote totals in chat. You may anchor ONE sticker price by product ("the iLink MultiMatch is $189 ea") as a single data point. Full package pricing stays in the phone-then-estimate punt.
+- Reference at most 1–2 products by name. The full catalog is the rep's tool, not the reply text.
+- Stay in qualifier-first voice. If qualifiers are still missing for this product, this block is BACKGROUND knowledge — finish qualifying before naming products by sticker.
+`;
+}
+
 // Phase E.4 — WRONG-PRODUCT REDIRECT prompt block. Per-turn override.
 // Takes priority over E.3 advisor mode (caller suppresses decisionSupport
 // when wrongProduct fires). Coexists with RETURNING (body of message
@@ -796,7 +904,7 @@ ENDING:
 `;
 }
 
-const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock, decisionSupportBlock, wrongProductBlock, financingBlock, manualOptionsBlock }) => {
+const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock, decisionSupportBlock, wrongProductBlock, financingBlock, manualOptionsBlock, inventoryBlock }) => {
   const listingBlock = listingTitle && listingTitle.trim()
     ? `\nLISTING CONTEXT\nThe customer is messaging about this listing: "${listingTitle.trim()}". Use this together with the customer's message to infer ad_type (wheel / tire / accessory / lift) per the detection signals below.\n`
     : '';
@@ -1458,7 +1566,7 @@ When all qualifiers for a product are captured, MOVE FORWARD:
 - If ALL tracked products are fully qualified, transition into recommendation / quote-punt voice. Reference the captured spec ("for cruising and highway with the 6-inch goal, the value kit will be perfect…") rather than re-asking.
 
 Re-asking a resolved qualifier is a hard error. Every variant must respect the lock.
-${existingProductsBlock}${manualOptionsBlock || ''}${interpretationBlock || ''}${wrongProductBlock || ''}${financingBlock || ''}${decisionSupportBlock || ''}${categoryClause}${buildHistoryBlock(conversationHistory)}
+${existingProductsBlock}${manualOptionsBlock || ''}${inventoryBlock || ''}${interpretationBlock || ''}${wrongProductBlock || ''}${financingBlock || ''}${decisionSupportBlock || ''}${categoryClause}${buildHistoryBlock(conversationHistory)}
 OUTPUT
 Respond ONLY with valid JSON. No markdown fencing. No preamble.
 {
@@ -1693,6 +1801,47 @@ export async function handler(event) {
     block_length: wrongProductBlock.length
   });
 
+  // Live inventory lookup. Fires when a tire size is in play (current
+  // message OR captured on the lead). Suppressed when wrongProduct fires
+  // (don't pull catalog for a product we can't supply / fit). Hard 3s
+  // timeout via AbortSignal so a slow API call can't blow the function.
+  let inventory = null;
+  if (wrongProduct) {
+    inventory = { triggered: false, gate_reason: 'suppressed_by_wrong_product' };
+  } else {
+    try {
+      const signal = (typeof AbortSignal !== 'undefined' && AbortSignal.timeout)
+        ? AbortSignal.timeout(3000)
+        : undefined;
+      inventory = await lookupInventory({
+        message,
+        normalized: interpretation,
+        capturedFields: existing_captured_fields,
+        productsOfInterest: existing_products_of_interest,
+        location,
+        signal
+      });
+    } catch (err) {
+      console.warn('[FN] inventory lookup threw:', err?.message || err);
+      inventory = { triggered: false, gate_reason: 'lookup_threw' };
+    }
+  }
+  const inventoryBlock = inventory && inventory.triggered
+    ? buildInventoryBlock(inventory)
+    : '';
+  console.log('[FN] inventory:', {
+    triggered: !!inventory?.triggered,
+    gate_reason: inventory?.gate_reason || null,
+    source: inventory?.source || null,
+    query: inventory?.fired_from_size || null,
+    brand_requested: inventory?.brand_requested || null,
+    totals: inventory?.totals || null,
+    ilink_count: inventory?.ilink_items?.length || 0,
+    brand_count: inventory?.brand_requested_items?.length || 0,
+    other_count: inventory?.other_items?.length || 0,
+    block_length: inventoryBlock.length
+  });
+
   // Phase E.7: financing-mode detection. Runs AFTER E.4 (which can
   // suppress it — don't talk financing about a product we can't supply)
   // and BEFORE E.3 (financing answers take priority over generic
@@ -1782,7 +1931,8 @@ export async function handler(event) {
     decisionSupportBlock,
     wrongProductBlock,
     financingBlock,
-    manualOptionsBlock
+    manualOptionsBlock,
+    inventoryBlock
   });
 
   console.log('[FN] resolved opener:', openerLine);
