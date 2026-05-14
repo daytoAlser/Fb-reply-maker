@@ -12,6 +12,9 @@ export default function VariantCard({ kind, text, attachImages }) {
   // Indicates which image was just auto-copied during INSERT; drives the
   // "Image 1 copied to clipboard — press Ctrl+V in the FB chat" hint.
   const [autoCopiedIndex, setAutoCopiedIndex] = useState(null);
+  // Was the auto-paste accepted by FB on the last write? If true, we tell
+  // the rep the image attached automatically; if false, they need Ctrl+V.
+  const [autoPasted, setAutoPasted] = useState(false);
   const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
 
   const previewImages = Array.isArray(attachImages)
@@ -37,6 +40,25 @@ export default function VariantCard({ kind, text, attachImages }) {
     if (res.ok) {
       setImageCopyState((prev) => ({ ...prev, [idx]: 'copied' }));
       setAutoCopiedIndex(idx);
+      // Tell the FB content script to focus the chat composer and try
+      // an auto-paste from clipboard. If execCommand('paste') cooperates,
+      // the image attaches automatically; if not, the box is at least
+      // focused for the rep to press Ctrl+V manually.
+      try {
+        chrome.runtime.sendMessage({ type: 'FOCUS_REPLY_BOX' }, (resp) => {
+          if (chrome.runtime.lastError) {
+            console.warn('[FB Reply Maker SP] FOCUS_REPLY_BOX failed:', chrome.runtime.lastError.message);
+            setAutoPasted(false);
+            return;
+          }
+          const pasted = !!(resp && resp.paste_accepted);
+          setAutoPasted(pasted);
+          console.log('[FB Reply Maker SP] focus+paste result:', resp);
+        });
+      } catch (err) {
+        console.warn('[FB Reply Maker SP] FOCUS_REPLY_BOX threw:', err);
+        setAutoPasted(false);
+      }
       setTimeout(() => {
         setImageCopyState((prev) => ({ ...prev, [idx]: 'idle' }));
       }, 2500);
@@ -103,10 +125,16 @@ export default function VariantCard({ kind, text, attachImages }) {
     if (autoCopiedIndex === null) return null;
     const which = autoCopiedIndex + 1;
     const total = previewImages.length;
-    if (total === 1) {
-      return 'Image copied. Click into the FB chat and press Ctrl+V to attach it.';
+    if (autoPasted) {
+      // execCommand('paste') worked — image is already attached.
+      if (total === 1) return `Image attached automatically ✓`;
+      return `Image ${which}/${total} attached automatically ✓ — click the next 📋 below for the other.`;
     }
-    return `Image ${which}/${total} copied. Click into the FB chat → Ctrl+V. Then click the next 📋 below to attach the other.`;
+    // Auto-paste didn't land; chat is focused, rep presses Ctrl+V.
+    if (total === 1) {
+      return 'Image copied + chat focused. Press Ctrl+V to attach.';
+    }
+    return `Image ${which}/${total} copied + chat focused. Press Ctrl+V. Then click the next 📋 below.`;
   })();
 
   return (

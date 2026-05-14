@@ -480,6 +480,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  // FOCUS_REPLY_BOX — side panel asks the active FB tab to focus its
+  // chat composer + attempt an auto-paste from clipboard. Used after
+  // the side panel writes a product image to the clipboard so the rep
+  // can Ctrl+V into a focused box (or, if execCommand cooperates, the
+  // image attaches automatically).
+  if (msg?.type === 'FOCUS_REPLY_BOX') {
+    (async () => {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab?.id) { sendResponse({ ok: false, reason: 'no_active_tab' }); return; }
+      try {
+        const res = await chrome.tabs.sendMessage(tab.id, { type: 'FOCUS_REPLY_BOX' });
+        sendResponse(res || { ok: false, reason: 'no_response' });
+      } catch (err) {
+        sendResponse({ ok: false, reason: err?.message || 'no_content_script' });
+      }
+    })();
+    return true;
+  }
+
   // INSERT_REPLY — side-panel mode: FB tab is always the active tab when
   // the user clicks Send, so we just dispatch to the active tab. No focus
   // dance, no thread_id routing, no background-tab handling needed.
