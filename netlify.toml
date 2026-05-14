@@ -1,0 +1,21 @@
+# Netlify deploy config for fb-reply-maker.
+#
+# The Chrome extension under extension/ does NOT deploy through Netlify —
+# it's loaded locally as an unpacked extension. Only the serverless
+# backend under netlify/ (mainly netlify/functions/generate-reply.js)
+# is served by this site.
+#
+# Without the ignore directive below, every git push triggers a Netlify
+# build, even when the commit only touched extension/ files. Those
+# builds abort with "Canceled build due to no content change" — but
+# still consume build minutes. The ignore command runs BEFORE the
+# normal pipeline; if it exits 0 (no diff in netlify/ or netlify.toml),
+# Netlify skips the build entirely.
+
+[build]
+  publish      = "netlify"
+  functions    = "netlify/functions"
+  # Skip the build when no files under netlify/ (or this file itself)
+  # changed in the latest commit. The first deploy after this config
+  # lands WILL still run because netlify.toml is in the diff.
+  ignore       = "git diff --quiet HEAD^ HEAD -- netlify/ netlify.toml"
