@@ -148,6 +148,20 @@ export function deriveAvailabilityFraming(item, homeLocationShort) {
   return null;
 }
 
+// Detects dedicated winter / snow / ice tires by name and description. Per
+// the Dayton rule: anything with snow/winter/ice in the name/description
+// is winter-only, not an all-season — even if it carries the 3PMS rating.
+// Word-bounded to avoid tripping on "snowflake" (a rating, not a product
+// class) or "winterized". Operates on item.name + item.rawDescription only —
+// never the customer's message.
+const WINTER_ONLY_RE = /\b(snow|winter|ice)\b/i;
+export function isWinterOnly(item) {
+  if (!item) return false;
+  const name = String(item.name || '');
+  const desc = String(item.rawDescription || '');
+  return WINTER_ONLY_RE.test(name) || WINTER_ONLY_RE.test(desc);
+}
+
 // Helper: compact a clean item from client.js into the prompt-block-friendly
 // shape consumed by buildInventoryBlock(). Strips raw description, dedups
 // to the data the prompt actually surfaces.
@@ -177,6 +191,7 @@ export function shapeForPrompt(item, homeLocationShort) {
     totalStock: (item.stock && item.stock.total) || 0,
     otherStores,
     external: (item.stock && item.stock.external) || 0,
-    availabilityFraming: deriveAvailabilityFraming(item, homeLocationShort)
+    availabilityFraming: deriveAvailabilityFraming(item, homeLocationShort),
+    winterOnly: isWinterOnly(item)
   };
 }

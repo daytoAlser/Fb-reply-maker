@@ -12,10 +12,10 @@ const FRAMING_LABEL = {
 };
 
 // Renders a small gallery of product thumbnails for the picks Claude saw
-// when writing this turn's variants. Click a card to open the product page
-// in a new tab (rep can right-click → save image, or drag the image into
-// the FB chat thread as an attachment).
-export default function InventoryPicks({ meta }) {
+// when writing this turn's variants. Click a card to regenerate the
+// variants centered on that specific tire. Shift-click or middle-click
+// to open the product page in a new tab instead.
+export default function InventoryPicks({ meta, onPickClick, disabled }) {
   if (!meta || !meta.triggered) return null;
   const picks = Array.isArray(meta.picks) ? meta.picks : [];
   if (picks.length === 0) return null;
@@ -32,17 +32,22 @@ export default function InventoryPicks({ meta }) {
       </div>
       <div className="inventory-picks-grid">
         {picks.map((p, i) => (
-          <PickCard key={p.sku || p.url || i} pick={p} />
+          <PickCard
+            key={p.sku || p.url || i}
+            pick={p}
+            onClick={onPickClick}
+            disabled={!!disabled}
+          />
         ))}
       </div>
       <p className="inventory-picks-tip">
-        Click a card to open the product page. Right-click an image to save it, or drag it into the FB chat thread to attach.
+        Click a card to rewrite the variants centered on that tire. Shift- or middle-click to open the product page in a new tab (right-click the image to save it, or drag into the FB chat thread to attach).
       </p>
     </section>
   );
 }
 
-function PickCard({ pick }) {
+function PickCard({ pick, onClick, disabled }) {
   const [imgFailed, setImgFailed] = useState(false);
   const framing = FRAMING_LABEL[pick.availabilityFraming] || null;
   const bucketLabel = BUCKET_LABEL[pick.bucket] || null;
@@ -52,20 +57,44 @@ function PickCard({ pick }) {
   const network = typeof pick.totalStock === 'number' ? pick.totalStock : 0;
   const warehouse = typeof pick.external === 'number' ? pick.external : 0;
   const hasImage = !!pick.image && !imgFailed;
+  const winterOnly = !!pick.winterOnly;
 
-  function openProduct(e) {
+  function handleClick(e) {
+    // Shift / Cmd / Ctrl / middle-click → open the product page instead
+    // of regenerating. Lets the rep grab the image without rewriting.
+    if (e.shiftKey || e.metaKey || e.ctrlKey || e.button === 1) {
+      if (pick.url) window.open(pick.url, '_blank', 'noopener,noreferrer');
+      e.preventDefault();
+      return;
+    }
     e.preventDefault();
-    if (pick.url) window.open(pick.url, '_blank', 'noopener,noreferrer');
+    if (disabled) return;
+    if (typeof onClick === 'function') onClick(pick);
   }
+
+  function handleAuxClick(e) {
+    // Middle-click on a link is normally handled by the browser, but
+    // since we preventDefault on click, mirror the behavior here.
+    if (e.button === 1 && pick.url) {
+      window.open(pick.url, '_blank', 'noopener,noreferrer');
+      e.preventDefault();
+    }
+  }
+
+  const cardClass = [
+    'pick-card',
+    `pick-card-${pick.bucket || 'other'}`,
+    winterOnly ? 'pick-card-winter' : '',
+    disabled ? 'pick-card-disabled' : ''
+  ].filter(Boolean).join(' ');
 
   return (
     <a
-      className={`pick-card pick-card-${pick.bucket || 'other'}`}
+      className={cardClass}
       href={pick.url || '#'}
-      target="_blank"
-      rel="noopener noreferrer"
-      onClick={openProduct}
-      title={pick.name}
+      onClick={handleClick}
+      onAuxClick={handleAuxClick}
+      title={`${pick.name} — click to focus variants on this tire (shift-click to open product page)`}
     >
       <div className="pick-thumb">
         {hasImage ? (
@@ -83,6 +112,11 @@ function PickCard({ pick }) {
         {bucketLabel && (
           <span className={`pick-bucket-tag pick-bucket-${pick.bucket}`}>
             {bucketLabel}
+          </span>
+        )}
+        {winterOnly && (
+          <span className="pick-winter-tag" title="Dedicated winter / snow tire — not all-season">
+            WINTER
           </span>
         )}
       </div>

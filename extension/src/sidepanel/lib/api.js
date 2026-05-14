@@ -19,7 +19,8 @@ export async function generateReply({
   existing_status,
   existing_last_updated,
   existing_silence_duration_ms,
-  existing_manual_options_log
+  existing_manual_options_log,
+  focusedProduct
 }) {
   const body = { message, context, categoryOverride };
   if (Array.isArray(conversationHistory) && conversationHistory.length > 0) {
@@ -69,6 +70,9 @@ export async function generateReply({
   }
   if (Array.isArray(existing_manual_options_log) && existing_manual_options_log.length > 0) {
     body.existing_manual_options_log = existing_manual_options_log;
+  }
+  if (focusedProduct && typeof focusedProduct === 'object') {
+    body.focused_product = focusedProduct;
   }
 
   console.log('[FB Reply Maker API] sending body:', { ...body, secret: '[REDACTED]' });

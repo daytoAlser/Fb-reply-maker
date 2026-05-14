@@ -2099,6 +2099,30 @@ select:focus-visible {
 .pick-bucket-ilink { background: var(--accent-hi); color: #000; }
 .pick-bucket-brand_requested { background: var(--accent); color: #fff; }
 
+.pick-winter-tag {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 2px 5px;
+  border-radius: 3px;
+  background: #2a5b8c;
+  color: #cfe7ff;
+  border: 1px solid #5ea0d8;
+}
+
+.pick-card-winter {
+  border-color: #2a5b8c;
+}
+
+.pick-card-disabled {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
 .pick-meta {
   padding: 7px 8px 8px;
   display: flex;

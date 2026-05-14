@@ -364,7 +364,7 @@ export default function App() {
     });
   }
 
-  async function handleGenerate({ overrideFlags = false } = {}) {
+  async function handleGenerate({ overrideFlags = false, focusedProduct = null } = {}) {
     setError(null);
     if (!incoming.trim()) {
       setError('Paste an incoming message first.');
@@ -501,7 +501,8 @@ export default function App() {
           : undefined,
         existing_manual_options_log: existingManualOptionsLog && existingManualOptionsLog.length > 0
           ? existingManualOptionsLog
-          : undefined
+          : undefined,
+        focusedProduct: focusedProduct || undefined
       });
 
       if (overrideFlags) setOverrideActive(true);
@@ -657,13 +658,17 @@ export default function App() {
                 onOverride={() => handleGenerate({ overrideFlags: true })}
                 loading={loading}
               />
+              <InventoryPicks
+                meta={result.inventory_meta}
+                onPickClick={(pick) => handleGenerate({ focusedProduct: pick })}
+                disabled={loading}
+              />
               <p className="insert-tip">
                 Tip: click on the @name in FB's reply box to convert it to a real tag before sending.
               </p>
               <VariantCard kind="quick" text={result.variants.quick} />
               <VariantCard kind="standard" text={result.variants.standard} />
               <VariantCard kind="detailed" text={result.variants.detailed} />
-              <InventoryPicks meta={result.inventory_meta} />
               <div className="post-variant-actions">
                 <button
                   className="btn-secondary"

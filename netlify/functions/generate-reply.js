@@ -677,8 +677,15 @@ function buildInventoryBlock(inv) {
     if (external > 0) networkParts.push(`Warehouse: ${external}`);
     const homeLine = `    ${homeLabel}: ${homeQty}${framingTag} · ${networkParts.join(' · ')}`;
     const urlLine = it.url ? `\n    ${it.url}` : '';
-    return `[${idx}] ${it.name} — ${priceStr}\n${homeLine}${urlLine}`;
+    const winterTag = it.winterOnly ? ' [WINTER ONLY — dedicated snow/ice tire, NOT all-season]' : '';
+    return `[${idx}] ${it.name}${winterTag} — ${priceStr}\n${homeLine}${urlLine}`;
   };
+
+  // Did any surfaced pick get tagged WINTER ONLY? Drives the HARD RULE.
+  const anyWinter = [...ilink, ...requested, ...other].some((it) => it && it.winterOnly);
+  const winterRule = anyWinter
+    ? '\n- WINTER-ONLY ITEMS: any pick tagged [WINTER ONLY] is a DEDICATED winter/snow tire (soft compound, summer-unsafe), NOT a 3PMS all-season. Only recommend if the customer is explicitly after dedicated winters or running a second wheel set. If they asked generically about "snowflake rated" or 3PMS, DO NOT push a [WINTER ONLY] tire — ask whether they want dedicated winters vs all-weather 3PMS first. If you do reference a [WINTER ONLY] tire, frame it explicitly: "for dedicated winters" / "for the winter set", never as a year-round option.'
+    : '';
 
   // Brand-requested + zero matches -> honest punt + house fallback.
   if (inv.brand_requested && requested.length === 0) {
@@ -694,7 +701,7 @@ HARD RULES (this turn):
 - Be honest: "we don't have ${inv.brand_requested} in that size right now". Do NOT pretend we do.
 - Offer iLink as a value-tier alternative ONLY if the customer's tone suggests they're open ("anything close?", "what do you have?"). If they explicitly want ${inv.brand_requested}, punt to "let me see what we can pull in" voice — don't force the alternative.
 - Use the availability framing from each item ("ready to rock" / "we can get those for ya"). NEVER say "in stock" or pin to a specific location — ABSOLUTE RULE D2 still applies.
-- Do NOT invent ${inv.brand_requested} SKUs / prices / stock claims.
+- Do NOT invent ${inv.brand_requested} SKUs / prices / stock claims.${winterRule}
 `;
   }
 
@@ -718,7 +725,7 @@ HARD RULES (this turn):
 - If you reference a specific product in your reply, it MUST be one of the items above. Do NOT invent SKUs, model names, prices, or stock claims.
 - Use the availability framing from each item ("ready to rock" / "we can get those for ya"). NEVER say "in stock" or pin to a specific location — ABSOLUTE RULE D2 still applies.
 - Do NOT quote totals in chat. You may anchor ONE sticker price by product ("the ${inv.brand_requested} Open Country is $324 ea") as a single data point. Full package pricing stays in the phone-then-estimate punt.
-- Reference 1–2 products by name. The full catalog is the rep's tool, not the reply text.
+- Reference 1–2 products by name. The full catalog is the rep's tool, not the reply text.${winterRule}
 `;
   }
 
@@ -743,7 +750,46 @@ HARD RULES (this turn):
 - iLink is our house brand and default value tier. Since the customer did not name a brand, lead with iLink unless the conversation strongly signals a premium tier (off-road, hard use, "I want the best", etc.). If the customer signaled a tire type (snowflake / 3PMS / A/T / mud / highway), pick the iLink option that matches it.
 - Use the availability framing from each item ("ready to rock" / "we can get those for ya"). NEVER say "in stock" or pin to a specific location — ABSOLUTE RULE D2 still applies.
 - Do NOT quote totals in chat. You may anchor ONE sticker price by product ("the iLink MultiMatch is $189 ea") as a single data point. Full package pricing stays in the phone-then-estimate punt.
-- Reference 1–2 products by name. The full catalog is the rep's tool, not the reply text.
+- Reference 1–2 products by name. The full catalog is the rep's tool, not the reply text.${winterRule}
+`;
+}
+
+// FOCUSED RECOMMENDATION prompt block. Emitted when the rep clicks a
+// specific tire card in the side panel — all 3 variants get rewritten to
+// recommend THIS product by name. Overrides iLink-first and
+// qualifier-first defaults for the turn.
+function buildFocusedRecommendationBlock(focus) {
+  if (!focus || typeof focus !== 'object' || !focus.name) return '';
+  const framing = focus.availabilityFraming === 'ready_to_rock'
+    ? 'ready to rock'
+    : focus.availabilityFraming === 'we_can_get_those'
+      ? 'we can get those for ya'
+      : 'neutral (let the model pick)';
+  const price = focus.priceFormatted || (typeof focus.price === 'number' && focus.price > 0 ? `$${focus.price.toFixed(2)}` : '(no sticker on file)');
+  const winterTag = focus.winterOnly ? ' [WINTER ONLY — dedicated snow/ice tire]' : '';
+  const winterRule = focus.winterOnly
+    ? '\n- THIS IS A WINTER-ONLY TIRE. Frame it explicitly for winter use ("for the winter set this is the move", "if you\'re running a dedicated winter setup"). Do NOT pitch it as a year-round / all-season option. If the customer hasn\'t said they want dedicated winters, briefly call out that this is a winter-only choice so they know what they\'re getting.'
+    : '';
+  return `
+FOCUSED RECOMMENDATION (rep clicked this product — write all 3 variants centered on it)
+The rep selected this specific product from the live inventory picks. All variants must recommend it by name and frame it positively.
+
+Product: ${focus.name}${winterTag}
+Brand: ${focus.brand || '(not parsed)'}
+Sticker: ${price}
+Availability framing to use: ${framing}
+Product URL (for reference, do NOT paste into reply): ${focus.url || '(none)'}
+
+HARD RULES (this turn — OVERRIDES iLink-first / qualifier-first / category defaults):
+- Lead each variant with this product by name. The rep has already made the pick; you are writing the customer-facing pitch.
+- Quick: one short line naming the product + sticker anchor + availability framing + soft CTA.
+- Standard: 2–3 sentences naming the product, giving ONE specific reason it fits the customer's stated context (use case, vehicle type, tire type they mentioned).
+- Detailed: 3–4 sentences with rationale + soft fit-confirmation question or next-step CTA.${winterRule}
+- Do NOT reference other inventory items this turn. Single-product focus.
+- Do NOT push iLink as an alternative even if this is NOT iLink — the rep has chosen this product on purpose.
+- Use the availability framing above ("ready to rock" / "we can get those for ya"). NEVER say "in stock" or pin to a specific location — ABSOLUTE RULE D2 still applies.
+- Do NOT quote totals in chat. The sticker is one data point ("the ${focus.name.split(' ').slice(0, 3).join(' ')} runs ${price} ea"). Full package pricing stays in the phone-then-estimate punt.
+- Stay in Dayton voice. Casual, "we got you", soft close.
 `;
 }
 
@@ -904,7 +950,7 @@ ENDING:
 `;
 }
 
-const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock, decisionSupportBlock, wrongProductBlock, financingBlock, manualOptionsBlock, inventoryBlock }) => {
+const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock, decisionSupportBlock, wrongProductBlock, financingBlock, manualOptionsBlock, inventoryBlock, focusedRecommendationBlock }) => {
   const listingBlock = listingTitle && listingTitle.trim()
     ? `\nLISTING CONTEXT\nThe customer is messaging about this listing: "${listingTitle.trim()}". Use this together with the customer's message to infer ad_type (wheel / tire / accessory / lift) per the detection signals below.\n`
     : '';
@@ -1566,7 +1612,7 @@ When all qualifiers for a product are captured, MOVE FORWARD:
 - If ALL tracked products are fully qualified, transition into recommendation / quote-punt voice. Reference the captured spec ("for cruising and highway with the 6-inch goal, the value kit will be perfect…") rather than re-asking.
 
 Re-asking a resolved qualifier is a hard error. Every variant must respect the lock.
-${existingProductsBlock}${manualOptionsBlock || ''}${inventoryBlock || ''}${interpretationBlock || ''}${wrongProductBlock || ''}${financingBlock || ''}${decisionSupportBlock || ''}${categoryClause}${buildHistoryBlock(conversationHistory)}
+${existingProductsBlock}${manualOptionsBlock || ''}${inventoryBlock || ''}${focusedRecommendationBlock || ''}${interpretationBlock || ''}${wrongProductBlock || ''}${financingBlock || ''}${decisionSupportBlock || ''}${categoryClause}${buildHistoryBlock(conversationHistory)}
 OUTPUT
 Respond ONLY with valid JSON. No markdown fencing. No preamble.
 {
@@ -1650,7 +1696,10 @@ export async function handler(event) {
     // Phase E.5 — array of { product_type, brand, model, size, price, notes,
     // logged_at } entries the user has explicitly recorded as sent to the
     // customer. Server treats it as canonical context for variant generation.
-    existing_manual_options_log
+    existing_manual_options_log,
+    // Optional: rep clicked a specific inventory pick to focus variants on.
+    // Shape matches the pick objects in inventory_meta.picks.
+    focused_product
   } = body;
   if (!message || !context) {
     return { statusCode: 400, headers, body: 'Missing message or context' };
@@ -1826,9 +1875,23 @@ export async function handler(event) {
       inventory = { triggered: false, gate_reason: 'lookup_threw' };
     }
   }
-  const inventoryBlock = inventory && inventory.triggered
-    ? buildInventoryBlock(inventory)
+  // Focused recommendation: if the rep clicked a specific pick, suppress the
+  // multi-pick inventory block and emit a single-product FOCUSED block.
+  // The two blocks would otherwise send mixed signals about which item to
+  // lead with.
+  const focusedRecommendationBlock = focused_product && typeof focused_product === 'object'
+    ? buildFocusedRecommendationBlock(focused_product)
     : '';
+  const inventoryBlock = focusedRecommendationBlock
+    ? ''
+    : (inventory && inventory.triggered ? buildInventoryBlock(inventory) : '');
+  console.log('[FN] focused recommendation:', {
+    active: !!focusedRecommendationBlock,
+    name: focused_product?.name || null,
+    brand: focused_product?.brand || null,
+    winter_only: !!focused_product?.winterOnly,
+    block_length: focusedRecommendationBlock.length
+  });
   console.log('[FN] inventory:', {
     triggered: !!inventory?.triggered,
     gate_reason: inventory?.gate_reason || null,
@@ -1932,7 +1995,8 @@ export async function handler(event) {
     wrongProductBlock,
     financingBlock,
     manualOptionsBlock,
-    inventoryBlock
+    inventoryBlock,
+    focusedRecommendationBlock
   });
 
   console.log('[FN] resolved opener:', openerLine);
