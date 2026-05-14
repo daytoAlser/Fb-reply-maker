@@ -59,6 +59,10 @@ export default function VariantCard({ kind, text, attachImages }) {
     ? Math.min(attachImages.length, 2)
     : 0;
 
+  const previewImages = Array.isArray(attachImages)
+    ? attachImages.slice(0, 2).filter(Boolean)
+    : [];
+
   return (
     <article className={cardClass}>
       <header className="variant-header">
@@ -73,6 +77,24 @@ export default function VariantCard({ kind, text, attachImages }) {
         </span>
       </header>
       <p className="variant-body">{text}</p>
+      {previewImages.length > 0 && (
+        <div
+          className="variant-image-preview"
+          role="img"
+          aria-label={`${previewImages.length} product photo${previewImages.length > 1 ? 's' : ''} that will attach on Insert`}
+        >
+          {previewImages.map((url, i) => (
+            <img
+              key={url + i}
+              src={url}
+              alt={`Recommended tire photo ${i + 1} of ${previewImages.length}`}
+              loading="lazy"
+              draggable
+              title="This image attaches to the FB chat when you click Insert. You can also drag it directly into FB."
+            />
+          ))}
+        </div>
+      )}
       <div className="variant-actions">
         <button type="button" className="btn-mini" onClick={handleCopy}>
           {copied ? 'Copied' : 'Copy'}
