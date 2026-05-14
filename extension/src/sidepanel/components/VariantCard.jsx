@@ -263,22 +263,43 @@ export default function VariantCard({ kind, text, attachImages }) {
         let image2Pasted = false;
         try {
           await imageWriteP;
-          // Focus FB compose, then trusted Ctrl+V.
           await chrome.runtime.sendMessage({ type: 'FOCUS_REPLY_BOX' }).catch(() => null);
           image1Pasted = await dispatchCtrlV();
         } catch (err) {
-          // Image 1 write or paste failed; leave for user to retry via 📋.
-          console.warn('[FB Reply Maker SP] image 1 attach failed:', err?.message || err);
+          swlog('image 1 attach threw: ' + (err?.message || err));
         }
 
-        // Image 2 can't be auto-chained reliably because side-panel
-        // focus is now gone (FB tab grabbed it during paste). The
-        // 📋 button is the manual path for image 2.
+        // Try to auto-chain image 2. After image 1 paste, the FB tab
+        // has focus (it received the trusted Ctrl+V), so a direct
+        // clipboard.write here normally rejects with "Document is not
+        // focused". Two attempts to recover side-panel focus:
+        //   (a) call window.focus() — sometimes works, sometimes not
+        //       depending on Chrome side-panel internals.
+        //   (b) the focus-recovery retry already baked into
+        //       clipboardWriteSync (window.focus + 80ms + retry).
+        // If both fail, the 📋 button on image 2 stays as the manual
+        // fallback (each 📋 click is a fresh user gesture that
+        // reliably re-focuses the side panel).
+        if (image1Pasted && previewImages.length > 1 && blobsRef.current[1]) {
+          try {
+            try { window.focus(); } catch {}
+            await new Promise((r) => setTimeout(r, 350)); // let FB commit image 1
+            try { window.focus(); } catch {}
+            await clipboardWriteSync(1);
+            await chrome.runtime.sendMessage({ type: 'FOCUS_REPLY_BOX' }).catch(() => null);
+            image2Pasted = await dispatchCtrlV();
+            swlog('image 2 auto-chain pasted=' + image2Pasted);
+          } catch (err) {
+            swlog('image 2 auto-chain failed: ' + (err?.message || err));
+          }
+        }
+
         if (previewImages.length > 0) {
+          const attached = (image1Pasted ? 1 : 0) + (image2Pasted ? 1 : 0);
           setAttachSummary({
-            attached: image1Pasted ? 1 : 0,
+            attached,
             total: previewImages.length,
-            results: [{ pasted: image1Pasted }]
+            results: [{ pasted: image1Pasted }, { pasted: image2Pasted }]
           });
           setTimeout(() => setAttachSummary(null), 8000);
         }
