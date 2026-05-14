@@ -69,9 +69,21 @@ export default function VariantCard({ kind, text, attachImages }) {
           const bytes = new Uint8Array(binary.length);
           for (let j = 0; j < binary.length; j++) bytes[j] = binary.charCodeAt(j);
           const srcBlob = new Blob([bytes], { type: resp.mime || 'image/jpeg' });
-          const png = await blobToPng(srcBlob);
+          swlog('preload[' + i + '] fetched bytes=' + bytes.length + ' mime=' + (resp.mime || 'unknown'));
+          // Try the canvas-roundtrip to normalize to PNG. If the source
+          // can't be decoded by createImageBitmap (non-image URL like a
+          // color swatch or SVG), fall back to handing the original
+          // blob to the clipboard — Chrome accepts a few non-PNG MIMEs.
+          let png;
+          try {
+            png = await blobToPng(srcBlob);
+          } catch (decodeErr) {
+            swlog('preload[' + i + '] decode failed, using raw blob; err=' + (decodeErr?.message || decodeErr));
+            png = srcBlob.type.startsWith('image/') ? srcBlob : null;
+          }
+          if (!png) throw new Error('not a usable image (mime=' + (resp.mime || '?') + ')');
           next.push(png);
-          swlog('preload[' + i + '] OK bytes=' + png.size);
+          swlog('preload[' + i + '] OK bytes=' + png.size + ' type=' + png.type);
         } catch (err) {
           swlog('preload[' + i + '] FAILED url=' + url + ' err=' + (err?.message || err));
           next.push(null);

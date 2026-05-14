@@ -490,7 +490,7 @@ async function ensureDebuggerAttached(tabId) {
     // Expected when we genuinely weren't attached. Ignore.
   }
   console.log('[SW] attempting chrome.debugger.attach on tab', tabId);
-  await chrome.debugger.attach({ tabId }, '1.3');
+  await attachWithForceRetry(tabId);
   console.log('[SW] debugger ATTACHED to tab', tabId, '— yellow bar should be visible');
   debuggerAttachedTabId = tabId;
 }
@@ -516,6 +516,24 @@ const IS_MAC = (() => {
   } catch { return false; }
 })();
 const PASTE_MODIFIERS = IS_MAC ? 4 : 2;
+
+async function attachWithForceRetry(tabId) {
+  // Wraps chrome.debugger.attach with a force-detach-and-retry on the
+  // "Another debugger is already attached" failure. The detach call
+  // can clear an orphaned session even when our SW state has forgotten
+  // about it (MV3 SW restart edge cases or chrome internal lag).
+  try {
+    await chrome.debugger.attach({ tabId }, '1.3');
+    return;
+  } catch (err) {
+    const msg = err?.message || String(err);
+    if (!/another debugger/i.test(msg)) throw err;
+    console.warn('[SW] attach hit "another debugger" — force-detaching + retrying');
+    try { await chrome.debugger.detach({ tabId }); } catch {}
+    await new Promise((r) => setTimeout(r, 100));
+    await chrome.debugger.attach({ tabId }, '1.3');
+  }
+}
 
 async function dispatchTrustedPaste(tabId) {
   await ensureDebuggerAttached(tabId);
