@@ -647,6 +647,18 @@
       <p class="fbrm-ar-tip">Tip: click @name in FB's reply box to convert it to a real tag before sending.</p>
       <div class="fbrm-ar-variants"></div>
     `;
+    // Diagnostic: log the actual computed dimensions of the context
+    // section so we know if the DOM rendered it but CSS squished it.
+    requestAnimationFrame(() => {
+      const ctxEl = body.querySelector('.fbrm-ar-context');
+      if (ctxEl) {
+        const r = ctxEl.getBoundingClientRect();
+        const cs = getComputedStyle(ctxEl);
+        swlog('ctx rect: top=' + Math.round(r.top) + ' height=' + Math.round(r.height) + ' width=' + Math.round(r.width) + ' display=' + cs.display + ' visibility=' + cs.visibility + ' opacity=' + cs.opacity);
+      } else {
+        swlog('ctx el NOT found in DOM after render');
+      }
+    });
     // Wire up the context section's collapse toggle.
     const ctxHeader = body.querySelector('.fbrm-ar-context-header');
     const ctxBody = body.querySelector('.fbrm-ar-context-body');
@@ -1281,11 +1293,14 @@
 
       /* Context section — collapsible, shows what the AI is working with */
       .fbrm-ar-context {
-        border: 1px solid rgba(239, 68, 68, 0.20);
+        display: block;
+        flex-shrink: 0;
+        min-height: 44px;
+        border: 1px solid rgba(239, 68, 68, 0.35);
         border-radius: 10px;
         background: #0e0e0e;
         overflow: hidden;
-        box-shadow: 0 1px 0 rgba(239, 68, 68, 0.08) inset;
+        box-shadow: 0 1px 0 rgba(239, 68, 68, 0.10) inset;
       }
       .fbrm-ar-context-header {
         display: flex;
