@@ -822,14 +822,24 @@ async function copyAndPasteOneImage(url) {
   return { ok: true, pasted, paste_err: pasteErr, byteSize: pngBlob => undefined };
 }
 
-// Chains copy-and-paste across an array of URLs, with a delay between
-// each so FB's composer commits the previous attach before the next one
-// arrives. Returns per-image results. Run on the FB tab's content script.
+// Chains copy-and-paste across an array of URLs. If an auto-paste lands,
+// we continue to the next image after a delay. If an auto-paste fails
+// (execCommand('paste') is unreliable for image data on FB Messenger),
+// we STOP the chain so the failed image stays on the clipboard for the
+// rep to finish with Ctrl+V. Continuing past a failure would overwrite
+// the clipboard with the next image, stranding the first.
 async function attachImagesViaClipboardChain(urls) {
   const results = [];
   for (let i = 0; i < urls.length; i++) {
     const r = await copyAndPasteOneImage(urls[i]);
     results.push(r);
+    if (!r.ok) break;
+    if (!r.pasted) {
+      // Clipboard is loaded with this image; chat is focused. Hand off
+      // to the rep — pressing Ctrl+V now will paste THIS image. The
+      // remaining images stay queued (rep clicks their 📋 buttons next).
+      break;
+    }
     if (i < urls.length - 1) await sleep(800);
   }
   return results;

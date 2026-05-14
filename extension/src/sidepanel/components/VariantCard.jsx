@@ -109,17 +109,25 @@ export default function VariantCard({ kind, text, attachImages }) {
 
   const pasteHint = (() => {
     if (!attachSummary) return null;
-    const { attached, total } = attachSummary;
+    const { attached, total, results } = attachSummary;
     if (total === 0) return null;
     if (attached === total) {
       return total === 1
         ? 'Image attached automatically ✓'
-        : `Both images attached automatically ✓ — ready to send.`;
+        : 'Both images attached automatically ✓ — ready to send.';
     }
-    if (attached > 0) {
-      return `${attached}/${total} attached automatically. The remaining ${total - attached} ${total - attached === 1 ? 'is' : 'are'} on the clipboard — click into FB chat and press Ctrl+V (or click 📋 below to retry).`;
+    // Chain stopped on the first non-pasted image (so it stays on
+    // clipboard for a manual Ctrl+V). Tell the rep exactly what to do.
+    const failedIndex = attached; // 0-based index of the image now on clipboard
+    const stillQueued = total - attached - 1;
+    const idxLabel = failedIndex + 1; // 1-based for the user
+    const queuedSentence = stillQueued > 0
+      ? ` Then click 📋 below image ${idxLabel + 1}${stillQueued > 1 ? '+' : ''} for the remaining ${stillQueued}.`
+      : '';
+    if (attached === 0) {
+      return `Image ${idxLabel}/${total} loaded on clipboard. FB chat is focused — press Ctrl+V to attach it.${queuedSentence}`;
     }
-    return `Clipboard loaded but FB didn't auto-paste. Click into the FB chat and press Ctrl+V, or click 📋 below to retry.`;
+    return `${attached}/${total} auto-attached ✓. Image ${idxLabel} on clipboard, chat focused — press Ctrl+V.${queuedSentence}`;
   })();
 
   return (
