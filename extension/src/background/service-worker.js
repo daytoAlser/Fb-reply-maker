@@ -659,11 +659,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // dance, no thread_id routing, no background-tab handling needed.
   if (msg?.type === 'INSERT_REPLY') {
     (async () => {
+      console.log('[SW] INSERT_REPLY received from side panel, images=', Array.isArray(msg.images) ? msg.images.length : 0);
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab?.id) {
+        console.warn('[SW] INSERT_REPLY: no active tab in current window');
         sendResponse({ ok: false, reason: 'no_active_tab' });
         return;
       }
+      console.log('[SW] INSERT_REPLY: forwarding to FB tab', tab.id);
       try {
         const res = await chrome.tabs.sendMessage(tab.id, {
           type: 'INSERT_REPLY',
