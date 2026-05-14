@@ -14,8 +14,14 @@
   if (globalThis.__FBRM_AUTO_RESPONSE_LOADED__) return;
   globalThis.__FBRM_AUTO_RESPONSE_LOADED__ = true;
 
-  const BUILD = 'ar-2026-05-14-v1';
+  const BUILD = 'ar-2026-05-14-v2';
   console.log('[FB Reply Maker] auto-response.js loaded build=' + BUILD);
+
+  // Layout mode for the variant panel. 'center' renders a centered
+  // modal with a backdrop dimming the FB page; 'left' renders a
+  // left-edge column overlaying the inbox. The left-side code path
+  // is preserved (not deleted) — flip this constant to switch.
+  const LAYOUT_MODE = 'center';
 
   // ──────────────────────────────────────────────────────────────────
   // Helpers
@@ -267,9 +273,21 @@
   }
 
   function buildPanelSkeleton() {
+    // 'center' wraps the panel in a backdrop that dims the FB page
+    // and clicks through to close. 'left' (the original) docks to the
+    // left edge and covers the inbox column. Both share the same
+    // .fbrm-ar-panel inner element.
+    const wrapper = document.createElement('div');
+    wrapper.setAttribute(getSelectors().panelMarker || 'data-fbrm-auto-response-panel', '');
+    wrapper.className = LAYOUT_MODE === 'center' ? 'fbrm-ar-modal-root' : 'fbrm-ar-left-root';
+    if (LAYOUT_MODE === 'center') {
+      const backdrop = document.createElement('div');
+      backdrop.className = 'fbrm-ar-backdrop';
+      backdrop.addEventListener('click', closePanel);
+      wrapper.appendChild(backdrop);
+    }
     const panel = document.createElement('div');
-    panel.setAttribute(getSelectors().panelMarker || 'data-fbrm-auto-response-panel', '');
-    panel.className = 'fbrm-ar-panel';
+    panel.className = LAYOUT_MODE === 'center' ? 'fbrm-ar-panel fbrm-ar-panel-center' : 'fbrm-ar-panel fbrm-ar-panel-left';
     panel.innerHTML = `
       <header class="fbrm-ar-panel-header">
         <span class="fbrm-ar-panel-title">▌AUTO RESPONSE</span>
@@ -277,6 +295,7 @@
       </header>
       <div class="fbrm-ar-panel-body">
         <div class="fbrm-ar-loading">
+          <div class="fbrm-ar-loading-status">Scraping conversation…</div>
           <div class="fbrm-ar-loading-bar"></div>
           <div class="fbrm-ar-loading-bar"></div>
           <div class="fbrm-ar-loading-bar"></div>
@@ -284,7 +303,14 @@
       </div>
     `;
     panel.querySelector('.fbrm-ar-panel-close').addEventListener('click', closePanel);
-    return panel;
+    wrapper.appendChild(panel);
+    return wrapper;
+  }
+
+  function setLoadingStatus(text) {
+    if (!panelEl) return;
+    const el = panelEl.querySelector('.fbrm-ar-loading-status');
+    if (el) el.textContent = text;
   }
 
   function renderError(msg) {
@@ -295,11 +321,15 @@
 
   function renderToast(msg, durationMs) {
     if (!panelEl) return;
-    let toast = panelEl.querySelector('.fbrm-ar-toast');
+    // Append to the inner panel (not the wrapper) so absolute
+    // positioning lands at the panel's bottom-left, not the screen's.
+    const innerPanel = panelEl.querySelector('.fbrm-ar-panel');
+    if (!innerPanel) return;
+    let toast = innerPanel.querySelector('.fbrm-ar-toast');
     if (!toast) {
       toast = document.createElement('div');
       toast.className = 'fbrm-ar-toast';
-      panelEl.appendChild(toast);
+      innerPanel.appendChild(toast);
     }
     toast.textContent = msg;
     toast.classList.add('fbrm-ar-toast-visible');
@@ -326,6 +356,7 @@
   }
 
   async function runGenerate() {
+    const t0 = performance.now();
     try {
       const api = globalThis.FBRM_API;
       const detect = api && api.detectThread ? api.detectThread() : null;
@@ -333,14 +364,21 @@
         renderError('No conversation detected. Make sure you are inside a Marketplace thread.');
         return;
       }
-      const settings = await chrome.storage.sync.get(['userName', 'config', 'context', 'location']);
+      const threadId = getThreadIdFromUrl(detect.url);
+      setLoadingStatus('Loading settings…');
+      // Parallelize the two storage reads — they're independent and
+      // chrome.storage RPCs each take ~30-80ms; running concurrently
+      // saves the time of the slower one.
+      const [settings, lead] = await Promise.all([
+        chrome.storage.sync.get(['userName', 'config', 'context', 'location']),
+        getLeadByThreadId(threadId)
+      ]);
       const config = settings.config || {};
       if (!config.endpoint || !config.secret) {
         renderError('Configure API endpoint + secret in the extension Options page first.');
         return;
       }
-      const threadId = getThreadIdFromUrl(detect.url);
-      const lead = await getLeadByThreadId(threadId);
+      const tStorage = performance.now() - t0;
 
       const payload = {
         endpoint: config.endpoint,
@@ -365,13 +403,17 @@
         existing_manual_options_log: lead?.manualOptionsLog
       };
 
-      swlog('generate request thread=' + (threadId || '?') + ' history=' + (detect.conversationHistory?.length || 0));
+      setLoadingStatus('Asking Claude for variants…');
+      swlog('generate request thread=' + (threadId || '?') + ' history=' + (detect.conversationHistory?.length || 0) + ' storage=' + Math.round(tStorage) + 'ms');
+      const tApi = performance.now();
       const resp = await chrome.runtime.sendMessage({ type: 'GENERATE_REPLY', payload });
+      const tApiDone = performance.now();
       if (!resp || !resp.ok) {
         renderError('Generate failed: ' + (resp?.reason || 'no response from service worker'));
         return;
       }
-      swlog('generate response received');
+      swlog('generate response in ' + Math.round(tApiDone - tApi) + 'ms (total ' + Math.round(tApiDone - t0) + 'ms)');
+      setLoadingStatus('Rendering…');
       renderResult(resp.data);
     } catch (err) {
       swlog('runGenerate threw: ' + (err?.message || err));
@@ -771,56 +813,105 @@
     style.textContent = `
       /* Launch row above the compose row */
       .fbrm-ar-launch-row {
-        display: flex;
-        justify-content: flex-start;
-        align-items: center;
-        padding: 6px 12px 4px;
-        gap: 6px;
+        display: flex !important;
+        justify-content: flex-start !important;
+        align-items: center !important;
+        padding: 8px 12px 6px !important;
+        gap: 6px !important;
+        background: transparent !important;
       }
-      /* Compose-bar button — FB-native blue, sparkle icon, rounded pill */
+      /* Compose-bar button — FB-native blue, sparkle icon, rounded
+       * pill. Heavy !important usage because FB's compose styles
+       * cascade aggressively into descendants and can otherwise
+       * blank out the background/color. */
       .fbrm-ar-launch-btn {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        height: 32px;
-        padding: 0 14px;
-        background: #0866FF;
-        color: #ffffff;
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
-        font-size: 13px;
-        font-weight: 600;
-        border-radius: 16px;
-        cursor: pointer;
-        user-select: none;
-        transition: background 120ms ease, transform 120ms ease, box-shadow 120ms ease;
-        white-space: nowrap;
-        box-shadow: 0 1px 3px rgba(8, 102, 255, 0.30);
+        display: inline-flex !important;
+        align-items: center !important;
+        gap: 8px !important;
+        height: 36px !important;
+        padding: 0 18px !important;
+        background: #1B7CFF !important;
+        background-image: linear-gradient(180deg, #1B85FF 0%, #1166E6 100%) !important;
+        color: #ffffff !important;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif !important;
+        font-size: 14px !important;
+        font-weight: 700 !important;
+        letter-spacing: 0.01em !important;
+        border: 1px solid #2D8BFF !important;
+        border-radius: 18px !important;
+        cursor: pointer !important;
+        user-select: none !important;
+        transition: filter 120ms ease, transform 120ms ease, box-shadow 120ms ease !important;
+        white-space: nowrap !important;
+        box-shadow: 0 2px 6px rgba(8, 102, 255, 0.50), 0 0 0 1px rgba(255,255,255,0.06) inset !important;
+        text-shadow: 0 1px 0 rgba(0, 0, 0, 0.18) !important;
       }
-      .fbrm-ar-launch-btn:hover { background: #0a5fe0; box-shadow: 0 2px 8px rgba(8, 102, 255, 0.45); }
-      .fbrm-ar-launch-btn:active { transform: scale(0.97); }
-      .fbrm-ar-sparkle { flex: 0 0 auto; color: #ffffff; }
-      .fbrm-ar-launch-label { line-height: 1; }
+      .fbrm-ar-launch-btn:hover {
+        filter: brightness(1.10) !important;
+        box-shadow: 0 4px 12px rgba(8, 102, 255, 0.65), 0 0 0 1px rgba(255,255,255,0.10) inset !important;
+      }
+      .fbrm-ar-launch-btn:active { transform: scale(0.97) !important; }
+      .fbrm-ar-sparkle { flex: 0 0 auto !important; color: #ffffff !important; filter: drop-shadow(0 0 4px rgba(255,255,255,0.40)) !important; }
+      .fbrm-ar-launch-label { line-height: 1 !important; color: #ffffff !important; }
 
-      /* Panel root — covers the inbox column on the left */
+      /* Backdrop for the centered modal mode. Dims the FB page,
+       * click-through closes the panel. Left-mode skips this. */
+      .fbrm-ar-modal-root .fbrm-ar-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.55);
+        backdrop-filter: blur(2px);
+        z-index: ${z - 1};
+        animation: fbrm-ar-fadein 160ms ease-out;
+      }
+      @keyframes fbrm-ar-fadein {
+        from { opacity: 0; }
+        to   { opacity: 1; }
+      }
+
+      /* Panel base — shared by both layouts */
       .fbrm-ar-panel {
+        background: #0a0a0a;
+        color: #f0f0f0;
+        font-family: 'JetBrains Mono', 'Courier New', monospace;
+        z-index: ${z};
+        display: flex;
+        flex-direction: column;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(239, 68, 68, 0.10);
+      }
+
+      /* Layout: left-side column overlaying the inbox */
+      .fbrm-ar-panel-left {
         position: fixed;
         top: 0;
         left: 0;
         height: 100vh;
         width: 360px;
-        background: #0a0a0a;
-        color: #f0f0f0;
-        font-family: 'JetBrains Mono', 'Courier New', monospace;
         border-right: 1px solid #2a2a2a;
-        z-index: ${z};
-        display: flex;
-        flex-direction: column;
         animation: fbrm-ar-slidein 180ms ease-out;
-        box-shadow: 4px 0 18px rgba(0,0,0,0.6);
       }
       @keyframes fbrm-ar-slidein {
         from { transform: translateX(-16px); opacity: 0; }
         to   { transform: translateX(0);     opacity: 1; }
+      }
+
+      /* Layout: centered modal */
+      .fbrm-ar-panel-center {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 460px;
+        max-width: calc(100vw - 32px);
+        max-height: calc(100vh - 64px);
+        border: 1px solid #2a2a2a;
+        border-radius: 12px;
+        overflow: hidden;
+        animation: fbrm-ar-popin 200ms cubic-bezier(0.16, 1, 0.3, 1);
+      }
+      @keyframes fbrm-ar-popin {
+        from { transform: translate(-50%, -50%) scale(0.95); opacity: 0; }
+        to   { transform: translate(-50%, -50%) scale(1);    opacity: 1; }
       }
 
       /* Panel header */
@@ -867,6 +958,13 @@
         flex-direction: column;
         gap: 12px;
         padding: 12px 0;
+      }
+      .fbrm-ar-loading-status {
+        font-size: 11px;
+        color: #f87171;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        padding-bottom: 4px;
       }
       .fbrm-ar-loading-bar {
         height: 90px;
