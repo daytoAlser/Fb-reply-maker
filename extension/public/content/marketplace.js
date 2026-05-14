@@ -11,7 +11,12 @@
   }
   globalThis.__FBRM_CONTENT_LOADED__ = true;
 
-console.log("[FB Reply Maker] content script v2 (strict sender) loaded on " + location.href);
+// Build marker — bump per release so the FB tab DevTools console shows
+// exactly which version is running. If you don't see THIS marker after
+// reloading the extension, the content script didn't re-inject and the
+// FB tab needs a hard refresh (Ctrl+Shift+R).
+const __FB_REPLY_MAKER_BUILD__ = 'cs-trusted-ctrlv-2026-05-14';
+console.log("[FB Reply Maker] content script v2 (strict sender) loaded on " + location.href + " · build=" + __FB_REPLY_MAKER_BUILD__);
 
 // Pull centralized selectors if selectors.js loaded first (registered ahead
 // of this file in the SW).  Fall back to inline defaults so a stale install

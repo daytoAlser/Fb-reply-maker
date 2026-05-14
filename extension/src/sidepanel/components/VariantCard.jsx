@@ -117,17 +117,24 @@ export default function VariantCard({ kind, text, attachImages }) {
         : 'Both images attached automatically ✓ — ready to send.';
     }
     // Chain stopped on the first non-pasted image (so it stays on
-    // clipboard for a manual Ctrl+V). Tell the rep exactly what to do.
-    const failedIndex = attached; // 0-based index of the image now on clipboard
+    // clipboard for a manual Ctrl+V). Tell the rep exactly what to do
+    // and include the paste-error reason so we can diagnose (most
+    // common: content script was stale and didn't have DISPATCH_CTRL_V
+    // wired up — hard-refresh the FB tab to fix).
+    const failedIndex = attached;
     const stillQueued = total - attached - 1;
-    const idxLabel = failedIndex + 1; // 1-based for the user
+    const idxLabel = failedIndex + 1;
+    const failedResult = Array.isArray(results) ? results[failedIndex] : null;
+    const reason = failedResult && failedResult.paste_err
+      ? ` (debugger reason: ${failedResult.paste_err})`
+      : '';
     const queuedSentence = stillQueued > 0
       ? ` Then click 📋 below image ${idxLabel + 1}${stillQueued > 1 ? '+' : ''} for the remaining ${stillQueued}.`
       : '';
     if (attached === 0) {
-      return `Image ${idxLabel}/${total} loaded on clipboard. FB chat is focused — press Ctrl+V to attach it.${queuedSentence}`;
+      return `Image ${idxLabel}/${total} loaded on clipboard, FB chat focused — press Ctrl+V to attach it${reason}.${queuedSentence}`;
     }
-    return `${attached}/${total} auto-attached ✓. Image ${idxLabel} on clipboard, chat focused — press Ctrl+V.${queuedSentence}`;
+    return `${attached}/${total} auto-attached ✓. Image ${idxLabel} on clipboard, chat focused — press Ctrl+V${reason}.${queuedSentence}`;
   })();
 
   return (

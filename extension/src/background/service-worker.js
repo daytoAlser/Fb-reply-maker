@@ -394,11 +394,17 @@ async function ensureDebuggerAttached(tabId) {
     clearTimeout(debuggerDetachTimer);
     debuggerDetachTimer = null;
   }
-  if (debuggerAttachedTabId === tabId) return;
+  if (debuggerAttachedTabId === tabId) {
+    console.log('[SW] debugger already attached to tab', tabId);
+    return;
+  }
   if (debuggerAttachedTabId !== null && debuggerAttachedTabId !== tabId) {
+    console.log('[SW] detaching debugger from previous tab', debuggerAttachedTabId);
     try { await chrome.debugger.detach({ tabId: debuggerAttachedTabId }); } catch {}
   }
+  console.log('[SW] attempting chrome.debugger.attach on tab', tabId);
   await chrome.debugger.attach({ tabId }, '1.3');
+  console.log('[SW] debugger ATTACHED to tab', tabId, '— yellow bar should be visible');
   debuggerAttachedTabId = tabId;
 }
 
@@ -434,8 +440,10 @@ async function dispatchTrustedPaste(tabId) {
     nativeVirtualKeyCode: 86,
     isKeypad: false
   };
+  console.log('[SW] dispatching trusted Ctrl+V (modifiers=' + PASTE_MODIFIERS + ') on tab', tabId);
   await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', { type: 'keyDown', ...keyArgs });
   await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', { type: 'keyUp', ...keyArgs });
+  console.log('[SW] trusted Ctrl+V dispatched OK on tab', tabId);
   scheduleDebuggerDetach();
 }
 
