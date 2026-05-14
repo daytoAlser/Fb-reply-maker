@@ -576,6 +576,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // the chat composer is focused — the trusted keypress triggers the
   // browser's native paste, which FB accepts even though execCommand
   // and synthetic events fail.
+  // LOG_FROM_CS — content scripts can't easily surface logs to the user
+  // (FB tab DevTools conflicts with chrome.debugger). Streaming key
+  // diagnostic lines through the SW means we see the full trace in
+  // one place: the SW console at chrome://extensions.
+  if (msg?.type === 'LOG_FROM_CS') {
+    console.log('[CS]', msg.message);
+    sendResponse({ ok: true });
+    return false;
+  }
+
   // FETCH_IMAGE_FOR_CLIPBOARD — content script asks the SW to fetch a
   // product image URL. SW has full host_permissions bypass for CORS,
   // so this works reliably even when the content-script-side fetch

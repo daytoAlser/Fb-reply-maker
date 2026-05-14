@@ -15,8 +15,23 @@
 // exactly which version is running. If you don't see THIS marker after
 // reloading the extension, the content script didn't re-inject and the
 // FB tab needs a hard refresh (Ctrl+Shift+R).
-const __FB_REPLY_MAKER_BUILD__ = 'cs-trusted-ctrlv-2026-05-14';
+const __FB_REPLY_MAKER_BUILD__ = 'cs-swlogged-2026-05-14';
 console.log("[FB Reply Maker] content script v2 (strict sender) loaded on " + location.href + " · build=" + __FB_REPLY_MAKER_BUILD__);
+
+// Stream content-script logs into the SW console so we can see them
+// without opening FB tab DevTools (which conflicts with chrome.debugger
+// when we test the trusted-Ctrl+V path). Best-effort — silently noops
+// if the SW isn't reachable.
+function swlog(...args) {
+  try {
+    const message = args.map((a) => {
+      if (typeof a === 'string') return a;
+      try { return JSON.stringify(a); } catch { return String(a); }
+    }).join(' ');
+    chrome.runtime.sendMessage({ type: 'LOG_FROM_CS', message });
+  } catch (e) {}
+}
+swlog('content script loaded build=' + __FB_REPLY_MAKER_BUILD__ + ' href=' + location.href);
 
 // Pull centralized selectors if selectors.js loaded first (registered ahead
 // of this file in the SW).  Fall back to inline defaults so a stale install
@@ -819,37 +834,39 @@ function activateReplyBox() {
 // bar appears on the FB tab while the debugger is attached, then
 // disappears ~2.5s after the last Ctrl+V (auto-detach in SW).
 async function copyAndPasteOneImage(url) {
-  console.log('[FB Reply Maker] copyAndPasteOneImage starting for', url);
+  swlog('copyAndPasteOneImage START url=' + url);
   try {
     const pngBlob = await fetchAsPngBlobInCS(url);
+    swlog('fetch+png OK bytes=' + pngBlob.size + ' type=' + pngBlob.type);
     if (typeof ClipboardItem === 'undefined') {
+      swlog('ABORT: ClipboardItem unavailable');
       return { ok: false, reason: 'clipboard_item_unavailable' };
     }
     await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })]);
-    console.log('[FB Reply Maker] clipboard.write OK, bytes=', pngBlob.size);
+    swlog('clipboard.write OK');
   } catch (err) {
-    console.warn('[FB Reply Maker] fetch/clipboard.write failed for image:', err?.message || err);
+    swlog('FAILED at fetch/png/clipboard.write: ' + (err?.message || err));
     return { ok: false, reason: err?.message || String(err) };
   }
   const box = activateReplyBox();
   if (!box) {
-    console.warn('[FB Reply Maker] activateReplyBox returned null — no textbox');
+    swlog('FAILED: activateReplyBox returned null (no textbox)');
     return { ok: true, pasted: false, reason: 'no_textbox_for_paste' };
   }
-  console.log('[FB Reply Maker] composer activated; sending DISPATCH_CTRL_V to SW');
+  swlog('composer activated; sending DISPATCH_CTRL_V to SW');
   await sleep(60);
   let pasted = false;
   let pasteErr = null;
   try {
     const resp = await chrome.runtime.sendMessage({ type: 'DISPATCH_CTRL_V' });
-    console.log('[FB Reply Maker] DISPATCH_CTRL_V response:', resp);
+    swlog('DISPATCH_CTRL_V response: ' + JSON.stringify(resp));
     if (resp && resp.ok) {
       pasted = true;
     } else {
       pasteErr = (resp && resp.reason) || 'no_response';
     }
   } catch (err) {
-    console.warn('[FB Reply Maker] DISPATCH_CTRL_V threw:', err?.message || err);
+    swlog('DISPATCH_CTRL_V threw: ' + (err?.message || err));
     pasteErr = err?.message || String(err);
   }
   return { ok: true, pasted, paste_err: pasteErr };
@@ -1648,8 +1665,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       preview: text.slice(0, 40), auto_send: opts.auto_send, thread_id: opts.thread_id,
       image_count: imageUrls.length
     });
+    swlog('INSERT_REPLY received in CS images=' + imageUrls.length + ' preview="' + text.slice(0, 40) + '"');
     (async () => {
       const result = await tryInsertReply(text, opts);
+      swlog('tryInsertReply returned ok=' + !!result.ok + ' sent=' + !!result.sent + ' reason=' + (result.reason || 'none'));
       if (result.ok) {
         console.log('[FB Reply Maker] insert succeeded:', result.method, 'sent:', !!result.sent);
         if (!result.sent) fireActivationBurst();
@@ -1659,11 +1678,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         // same way it handles a real Ctrl+V on a clipboard image.
         if (imageUrls.length > 0 && !result.sent) {
           try {
+            swlog('starting image chain count=' + imageUrls.length);
             // Brief delay so the text insertion lands first — pasting an
             // image into a box that's still committing text occasionally
             // drops the paste on FB's React composer.
             await sleep(150);
             const attachResults = await attachImagesViaClipboardChain(imageUrls);
+            swlog('chain finished results=' + JSON.stringify(attachResults));
             const pastedCount = attachResults.filter((r) => r && r.pasted).length;
             result.imagesAttached = pastedCount;
             result.imageAttachResults = attachResults;
@@ -1672,6 +1693,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             });
           } catch (err) {
             console.warn('[FB Reply Maker] image attach chain failed:', err?.message || err);
+            swlog('CHAIN THREW err=' + (err?.message || String(err)));
             result.imageErrors = [err?.message || String(err)];
           }
         }
