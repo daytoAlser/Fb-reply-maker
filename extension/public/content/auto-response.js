@@ -267,21 +267,149 @@
   }
 
   function watchForNavigation() {
-    // popstate fires on browser back/forward. FB SPA also uses pushState
-    // which doesn't dispatch popstate; we observe the document title as
-    // a cheap proxy for navigation events.
-    window.addEventListener('popstate', scheduleMount);
+    window.addEventListener('popstate', () => { scheduleMount(); schedulePrefetch(); });
     let lastHref = location.href;
+    let lastIncoming = '';
     const obs = new MutationObserver(() => {
       if (location.href !== lastHref) {
         lastHref = location.href;
+        lastPrefetchedKey = null; // new thread, allow a fresh prefetch
         scheduleMount();
-        // Close panel on thread switch so we don't show stale variants.
+        schedulePrefetch();
         if (!isMarketplaceThread() && panelEl) closePanel();
+      }
+      // Watch for new customer messages on the current thread — that
+      // invalidates any cached variants and means we should re-prefetch.
+      if (isMarketplaceThread() && globalThis.FBRM_API && globalThis.FBRM_API.detectThread) {
+        try {
+          const d = globalThis.FBRM_API.detectThread();
+          const incoming = (d && d.latestIncoming) || '';
+          if (incoming && incoming !== lastIncoming) {
+            lastIncoming = incoming;
+            lastPrefetchedKey = null;
+            schedulePrefetch();
+          }
+        } catch {}
       }
       scheduleMount();
     });
     obs.observe(document.body, { childList: true, subtree: true });
+  }
+
+  // Throttle prefetches so a noisy mutation feed doesn't fire dozens
+  // of duplicate API calls. The actual prefetchVariants() also dedupes
+  // by cache key, so this is belt + suspenders.
+  let prefetchThrottle = null;
+  function schedulePrefetch() {
+    if (prefetchThrottle) return;
+    prefetchThrottle = setTimeout(() => {
+      prefetchThrottle = null;
+      prefetchVariants().catch(() => {});
+    }, 600);
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // Pre-generate cache — keyed by thread_id, invalidated when the
+  // customer's latestIncoming text changes. Lets the panel render
+  // instantly on open in the common case.
+  // ──────────────────────────────────────────────────────────────────
+
+  // cache shape: Map<thread_id, { latestIncoming, result, generatedAt, inFlight: Promise|null }>
+  const cache = new Map();
+  let lastPrefetchedKey = null;
+
+  function cacheKey(threadId, latestIncoming) {
+    return threadId + '|' + (latestIncoming || '').trim();
+  }
+
+  function getCached(threadId, latestIncoming) {
+    const entry = cache.get(threadId);
+    if (!entry || !entry.result) return null;
+    if ((entry.latestIncoming || '').trim() !== (latestIncoming || '').trim()) return null;
+    // Stale after 5 minutes — covers slow-typist flows where the
+    // background prefetch beat the rep into the thread but the
+    // customer hasn't said anything new yet.
+    if (Date.now() - entry.generatedAt > 5 * 60 * 1000) return null;
+    return entry.result;
+  }
+
+  function setCached(threadId, latestIncoming, result) {
+    cache.set(threadId, {
+      latestIncoming: (latestIncoming || '').trim(),
+      result,
+      generatedAt: Date.now(),
+      inFlight: null
+    });
+  }
+
+  // Background generate. Doesn't render anything — just stores in cache
+  // so the panel can pull it instantly on click. Idempotent per key.
+  async function prefetchVariants() {
+    if (!isMarketplaceThread()) return;
+    const api = globalThis.FBRM_API;
+    const detect = api && api.detectThread ? api.detectThread() : null;
+    if (!detect || detect.status !== 'ok') return;
+    const threadId = getThreadIdFromUrl(detect.url);
+    if (!threadId) return;
+    const key = cacheKey(threadId, detect.latestIncoming);
+    if (key === lastPrefetchedKey) return; // already fetched / in-flight for this key
+    const existing = cache.get(threadId);
+    if (existing && existing.inFlight) return; // already in-flight
+    if (getCached(threadId, detect.latestIncoming)) return; // already cached
+    lastPrefetchedKey = key;
+    swlog('prefetch start thread=' + threadId);
+    const inFlight = doGenerate(detect, threadId)
+      .then((result) => {
+        if (result) {
+          setCached(threadId, detect.latestIncoming, result);
+          swlog('prefetch ready thread=' + threadId);
+        }
+      })
+      .catch((err) => {
+        swlog('prefetch failed: ' + (err?.message || err));
+      });
+    cache.set(threadId, {
+      latestIncoming: (detect.latestIncoming || '').trim(),
+      result: null,
+      generatedAt: 0,
+      inFlight
+    });
+  }
+
+  // Runs the API call. Returns the result data on success, null on
+  // failure. Shared by prefetchVariants() and runGenerate().
+  async function doGenerate(detect, threadId) {
+    const [settings, lead] = await Promise.all([
+      chrome.storage.sync.get(['userName', 'config', 'context', 'location']),
+      getLeadByThreadId(threadId)
+    ]);
+    const config = settings.config || {};
+    if (!config.endpoint || !config.secret) return null;
+    const payload = {
+      endpoint: config.endpoint,
+      secret: config.secret,
+      message: detect.latestIncoming || '',
+      context: settings.context || {},
+      categoryOverride: 'auto',
+      conversationHistory: detect.conversationHistory,
+      userName: settings.userName,
+      partnerName: detect.partnerName,
+      listingTitle: detect.listingTitle,
+      location: settings.location,
+      thread_id: threadId || undefined,
+      fb_thread_url: detect.url || undefined,
+      existing_captured_fields: lead?.capturedFields,
+      existing_products_of_interest: lead?.productsOfInterest,
+      existing_conversation_mode: lead?.conversationMode,
+      existing_last_customer_message_at: lead?.lastCustomerMessageAt,
+      existing_status: lead?.status,
+      existing_last_updated: lead?.lastUpdated,
+      existing_silence_duration_ms: lead?.silenceDurationMs,
+      existing_manual_options_log: lead?.manualOptionsLog
+    };
+    const resp = await chrome.runtime.sendMessage({ type: 'GENERATE_REPLY', payload });
+    if (!resp || !resp.ok) return null;
+    return resp.data;
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -293,6 +421,7 @@
 
   function openPanel() {
     if (panelEl) return;
+    dispatchCounter = 0; // reset per-session counter
     injectStylesOnce();
     panelEl = buildPanelSkeleton();
     document.body.appendChild(panelEl);
@@ -412,10 +541,33 @@
         return;
       }
       const threadId = getThreadIdFromUrl(detect.url);
+
+      // CACHE HIT — render instantly. Prefetch ran on thread arrival
+      // and produced variants for the same latestIncoming text.
+      const cached = getCached(threadId, detect.latestIncoming);
+      if (cached) {
+        swlog('cache HIT thread=' + threadId);
+        renderResult(cached);
+        return;
+      }
+
+      // CACHE MISS but PREFETCH IN-FLIGHT — wait for the in-flight
+      // promise instead of starting a duplicate call.
+      const entry = cache.get(threadId);
+      if (entry && entry.inFlight) {
+        swlog('cache MISS but prefetch in-flight; awaiting');
+        setLoadingStatus('Finishing background prefetch…');
+        await entry.inFlight;
+        const ready = getCached(threadId, detect.latestIncoming);
+        if (ready) {
+          renderResult(ready);
+          return;
+        }
+        // Prefetch failed or stale — fall through to fresh generate.
+      }
+
       setLoadingStatus('Loading settings…');
-      // Parallelize the two storage reads — they're independent and
-      // chrome.storage RPCs each take ~30-80ms; running concurrently
-      // saves the time of the slower one.
+      // Parallelize the two storage reads — independent calls.
       const [settings, lead] = await Promise.all([
         chrome.storage.sync.get(['userName', 'config', 'context', 'location']),
         getLeadByThreadId(threadId)
@@ -461,6 +613,8 @@
       }
       swlog('generate response in ' + Math.round(tApiDone - tApi) + 'ms (total ' + Math.round(tApiDone - t0) + 'ms)');
       setLoadingStatus('Rendering…');
+      // Cache the result for next time on this thread.
+      setCached(threadId, detect.latestIncoming, resp.data);
       renderResult(resp.data);
     } catch (err) {
       swlog('runGenerate threw: ' + (err?.message || err));
@@ -701,9 +855,17 @@
     });
   }
 
+  // Diagnostic: count of trusted Ctrl+V dispatches we initiate per
+  // panel-session. If the user sees 4 attachments instead of 2, this
+  // log will reveal whether the source is us firing twice (bug here)
+  // or FB residual attachments from a prior test (not a bug).
+  let dispatchCounter = 0;
   async function callDispatchCtrlV() {
+    dispatchCounter++;
+    swlog('DISPATCH_CTRL_V invoke #' + dispatchCounter);
     try {
       const resp = await chrome.runtime.sendMessage({ type: 'DISPATCH_CTRL_V' });
+      swlog('DISPATCH_CTRL_V #' + dispatchCounter + ' resp.ok=' + !!(resp && resp.ok));
       return !!(resp && resp.ok);
     } catch (err) {
       swlog('DISPATCH_CTRL_V threw: ' + (err?.message || err));
@@ -1225,4 +1387,7 @@
 
   scheduleMount();
   watchForNavigation();
+  // Kick off an initial prefetch in case the rep loaded directly into
+  // a Marketplace thread (no URL change to trigger watchForNavigation).
+  schedulePrefetch();
 })();
