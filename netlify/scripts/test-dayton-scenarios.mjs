@@ -90,6 +90,38 @@ const scenarios = {
       conversation_history: []
     }
   },
+  'rhean-turn2': {
+    label: 'Rhean turn 2 (ambiguous-gender name, customer never used "man")',
+    expect: 'MUST NOT use "Perfect man" or any "man" / "my man" — Rhean is ambiguous-gender, use first name or neutral',
+    body: {
+      message: "Hi Dayton, sorry for the late response. I'm at work right now. I'm looking for 2023 Honda CRV sport. 235/60R18 103H",
+      context: 'FB Marketplace continuation. Customer Rhean is sharing vehicle + tire size. Rhean is ambiguous-gender — no "man" allowed.',
+      partnerName: 'Rhean',
+      userName: 'Dayton',
+      listingTitle: 'NEW!!! MATTE BRONZE + BLACK WHEELS 18x8 INCH Multi-Spoke rims!! ONLY $990/SET',
+      location: 'Calgary',
+      conversation_history: [
+        { role: 'customer', content: 'Hi Cal, do you have deals for wheels and tires set plus install? Thanks' },
+        { role: 'rep', content: "Hey @Rhean, Dayton here, I'd be happy to help you out today! We can absolutely hook you up with a full wheels + tires + install package, no problem. Quick question — what kind of vehicle are we working with so I can make sure we get you dialed in?" }
+      ]
+    }
+  },
+  'phil-turn2': {
+    label: 'Phil turn 2 (clearly male name)',
+    expect: '"man" / "my man" IS acceptable here — Phil is a confidently male name',
+    body: {
+      message: "yeah i got a 2018 silverado 1500 stock height",
+      context: 'FB Marketplace continuation. Customer Phil sharing vehicle info. Phil is clearly male — "man" is OK.',
+      partnerName: 'Phil',
+      userName: 'Dayton',
+      listingTitle: 'NEW!!! MATTE BRONZE + BLACK WHEELS 18x8 INCH Multi-Spoke rims!! ONLY $990/SET',
+      location: 'Calgary',
+      conversation_history: [
+        { role: 'customer', content: 'still got the wheels?' },
+        { role: 'rep', content: "Hey @Phil, Dayton here, I'd be happy to help you out today! We definitely have those ready to roll — what kind of vehicle are we putting them on?" }
+      ]
+    }
+  },
   'unknown-partner': {
     label: 'Unknown partner (partnerName=null, message addresses "Cal")',
     expect: 'reply MUST NOT have any @mention. No @Cal, no @there, no @Customer.',
