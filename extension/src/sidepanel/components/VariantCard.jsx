@@ -10,17 +10,54 @@ function swlog(message) {
   } catch {}
 }
 
-// Convert a blob to PNG via OffscreenCanvas, returning a Blob with
-// image/png MIME. PNG is the most reliable clipboard format on Chrome.
+// Convert a blob to PNG via canvas. Chrome's clipboard.write only
+// accepts image/png reliably, so JPEG/AVIF/WebP must be re-encoded.
+// Tries createImageBitmap first (fast); if that rejects (some JPEG
+// variants — CMYK, certain progressive scans, etc. — confuse the
+// bitmap decoder), falls back to a HTMLImageElement which uses
+// Chrome's more lenient image pipeline. Then draws to a 2D canvas
+// and exports as PNG.
 async function blobToPng(blob) {
   if (!blob) return null;
   if (blob.type === 'image/png') return blob;
-  const bmp = await createImageBitmap(blob);
-  const canvas = new OffscreenCanvas(bmp.width, bmp.height);
+  let width, height, drawable;
+  try {
+    const bmp = await createImageBitmap(blob);
+    width = bmp.width;
+    height = bmp.height;
+    drawable = bmp;
+  } catch (err) {
+    // Fallback: HTMLImageElement decode via blob URL.
+    const url = URL.createObjectURL(blob);
+    try {
+      const img = await new Promise((resolve, reject) => {
+        const el = new Image();
+        el.onload = () => resolve(el);
+        el.onerror = () => reject(new Error('img decode failed'));
+        el.src = url;
+      });
+      width = img.naturalWidth || img.width;
+      height = img.naturalHeight || img.height;
+      drawable = img;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+  if (!width || !height) throw new Error('image has zero dimensions');
+  // Side panel is an HTML page — use a regular canvas (not OffscreenCanvas)
+  // so HTMLImageElement is drawable on it.
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('no_canvas_2d_context');
-  ctx.drawImage(bmp, 0, 0);
-  return await canvas.convertToBlob({ type: 'image/png' });
+  ctx.drawImage(drawable, 0, 0);
+  return await new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (b) => (b ? resolve(b) : reject(new Error('canvas toBlob returned null'))),
+      'image/png'
+    );
+  });
 }
 
 export default function VariantCard({ kind, text, attachImages }) {
@@ -70,18 +107,11 @@ export default function VariantCard({ kind, text, attachImages }) {
           for (let j = 0; j < binary.length; j++) bytes[j] = binary.charCodeAt(j);
           const srcBlob = new Blob([bytes], { type: resp.mime || 'image/jpeg' });
           swlog('preload[' + i + '] fetched bytes=' + bytes.length + ' mime=' + (resp.mime || 'unknown'));
-          // Try the canvas-roundtrip to normalize to PNG. If the source
-          // can't be decoded by createImageBitmap (non-image URL like a
-          // color swatch or SVG), fall back to handing the original
-          // blob to the clipboard — Chrome accepts a few non-PNG MIMEs.
-          let png;
-          try {
-            png = await blobToPng(srcBlob);
-          } catch (decodeErr) {
-            swlog('preload[' + i + '] decode failed, using raw blob; err=' + (decodeErr?.message || decodeErr));
-            png = srcBlob.type.startsWith('image/') ? srcBlob : null;
-          }
-          if (!png) throw new Error('not a usable image (mime=' + (resp.mime || '?') + ')');
+          // blobToPng internally falls back from createImageBitmap to
+          // HTMLImageElement decode. If both reject, the source is
+          // genuinely unusable — skip it (Chrome's clipboard only
+          // accepts image/png so we can't smuggle a non-PNG through).
+          const png = await blobToPng(srcBlob);
           next.push(png);
           swlog('preload[' + i + '] OK bytes=' + png.size + ' type=' + png.type);
         } catch (err) {
