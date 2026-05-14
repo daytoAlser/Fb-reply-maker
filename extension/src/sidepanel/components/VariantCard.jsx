@@ -39,11 +39,10 @@ export default function VariantCard({ kind, text, attachImages }) {
   const imgCount = previewImages.length;
 
   // Pre-fetch product images as PNG blobs as soon as the variant
-  // renders. clipboard.write fails with "Document is not focused"
-  // when called from an async path (after the focus has shifted), so
-  // we keep the blobs ready in memory and call clipboard.write
-  // SYNCHRONOUSLY inside the click handler — that's when the side
-  // panel still holds focus + transient activation.
+  // renders. Fetching is routed through the SW because it has full
+  // host_permissions for canadacustomautoworks.com and doesn't hit
+  // any CORS edge cases that a side-panel direct fetch occasionally
+  // does (we saw image 2 silently fail to preload that way).
   const blobsRef = useRef([]);
   const [blobsReady, setBlobsReady] = useState(false);
   useEffect(() => {
@@ -51,23 +50,37 @@ export default function VariantCard({ kind, text, attachImages }) {
     blobsRef.current = [];
     setBlobsReady(false);
     if (previewImages.length === 0) return;
+    swlog('preload start, urls=' + previewImages.length);
     (async () => {
       const next = [];
-      for (const url of previewImages) {
+      for (let i = 0; i < previewImages.length; i++) {
+        const url = previewImages[i];
         try {
-          const res = await fetch(url, { credentials: 'omit' });
-          if (!res.ok) throw new Error(`fetch ${res.status}`);
-          const blob = await res.blob();
-          const png = await blobToPng(blob);
+          // Hand the fetch off to the SW — same handler the (now-defunct)
+          // CS-side chain used. Returns base64 + mime, we decode here.
+          const resp = await chrome.runtime.sendMessage({
+            type: 'FETCH_IMAGE_FOR_CLIPBOARD',
+            url
+          });
+          if (!resp || !resp.ok) {
+            throw new Error('sw_fetch_failed: ' + (resp && resp.reason ? resp.reason : 'no_response'));
+          }
+          const binary = atob(resp.base64);
+          const bytes = new Uint8Array(binary.length);
+          for (let j = 0; j < binary.length; j++) bytes[j] = binary.charCodeAt(j);
+          const srcBlob = new Blob([bytes], { type: resp.mime || 'image/jpeg' });
+          const png = await blobToPng(srcBlob);
           next.push(png);
+          swlog('preload[' + i + '] OK bytes=' + png.size);
         } catch (err) {
-          console.warn('[FB Reply Maker SP] preload image failed:', err?.message || err);
+          swlog('preload[' + i + '] FAILED url=' + url + ' err=' + (err?.message || err));
           next.push(null);
         }
       }
       if (!cancelled) {
         blobsRef.current = next;
         setBlobsReady(next.some(Boolean));
+        swlog('preload complete, valid=' + next.filter(Boolean).length + '/' + next.length);
       }
     })();
     return () => { cancelled = true; };
