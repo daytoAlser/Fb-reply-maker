@@ -2195,6 +2195,81 @@ select:focus-visible {
   justify-content: start;
 }
 
+/* Per-thumbnail wrapper — image + a small copy-to-clipboard button. */
+.pick-img-wrap {
+  position: relative;
+}
+
+.pick-img-wrap img {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: contain;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 4px);
+  cursor: grab;
+  transition: border-color var(--dur-base) var(--ease-out-quint);
+}
+
+.pick-img-wrap img:hover {
+  border-color: var(--accent-hi);
+}
+
+.pick-img-copy-btn {
+  position: absolute;
+  bottom: 6px;
+  right: 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.78);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  cursor: pointer;
+  transition: background var(--dur-base) var(--ease-out-quint), border-color var(--dur-base) var(--ease-out-quint), transform var(--dur-base) var(--ease-out-quint);
+}
+
+.pick-img-copy-btn:hover {
+  background: rgba(0, 0, 0, 0.95);
+  border-color: var(--accent-hi);
+  transform: translateY(-1px);
+}
+
+.pick-img-copy-btn:disabled {
+  cursor: default;
+  opacity: 0.75;
+  transform: none;
+}
+
+.pick-img-copy-copied {
+  background: var(--success);
+  color: #000;
+  border-color: var(--success);
+}
+
+.pick-img-copy-err {
+  background: var(--danger, #b14848);
+  border-color: var(--danger, #b14848);
+}
+
+/* Hint banner shown after Insert auto-copies image 1 to clipboard. */
+.variant-paste-hint {
+  margin: 0;
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--accent-hi);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent-hi);
+  border-radius: var(--radius-sm, 4px);
+  animation: slideDown var(--dur-base) var(--ease-out-quint);
+}
+
 .pick-meta {
   padding: 7px 8px 8px;
   display: flex;

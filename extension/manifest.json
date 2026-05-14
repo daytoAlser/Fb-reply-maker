@@ -3,10 +3,11 @@
   "name": "FB Reply Maker",
   "version": "1.0.0",
   "description": "AI reply assistant for FB Marketplace messages",
-  "permissions": ["storage", "sidePanel", "activeTab", "scripting"],
+  "permissions": ["storage", "sidePanel", "activeTab", "scripting", "clipboardWrite"],
   "host_permissions": [
     "https://*.facebook.com/*",
-    "https://*.messenger.com/*"
+    "https://*.messenger.com/*",
+    "https://*.canadacustomautoworks.com/*"
   ],
   "background": {
     "service_worker": "src/background/service-worker.js",
