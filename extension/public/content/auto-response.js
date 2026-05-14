@@ -14,7 +14,7 @@
   if (globalThis.__FBRM_AUTO_RESPONSE_LOADED__) return;
   globalThis.__FBRM_AUTO_RESPONSE_LOADED__ = true;
 
-  const BUILD = 'ar-2026-05-14-v2';
+  const BUILD = 'ar-2026-05-14-v3-context-panel';
   console.log('[FB Reply Maker] auto-response.js loaded build=' + BUILD);
 
   // Layout mode for the variant panel. 'center' renders a centered
@@ -634,8 +634,16 @@
   function renderResult(result) {
     if (!panelEl) return;
     const body = panelEl.querySelector('.fbrm-ar-panel-body');
+    const ctxHtml = renderContextSection();
+    swlog('renderResult ctx-html-len=' + ctxHtml.length + ' panelCtx=' + JSON.stringify({
+      hasDetect: !!(panelContext && panelContext.detect),
+      hasLead: !!(panelContext && panelContext.lead),
+      listing: panelContext?.detect?.listingTitle || null,
+      partner: panelContext?.detect?.partnerName || null,
+      history: panelContext?.detect?.conversationHistory?.length || 0
+    }));
     body.innerHTML = `
-      ${renderContextSection()}
+      ${ctxHtml}
       <p class="fbrm-ar-tip">Tip: click @name in FB's reply box to convert it to a real tag before sending.</p>
       <div class="fbrm-ar-variants"></div>
     `;
@@ -1273,24 +1281,25 @@
 
       /* Context section — collapsible, shows what the AI is working with */
       .fbrm-ar-context {
-        border: 1px solid #2a2a2a;
-        border-radius: 8px;
-        background: #0d0d0d;
+        border: 1px solid rgba(239, 68, 68, 0.20);
+        border-radius: 10px;
+        background: #0e0e0e;
         overflow: hidden;
+        box-shadow: 0 1px 0 rgba(239, 68, 68, 0.08) inset;
       }
       .fbrm-ar-context-header {
         display: flex;
         align-items: center;
-        gap: 8px;
+        gap: 10px;
         width: 100%;
-        padding: 8px 10px;
-        background: #111111;
+        padding: 10px 12px;
+        background: #141414;
         border: 0;
         color: #f0f0f0;
         cursor: pointer;
         font-family: 'JetBrains Mono', 'Courier New', monospace;
       }
-      .fbrm-ar-context-header:hover { background: #161616; }
+      .fbrm-ar-context-header:hover { background: #1c1c1c; }
       .fbrm-ar-context-chevron { font-size: 9px; color: #8a8a8a; }
       .fbrm-ar-context-title {
         font-family: 'Oswald', 'Impact', sans-serif;
