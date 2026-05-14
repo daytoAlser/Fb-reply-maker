@@ -576,6 +576,35 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // the chat composer is focused — the trusted keypress triggers the
   // browser's native paste, which FB accepts even though execCommand
   // and synthetic events fail.
+  // FETCH_IMAGE_FOR_CLIPBOARD — content script asks the SW to fetch a
+  // product image URL. SW has full host_permissions bypass for CORS,
+  // so this works reliably even when the content-script-side fetch
+  // hits CORS edge cases (page-origin can affect MV3 CS fetches).
+  // Returns the bytes as base64 so they survive the JSON round-trip.
+  if (msg?.type === 'FETCH_IMAGE_FOR_CLIPBOARD' && typeof msg.url === 'string') {
+    (async () => {
+      try {
+        const res = await fetch(msg.url, { credentials: 'omit' });
+        if (!res.ok) throw new Error(`fetch ${res.status}`);
+        const blob = await res.blob();
+        const buf = await blob.arrayBuffer();
+        // Base64-encode for JSON transport.
+        let binary = '';
+        const bytes = new Uint8Array(buf);
+        const chunk = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunk) {
+          binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+        }
+        const base64 = btoa(binary);
+        sendResponse({ ok: true, base64, mime: blob.type || 'image/jpeg', byteSize: bytes.length });
+      } catch (err) {
+        console.warn('[SW] FETCH_IMAGE_FOR_CLIPBOARD failed:', err?.message || err);
+        sendResponse({ ok: false, reason: err?.message || String(err) });
+      }
+    })();
+    return true;
+  }
+
   if (msg?.type === 'DISPATCH_CTRL_V') {
     (async () => {
       console.log('[SW] DISPATCH_CTRL_V received, sender.tab.id=', sender?.tab?.id);

@@ -757,15 +757,22 @@ async function bulkInsertReply(text) {
   return { ok: true, method: 'execCommand' };
 }
 
-// Fetches an image URL and returns a PNG Blob. Run from the FB tab's
-// content script — host_permissions for canadacustomautoworks.com let
-// the extension fetch it without CORS issues. Chrome's clipboard prefers
-// PNG for image data; normalizing via OffscreenCanvas is the safest path.
+// Fetches an image URL and returns a PNG Blob. Routes the actual HTTP
+// fetch through the service worker via FETCH_IMAGE_FOR_CLIPBOARD because
+// host_permissions reliably bypass CORS for SW fetches, whereas content-
+// script fetches can occasionally hit CORS edge cases (the request runs
+// in the page's origin context). PNG conversion happens here in the CS.
 async function fetchAsPngBlobInCS(url) {
   if (typeof url !== 'string' || !url) throw new Error('no_url');
-  const res = await fetch(url, { credentials: 'omit', mode: 'cors' });
-  if (!res.ok) throw new Error(`fetch ${res.status}`);
-  const srcBlob = await res.blob();
+  const resp = await chrome.runtime.sendMessage({ type: 'FETCH_IMAGE_FOR_CLIPBOARD', url });
+  if (!resp || !resp.ok) {
+    throw new Error('sw_fetch_failed: ' + (resp && resp.reason ? resp.reason : 'unknown'));
+  }
+  // Decode base64 back to a Blob.
+  const binary = atob(resp.base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const srcBlob = new Blob([bytes], { type: resp.mime || 'image/jpeg' });
   if (srcBlob.type === 'image/png') return srcBlob;
   const bmp = await createImageBitmap(srcBlob);
   const canvas = new OffscreenCanvas(bmp.width, bmp.height);
@@ -821,7 +828,7 @@ async function copyAndPasteOneImage(url) {
     await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })]);
     console.log('[FB Reply Maker] clipboard.write OK, bytes=', pngBlob.size);
   } catch (err) {
-    console.warn('[FB Reply Maker] clipboard.write failed:', err?.message || err);
+    console.warn('[FB Reply Maker] fetch/clipboard.write failed for image:', err?.message || err);
     return { ok: false, reason: err?.message || String(err) };
   }
   const box = activateReplyBox();
