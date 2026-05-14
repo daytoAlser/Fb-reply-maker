@@ -1743,13 +1743,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
 
-  // Side panel writes an image to the system clipboard, then asks us
-  // to put the FB chat composer in focus so the rep can Ctrl+V. As a
-  // best-effort bonus, we also try document.execCommand('paste') — if
-  // FB+Chrome accept it, the image attaches with zero key presses.
-  // execCommand is deprecated and frequently blocked, but tooling-style
-  // extensions can sometimes hit it; failure here is fine because the
-  // box is already focused for a manual paste.
+  // Side panel asks us to focus the FB chat composer so the trusted
+  // Ctrl+V dispatch (via chrome.debugger from the SW) lands in the
+  // right element. Focus ONLY — no execCommand('paste') here, because
+  // the trusted Ctrl+V is already going to fire a real paste and we'd
+  // otherwise get a duplicate-attach.
   if (msg?.type === 'FOCUS_REPLY_BOX') {
     (async () => {
       const box = document.querySelector(SELECTORS.replyTextbox);
@@ -1757,8 +1755,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sendResponse({ ok: false, reason: 'no_textbox' });
         return;
       }
-      // Synthetic mouse activation — same pattern bulkInsertReply uses
-      // to wake FB's React state into "focused".
       try {
         const rect = box.getBoundingClientRect();
         const x = rect.left + rect.width / 2;
@@ -1777,24 +1773,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sel.removeAllRanges();
         sel.addRange(r);
       } catch {}
-      // Best-effort paste attempt. May silently fail; the focus above
-      // is the real guarantee.
-      let pasteAttempted = false;
-      let pasteAccepted = false;
-      let pasteErr = null;
-      try {
-        pasteAttempted = true;
-        pasteAccepted = document.execCommand('paste');
-      } catch (err) {
-        pasteErr = err?.message || String(err);
-      }
-      sendResponse({
-        ok: true,
-        focused: document.activeElement === box,
-        paste_attempted: pasteAttempted,
-        paste_accepted: pasteAccepted,
-        paste_err: pasteErr
-      });
+      sendResponse({ ok: true, focused: document.activeElement === box });
     })();
     return true;
   }

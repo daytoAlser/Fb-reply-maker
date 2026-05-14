@@ -512,10 +512,14 @@ async function dispatchTrustedPaste(tabId) {
     code: 'KeyV',
     windowsVirtualKeyCode: 86,
     nativeVirtualKeyCode: 86,
-    isKeypad: false
+    isKeypad: false,
+    autoRepeat: false
   };
   console.log('[SW] dispatching trusted Ctrl+V (modifiers=' + PASTE_MODIFIERS + ') on tab', tabId);
-  await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', { type: 'keyDown', ...keyArgs });
+  // 'rawKeyDown' fires keydown ONLY — no auto-generated keypress/char
+  // event. With plain 'keyDown', Chrome also dispatches a char event,
+  // which some apps interpret as a second paste trigger.
+  await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', { type: 'rawKeyDown', ...keyArgs });
   await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', { type: 'keyUp', ...keyArgs });
   console.log('[SW] trusted Ctrl+V dispatched OK on tab', tabId);
   scheduleDebuggerDetach();
