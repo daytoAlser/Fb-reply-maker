@@ -158,11 +158,25 @@ export async function lookupFitment({
   const resolved = resolveVehicle({ capturedFields, conversationHistory, message });
   if (!resolved) return { triggered: false, gate_reason: 'no_vehicle_resolvable' };
 
+  // Parser gate: require year + (make OR model). The captured vehicle
+  // field often comes in WITHOUT the make ("2017 Q60", "F-150 2020"),
+  // so requiring make would gate out most leads. RideStyler's
+  // GetDescriptions handles partial input fine (Q60 / civic / f150 /
+  // tlx all return matches), so we pass year + model through and let
+  // the API do the fuzzy resolution.
   const parsed = parseVehicleQuery(resolved.vehicle);
-  if (!parsed.year || !parsed.make) {
-    return { triggered: false, gate_reason: 'incomplete_vehicle_query', vehicle: resolved.vehicle };
+  if (!parsed.year || (!parsed.make && !parsed.model) || !parsed.searchString) {
+    return {
+      triggered: false,
+      gate_reason: 'incomplete_vehicle_query',
+      vehicle: resolved.vehicle,
+      parsed
+    };
   }
 
+  // The query that gets sent to RideStyler. If we have a make use the
+  // full "year make model" string; if we only have year + model, send
+  // "year model" — RideStyler will resolve the make.
   const descResp = await getDescriptions(parsed.searchString, { signal });
   if (!descResp.ok) {
     return {

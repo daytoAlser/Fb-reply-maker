@@ -2395,11 +2395,15 @@ export async function handler(event) {
     triggered: !!fitment?.triggered,
     gate_reason: fitment?.gate_reason || null,
     vehicle: fitment?.vehicle || null,
+    vehicle_normalized: fitment?.vehicle_normalized || null,
+    parsed: fitment?.parsed || null,
     bolt_pattern: fitment?.bolt_pattern || null,
     bolt_pattern_secondary: fitment?.bolt_pattern_secondary || null,
     oem_tire_sizes: fitment?.oem_tire_sizes?.length || 0,
+    oem_tire_sizes_list: fitment?.oem_tire_sizes || null,
     variants_found: fitment?.variants_found || 0,
     variants_profiled: fitment?.variants_profiled || 0,
+    error: fitment?.error || null,
     block_length: fitmentBlock.length
   });
 
