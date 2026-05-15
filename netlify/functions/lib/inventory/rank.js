@@ -162,6 +162,54 @@ export function isWinterOnly(item) {
   return WINTER_ONLY_RE.test(name) || WINTER_ONLY_RE.test(desc);
 }
 
+// Scans the SKU's name + description for objective season/use signals.
+// The model uses these as the ONLY allowed source for feature claims —
+// it can't claim 3PMS / snowflake / touring / etc. unless the
+// corresponding signal fires. This is the guardrail against hallucinated
+// feature phrases (the model defaults to "3PMS-rated" as a generic
+// positive descriptor regardless of whether the tire is actually
+// severe-snow certified).
+export function detectSeasonSignals(item) {
+  if (!item) return [];
+  const hay = (String(item.name || '') + ' ' + String(item.rawDescription || '')).toLowerCase();
+  const signals = [];
+  // 3PMS / Severe Snow Service / snowflake rating
+  if (/(\b3\s*p\s*m\s*s\b|\b3pmsf\b|snowflake|severe[\s-]*snow|three[\s-]*peak)/.test(hay)) {
+    signals.push('3pms');
+  }
+  // M+S / Mud and Snow stamp
+  if (/\b(m\s*[+\/&]\s*s|m\s+and\s+s|mud\s+(?:and|\+|&)\s+snow)\b/.test(hay)) {
+    signals.push('m_plus_s');
+  }
+  // Dedicated winter / ice / snow product
+  if (WINTER_ONLY_RE.test(hay)) {
+    signals.push('winter_dedicated');
+  }
+  // All-season
+  if (/\b(all[\s-]*season|a[\s\/]s\b)\b/.test(hay) && !signals.includes('winter_dedicated')) {
+    signals.push('all_season');
+  }
+  // All-weather (distinct category in CA market — 3PMS-rated all-rounders)
+  if (/\ball[\s-]*weather\b/.test(hay)) {
+    signals.push('all_weather');
+  }
+  // Touring
+  if (/\btouring\b/.test(hay)) signals.push('touring');
+  // Highway / HT (light-truck highway terrain)
+  if (/\b(highway|h[\s\/]t)\b/.test(hay)) signals.push('highway');
+  // All-terrain
+  if (/\b(all[\s-]*terrain|a[\s\/]t)\b/.test(hay)) signals.push('all_terrain');
+  // Mud terrain
+  if (/\b(mud[\s-]*terrain|m[\s\/]t)\b/.test(hay)) signals.push('mud_terrain');
+  // Directional tread pattern
+  if (/\bdirectional\b/.test(hay)) signals.push('directional');
+  // Performance / UHP
+  if (/\b(ultra[\s-]*high[\s-]*performance|uhp|performance)\b/.test(hay)) signals.push('performance');
+  // Run-flat
+  if (/\b(run[\s-]*flat|rft)\b/.test(hay)) signals.push('run_flat');
+  return signals;
+}
+
 // Helper: compact a clean item from client.js into the prompt-block-friendly
 // shape consumed by buildInventoryBlock(). Strips raw description, dedups
 // to the data the prompt actually surfaces.
@@ -193,6 +241,11 @@ export function shapeForPrompt(item, homeLocationShort) {
     external: (item.stock && item.stock.external) || 0,
     availabilityFraming: deriveAvailabilityFraming(item, homeLocationShort),
     winterOnly: isWinterOnly(item),
+    // Objective season/use signals parsed from the SKU's name + description.
+    // The prompt uses these as the ONLY allowed source for feature claims
+    // (3PMS, all-season, touring, etc.) to prevent the model from
+    // hallucinating ratings the tire doesn't actually have.
+    seasonSignals: detectSeasonSignals(item),
     // Capped image list (up to 4) for downstream "attach images on send".
     // shapeForPrompt drops everything else from rawDescription / images that
     // the prompt and UI don't need; this stays small.
