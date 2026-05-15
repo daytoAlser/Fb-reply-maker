@@ -2559,39 +2559,99 @@ The full WHEEL INVENTORY CONTEXT block further down has additional framing nuanc
     : (inventory && inventory.triggered && inventory.auto_primary ? inventory.auto_primary : null);
   const liveLeadPrice = liveLeadProduct && (liveLeadProduct.priceFormatted || (liveLeadProduct.price ? `$${liveLeadProduct.price.toFixed(2)}` : ''));
 
-  // Install-just-answered detection. When the previous rep message asked
-  // the install Y/N qualifier AND the customer's latest reply is an
-  // affirmative or negative, the install qualifier has been resolved
-  // THIS turn. The LIVE INVENTORY OVERRIDE's default CTA (ask install
-  // again) becomes wrong and the variants should pivot to phone-for-
-  // estimate instead. The "fires on the NEXT turn, after install is
-  // answered" line in the override has been failing because the override
-  // itself was fixed to "ask install"; this signal makes the override
-  // branch correctly.
+  // Install-just-answered detection.
+  //
+  // The original detection only checked the CURRENT customer message for
+  // yes/no, which fails when the customer answered "Yes" two turns ago
+  // and then sent a follow-up ("Hi", "When can I come in?", anything).
+  // The current message isn't yes/no -> state stayed 'awaiting' -> AI
+  // re-asked install forever.
+  //
+  // Fix: walk history to find the most recent install ask, then look
+  // for the customer's first response after it. If yes/no found there,
+  // state is 'answered'. Additionally, detect if the rep has already
+  // pivoted to phone-for-estimate after the install was answered — if
+  // so, we've moved past the pivot and shouldn't ask phone again
+  // (state 'followed_up').
   const installAnswer = (() => {
     if (!Array.isArray(conversation_history) || conversation_history.length === 0) {
       return { state: 'unknown', affirmative: null };
     }
-    // Find the most recent rep message.
-    let lastRepText = null;
+
+    const installAskRe = /(install(?:ed|ation|ing)?\s+too|install\s+booked|doing\s+install|tires?\s+installed|just\s+the\s+tires?|install\s+or\s+(?:just|the)\s+tires?|need.{0,25}install|want.{0,25}install|installed?\s+(?:too|as\s+well|with\s+(?:that|them|those)))/i;
+    const yesRe = /^(yes|yeah|yep|ya|yup|sure|please|ok|okay|absolutely|definitely|yes\s+please|of\s+course|for\s+sure|install\s+(?:please|too|as\s+well)|need\s+install|with\s+install|yeah\s+(?:please|sure)|sounds\s+good|sure\s+thing)\b/i;
+    const noRe = /^(no|nope|nah|no\s+thanks?|just\s+(?:the\s+)?tires?|tires?\s+only|tire\s+only|skip\s+install|without\s+install|no\s+install)\b/i;
+    const followupRe = /(phone\s+number|good\s+(?:phone|number)|cell\s+(?:number|phone)|send.{0,25}(?:phone|number)|whats?\s+a?\s*good\s+(?:phone|number)|formal\s+estimate|written\s+estimate|estimate\s+(?:sent|over|together|broken)|i'?ll\s+(?:get|have|send).{0,30}estimate|shoot.{0,15}estimate)/i;
+
+    const getText = (m) => {
+      if (!m) return '';
+      const t = m.text || m.content || m.message;
+      return typeof t === 'string' ? t : '';
+    };
+    const isRep = (m) => m && m.sender === 'me';
+
+    // Walk backward through history to find the most recent rep message
+    // that asks the install question.
+    let installAskIdx = -1;
     for (let i = conversation_history.length - 1; i >= 0; i--) {
       const m = conversation_history[i];
-      if (m && m.sender === 'me' && typeof m.text === 'string' && m.text.trim()) {
-        lastRepText = m.text;
+      if (!isRep(m)) continue;
+      const t = getText(m);
+      if (!t.trim()) continue;
+      if (installAskRe.test(t)) {
+        installAskIdx = i;
         break;
       }
     }
-    if (!lastRepText) return { state: 'unknown', affirmative: null };
-    const installAskRe = /(install(?:ed|ation)?\s+too|install\s+booked|doing\s+install|tires?\s+installed|just\s+the\s+tires?|install\s+or\s+(?:just|the)\s+tires?)/i;
-    if (!installAskRe.test(lastRepText)) return { state: 'not_asked', affirmative: null };
-    // Customer's current message is the latest reply.
-    const reply = typeof message === 'string' ? message.trim().toLowerCase() : '';
-    if (!reply) return { state: 'awaiting', affirmative: null };
-    const yesRe = /^(yes|yeah|yep|ya|yup|sure|please|ok|okay|absolutely|definitely|yes\s+please|of\s+course|for\s+sure|install\s+(?:please|too|as\s+well)|need\s+install|with\s+install)\b/i;
-    const noRe = /^(no|nope|nah|no\s+thanks?|just\s+(?:the\s+)?tires?|tires?\s+only|tire\s+only|skip\s+install|without\s+install)\b/i;
-    if (yesRe.test(reply)) return { state: 'answered', affirmative: true };
-    if (noRe.test(reply)) return { state: 'answered', affirmative: false };
-    return { state: 'awaiting', affirmative: null };
+
+    if (installAskIdx === -1) {
+      return { state: 'not_asked', affirmative: null };
+    }
+
+    // Find the first customer message AFTER the install ask.
+    let customerResponse = null;
+    for (let i = installAskIdx + 1; i < conversation_history.length; i++) {
+      const m = conversation_history[i];
+      if (isRep(m)) continue;
+      const t = getText(m).trim().toLowerCase();
+      if (t) { customerResponse = t; break; }
+    }
+
+    // If no customer response found in history yet, the CURRENT message
+    // (the one we're generating a reply to) IS the customer's response.
+    let fromCurrent = false;
+    if (!customerResponse && typeof message === 'string' && message.trim()) {
+      customerResponse = message.trim().toLowerCase();
+      fromCurrent = true;
+    }
+
+    if (!customerResponse) {
+      return { state: 'awaiting', affirmative: null };
+    }
+
+    let affirmative = null;
+    if (yesRe.test(customerResponse)) affirmative = true;
+    else if (noRe.test(customerResponse)) affirmative = false;
+
+    if (affirmative === null) {
+      return { state: 'awaiting', affirmative: null, response_seen: customerResponse.slice(0, 40) };
+    }
+
+    // Has the rep ALREADY followed up with phone-for-estimate after the
+    // customer answered? If yes, we've moved past the pivot — don't
+    // re-ask phone, just continue the conversation.
+    let followedUp = false;
+    for (let i = installAskIdx + 1; i < conversation_history.length; i++) {
+      const m = conversation_history[i];
+      if (!isRep(m)) continue;
+      const t = getText(m);
+      if (followupRe.test(t)) { followedUp = true; break; }
+    }
+
+    if (followedUp) {
+      return { state: 'followed_up', affirmative, response_from: fromCurrent ? 'current' : 'history' };
+    }
+    return { state: 'answered', affirmative, response_from: fromCurrent ? 'current' : 'history' };
   })();
   console.log('[FN] install answer:', installAnswer);
   const liveInventoryTopOverride = liveLeadProduct
@@ -2624,12 +2684,14 @@ ALL THREE VARIANTS (quick / standard / detailed) MUST:
    GENERIC safe phrases that don't require a signal: "solid ride", "smooth drive", "daily driver", "value pick", "comfort", "build quality".
    HARD FAIL: claiming 3PMS / snowflake / severe-snow / "winter-rated" / all-season / all-weather / touring when the corresponding signal is NOT in the list above. If none of the seasonal/use mappings apply, fall back to a GENERIC phrase or omit the feature phrase entirely — better to leave it out than to invent a rating.
 5. Anchor the sticker price: ${liveLeadPrice || '$XX.XX'} each (or /tire).
-6. CTA — depends on whether install has been answered yet (installAnswer.state = "${installAnswer.state}"${installAnswer.state === 'answered' ? `, affirmative=${installAnswer.affirmative}` : ''}):
+6. CTA — depends on whether install has been answered yet (installAnswer.state = "${installAnswer.state}"${(installAnswer.state === 'answered' || installAnswer.state === 'followed_up') ? `, affirmative=${installAnswer.affirmative}` : ''}):
    ${installAnswer.state === 'answered' && installAnswer.affirmative === true
-     ? `INSTALL ANSWERED AFFIRMATIVE THIS TURN. Do NOT ask the install question again. Pivot to PHONE-FOR-ESTIMATE: "Wicked — send me your phone number and I'll get the formal estimate over with everything (tires + install + taxes) broken down line by line." / "Awesome, send a good phone number and I'll have a sales rep shoot you the full estimate broken down — tires, install, all in." Variants must end with this phone ask, NOT "when do you want it booked" or "when are you free to come in" — that's premature; phone first, scheduling after the estimate is in their hands. FORBIDDEN: "when would you want to get them on the truck", "when are you looking to book that in", "when's good for you to come in", any scheduling question.`
+     ? `INSTALL ANSWERED AFFIRMATIVE — customer has confirmed they want install. The rep has NOT yet followed up with phone-for-estimate. Do NOT ask the install question again. Pivot to PHONE-FOR-ESTIMATE: "Wicked — send me your phone number and I'll get the formal estimate over with everything (tires + install + taxes) broken down line by line." / "Awesome, send a good phone number and I'll have a sales rep shoot you the full estimate broken down — tires, install, all in." Variants must end with this phone ask, NOT "when do you want it booked" or "when are you free to come in" — that's premature; phone first, scheduling after the estimate is in their hands. FORBIDDEN: "when would you want to get them on the truck", "when are you looking to book that in", "when's good for you to come in", any scheduling question.`
      : installAnswer.state === 'answered' && installAnswer.affirmative === false
-       ? `INSTALL ANSWERED NEGATIVE THIS TURN ("just tires"). Do NOT ask the install question again. Pivot to PHONE-FOR-ESTIMATE for the tires alone: "Cool — send me your phone number and I'll have the formal estimate sent over with the tires + taxes broken out." Variants must end with the phone ask. No scheduling question.`
-       : `Close with the INSTALL QUESTION (binary ask): "you looking at install too or just the tires?" / "want install booked too or tires only?" / "are we doing install or just the tires?". This is the only acceptable CTA this turn. Phone-for-estimate fires on the NEXT turn, after install is answered.`}
+       ? `INSTALL ANSWERED NEGATIVE ("just tires"). The rep has NOT yet followed up with phone-for-estimate. Do NOT ask the install question again. Pivot to PHONE-FOR-ESTIMATE for the tires alone: "Cool — send me your phone number and I'll have the formal estimate sent over with the tires + taxes broken out." Variants must end with the phone ask. No scheduling question.`
+       : installAnswer.state === 'followed_up'
+         ? `INSTALL ALREADY ANSWERED AND REP HAS ALREADY FOLLOWED UP with phone-for-estimate or equivalent. DO NOT re-ask install. DO NOT re-ask for phone number. DO NOT re-pitch the product. Respond naturally to whatever the customer's latest message actually says — if they sent a phone number, acknowledge it and confirm the estimate will come. If they're asking about scheduling/timing, defer to "the sales rep will sort out timing once the estimate is in your hands". If they're chitchatting or asking something unrelated, just answer the question without a sales CTA.`
+         : `Close with the INSTALL QUESTION (binary ask): "you looking at install too or just the tires?" / "want install booked too or tires only?" / "are we doing install or just the tires?". This is the only acceptable CTA this turn. Phone-for-estimate fires on the NEXT turn, after install is answered.`}
 
 PROHIBITED CTAs THIS TURN (closing-style asks that skip the install qualifier):
 - "Wanna lock it in?"
@@ -2803,9 +2865,11 @@ The full ELEMENT LIST and EXAMPLE STRUCTURE are in the LIVE INVENTORY CONTEXT (o
       // "ask install" (default) or "ask for phone" (install just answered).
       let ctaInstruction;
       if (installAnswer.state === 'answered' && installAnswer.affirmative === true) {
-        ctaInstruction = `Install was JUST answered AFFIRMATIVE in the customer's current message — do NOT ask install again. CLOSE every variant by asking for the PHONE NUMBER so a formal estimate (tires + install + taxes) can be sent. Example phrasing: "Send me your phone number and I'll get the full estimate over broken down line by line." FORBIDDEN this turn: asking install again, asking "when do you want it booked", asking "when's good for you" — scheduling fires AFTER the estimate is delivered.`;
+        ctaInstruction = `Install has been answered AFFIRMATIVE (yes) — do NOT ask install again. CLOSE every variant by asking for the PHONE NUMBER so a formal estimate (tires + install + taxes) can be sent. Example phrasing: "Send me your phone number and I'll get the full estimate over broken down line by line." FORBIDDEN this turn: asking install again, asking "when do you want it booked", asking "when's good for you" — scheduling fires AFTER the estimate is delivered.`;
       } else if (installAnswer.state === 'answered' && installAnswer.affirmative === false) {
-        ctaInstruction = `Install was JUST answered NEGATIVE in the customer's current message ("just tires"). CLOSE every variant by asking for the PHONE NUMBER so a tire-only estimate can be sent. FORBIDDEN this turn: asking install again, asking when they want install.`;
+        ctaInstruction = `Install has been answered NEGATIVE ("just tires"). CLOSE every variant by asking for the PHONE NUMBER so a tire-only estimate can be sent. FORBIDDEN this turn: asking install again, asking when they want install.`;
+      } else if (installAnswer.state === 'followed_up') {
+        ctaInstruction = `Install has already been answered AND the phone-for-estimate pivot has ALREADY been made by the rep. DO NOT re-pitch the product. DO NOT re-ask install. DO NOT re-ask for phone number. DO NOT add a sales CTA. Respond naturally to whatever the customer's current message actually says — if they sent a phone number, acknowledge briefly. If they're asking timing/scheduling, defer to "the sales rep will sort timing once the estimate's in your hands". Keep variants short and conversational, no product re-pitch.`;
       } else {
         ctaInstruction = `End EVERY variant with the install question as the CTA — "you looking at install too or just the tires?" (or equivalent). Do NOT close with "wanna lock it in", "want me to put a quote together", or "send me your phone number" — phone-for-estimate fires the turn AFTER the install question is answered.`;
       }
