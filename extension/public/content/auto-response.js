@@ -1203,7 +1203,7 @@
         top: 50%;
         left: 50%;
         transform: translate(-50%, -50%);
-        width: 460px;
+        width: 640px;
         max-width: calc(100vw - 32px);
         height: calc(100vh - 80px);
         max-height: 900px;

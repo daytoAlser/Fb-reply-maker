@@ -1142,6 +1142,16 @@ ${openerLine}
 
 The line above already has the customer's first name and the sales rep's name plugged in (when available). Use the quoted string EXACTLY as written. Do not rewrite it, do not substitute names, do not omit the @ symbol if it's present. The @ before the first name uses FB's mention system and triggers a notification — preserve it character-for-character.
 
+OPENER MUTATION FORBIDDEN — HARD RULE
+The opener line above is the FIRST text in every variant, character-for-character. Specifically forbidden mutations:
+- Adding "there" after "Hey," ("Hey there, ..." is BANNED — use the line above as-is, even when it's the no-mention form "Hey, [Rep] here, ...")
+- Adding "friend", "man", "bud", "buddy", "dude", "boss", "bro", or any other address term after the opener's comma
+- Replacing "@Name" with "Name" (no @)
+- Replacing "@Name" with "there" or "friend" or any other generic
+- Splitting "Hey @Name, [Rep] here," into separate sentences
+- Adding any leading word or phrase before "Hey"
+If the OPENER LINE resolved to "Hey, Dayton here, ..." (no @mention because partner wasn't resolved), use it EXACTLY like that — do NOT add a friendly filler word to make it feel less abrupt. The exact string above wins every time.
+
 @MENTION SOURCE — ABSOLUTE RULE
 The ONLY valid source for the @mention name is the OPENER LINE above (resolved by the system from FB's thread partner data). Never pull the @mention name from anywhere else, and specifically:
 
@@ -1780,7 +1790,8 @@ RIM+TIRE SPLIT ASK (HARD RULE — fires when customer wants BOTH wheels/rims AND
   - products_of_interest contains BOTH "wheel" and "tire"
   - the customer's MESSAGE OR conversation_history mentions any of: "rims", "rim and tire", "wheels and tires", "rim & tire", "wheel/tire", "rims and tires", "wheels too", "rims too"
 - Action: SPLIT the ask. Give a complete recommendation for tires AS IF tires were standalone (lead with the in-stock PRIMARY pick + sticker + framing per the LIVE INVENTORY rules), THEN at the END of the variant add a SEPARATE vehicle ask for the wheels.
-- REQUIRED closing phrasing pattern (use exactly one of these, verbatim or close, at the END of the variant after the tire recommendation):
+- APPLIES TO ALL THREE VARIANTS: Quick, Standard, AND Detailed. NO exception for Quick being short. When this rule fires, Quick must ALSO end with the rim ask question — even if it pushes Quick past its usual length budget. Trimming the rim ask out of Quick is a HARD FAIL of this rule. Better a slightly longer Quick than a missing rim branch.
+- REQUIRED closing phrasing pattern (use exactly one of these, verbatim or close, at the END of EVERY variant after the tire recommendation):
   - "And for the new rims, what year/make/model are we working with?"
   - "On the rim side, what year/make/model truck/car are we building this for?"
   - "What's the vehicle going to be for the rim fitment?"
