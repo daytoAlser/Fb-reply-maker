@@ -169,7 +169,9 @@ function resolveDiameter({ capturedFields, productsOfInterest, listingTitle, mes
   // an explicit inch marker.
   const scanText = (text) => {
     if (typeof text !== 'string' || !text.trim()) return null;
-    const tireMatch = text.match(/\b(?:LT|ST|P)?\d{3}\s*\/\s*\d{2}\s*[\/R]\s*(\d{2})\b/i);
+    // Accept both "/" and whitespace as width/aspect separator, and a
+    // single optional R/Z between aspect and diameter.
+    const tireMatch = text.match(/\b(?:LT|ST|P)?\d{3}\s*[\/\s]\s*\d{2}\s*[\/RrZz]?\s*(\d{2})\b/i);
     if (tireMatch) return parseInt(tireMatch[1], 10);
     const inchMatch = text.match(/\b(\d{2})\s*(?:["”]|\s?in(?:ch(?:es)?)?\b|\s?inch\b)/i);
     if (inchMatch) return parseInt(inchMatch[1], 10);

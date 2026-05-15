@@ -66,7 +66,11 @@ export function detectBoltPattern(text) {
 // Formats: optional prefix (ST|LT|P) + width/aspectRdiam.
 // Output classifies the type; mismatch detection requires a vehicle
 // hint from elsewhere (handled in interpret.js).
-const TIRE_RE = /\b(ST|LT|P)?(\d{3})\/(\d{2})\s*R(\d{2})\b/i;
+// Width/aspect separator is "/" OR whitespace; the R between aspect and
+// diameter is optional. Customers write tire sizes many ways:
+// "225/55R19", "225 55 r19", "225 55r19", "225/55/19". Accept them all so
+// we don't re-ask for size we already have.
+const TIRE_RE = /\b(ST|LT|P)?(\d{3})\s*[\/\s]\s*(\d{2})\s*[\/RrZz]?\s*(\d{2})\b/i;
 
 export function detectTireSpec(text) {
   if (typeof text !== 'string' || !text) return null;

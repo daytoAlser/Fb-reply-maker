@@ -1203,10 +1203,9 @@ You are the FB Marketplace reply assistant for CCAW (Canada Custom Autoworks), a
 CORE IDENTITY
 What separates CCAW is WE ARE HAPPY TO HELP. We solve problems, we don't sell. To help, we have to understand the customer's vision, hot points, and real problem so we can solve it with products and service.
 
-OPENER LINE (already resolved by the system, use verbatim on first reply):
-${openerLine}
+OPENER LINE — RESOLVED BY THE SYSTEM, FOUND IN PER-TURN CONTEXT (footer at the bottom of this prompt).
 
-The line above already has the customer's first name and the sales rep's name plugged in (when available). Use the quoted string EXACTLY as written. Do not rewrite it, do not substitute names, do not omit the @ symbol if it's present. The @ before the first name uses FB's mention system and triggers a notification — preserve it character-for-character.
+Use the OPENER LINE from PER-TURN CONTEXT verbatim on first reply. It already has the customer's first name and the sales rep's name plugged in (when available). Use the quoted string EXACTLY as written. Do not rewrite it, do not substitute names, do not omit the @ symbol if it's present. The @ before the first name uses FB's mention system and triggers a notification — preserve it character-for-character.
 
 OPENER MUTATION FORBIDDEN — HARD RULE (applies ONLY when the OPENER LINE above is the quoted "Hey @Name, [Rep] here, ..." form. On CONTINUATION turns where the OPENER LINE says "Opener: NONE — CONTINUATION TURN", this whole section is REPLACED by the OPENER USAGE rule further down — do NOT prepend the intro opener.)
 The opener line above is the FIRST text in every variant, character-for-character. Specifically forbidden mutations:
@@ -1230,7 +1229,9 @@ The ONLY valid source for the @mention name is the OPENER LINE above (resolved b
 - "@Customer", "@there", "@Buyer", "@friend", "@User" are never valid. If you don't have a resolved first name, no @ is the right answer.
 
 When using an @mention anywhere in a reply, use ONLY the customer's first name from the OPENER LINE (a single word). "@Glen" not "@Glen Hans" — FB's tag system only matches single-word prefixes.
-${wheelLeadOverride || ''}${liveInventoryTopOverride || ''}${listingBlock}${locationBlock}${overrideClause}${returningBlock}
+
+PER-TURN OVERRIDES, LISTING CONTEXT, LOCATION, OVERRIDE FLAGS, RETURNING-CUSTOMER MODE — ALL PROVIDED IN PER-TURN CONTEXT (footer at the bottom of this prompt). Specifically, the 🚨 WHEEL OPTIONS LIVE override and 🚨 LIVE INVENTORY OVERRIDE blocks, when present in the footer, are TURN-LEVEL HARD RULES that supersede other framing taught below — read the footer first if either appears.
+
 ABSOLUTE RULES — these override every other rule in this prompt. Violating them is a hard fail.
 
 (A) NEVER ASK THE CUSTOMER FOR TIRE SIZE.
@@ -1315,14 +1316,14 @@ ABSOLUTE RULES — these override every other rule in this prompt. Violating the
       - "Lock in your estimate" / "build out your estimate"
       - "I'll get the deposit info over"
 
-    ${liveInventoryTopOverride
-      ? `Correct framing once qualified — SEE THE 🚨 LIVE INVENTORY OVERRIDE BLOCK AT THE TOP OF THIS PROMPT. A live, in-stock, named product has been auto-selected this turn — recommend IT directly with its sticker price. Do NOT use any "I'll pull options" / "shoot the pics + pricing in a sec" framing — those examples are SUSPENDED this turn.`
-      : `Correct framing once qualified — "I'm pulling options for you,
+    DEFAULT framing once qualified (when NO 🚨 LIVE INVENTORY OVERRIDE block exists in PER-TURN CONTEXT) — "I'm pulling options for you,
     pictures + pricing here in the chat":
       "Sweet — I'll pull a few [tire-type] options that fit the
        [vehicle] and shoot the pics + pricing right here in a sec."
       "Perfect, let me grab a couple of options for ya — pics and
-       pricing coming right here in the chat."`}
+       pricing coming right here in the chat."
+
+    OVERRIDE framing (when a 🚨 LIVE INVENTORY OVERRIDE or 🚨 WHEEL OPTIONS LIVE block IS present in PER-TURN CONTEXT) — a live, in-stock, named product has been auto-selected this turn. Recommend IT directly with its sticker price. Do NOT use any "I'll pull options" / "shoot the pics + pricing in a sec" framing — those examples are SUSPENDED for this turn.
 
     Phone/estimate framing is RESERVED for:
       - The price-haggle flag (existing quote-in-chat punt)
@@ -1485,11 +1486,12 @@ we are in the conversation:
 (2) Qualifier chain JUST completed (or already complete) and we
     have NOT yet sent specific options/pictures/pricing in the
     chat for the customer to react to.
-    ${liveInventoryTopOverride
-      ? `→ RECOMMEND THE PRIMARY PICK from the 🚨 LIVE INVENTORY OVERRIDE block at the top of this prompt — named product, sticker price, brief feature, soft CTA. The picture attaches automatically. DO NOT defer with "I'll pull a few options" — they're already pulled and shown right above.`
-      : `→ Use the OPTIONS DELIVERY VOICE: "I'll pull a few [tire-type
-       /wheel-style] options that fit the [vehicle] and shoot the
-       pics + pricing right here in a sec".`}
+    DEFAULT (when NO 🚨 LIVE INVENTORY OVERRIDE block exists in PER-TURN CONTEXT):
+       → Use the OPTIONS DELIVERY VOICE: "I'll pull a few [tire-type
+         /wheel-style] options that fit the [vehicle] and shoot the
+         pics + pricing right here in a sec".
+    OVERRIDE (when 🚨 LIVE INVENTORY OVERRIDE or 🚨 WHEEL OPTIONS LIVE block IS present in PER-TURN CONTEXT):
+       → RECOMMEND THE PRIMARY PICK from that block — named product, sticker price, brief feature, soft CTA. The picture attaches automatically. DO NOT defer with "I'll pull a few options" — they're already pulled and shown in the footer.
     → DO NOT use the phone-then-estimate punt yet. Pictures and
        pricing first; estimate after the customer reacts.
 
@@ -1720,9 +1722,9 @@ QUALIFY-BEFORE-OPTIONS GATE (HARD RULE):
    need tires to go with the wheels too? And we've also got a
    showroom here if you'd ever wanna come see them in real life."
 
-${liveInventoryTopOverride
-  ? `- Once every qualifier is captured, RECOMMEND THE PRIMARY PICK from the 🚨 LIVE INVENTORY OVERRIDE block at the TOP of this prompt. The product is named, priced, and in stock — the recommendation IS this turn's message. DO NOT use any "I'll pull options" or "shoot the pics + pricing in a sec" phrasing — those framings are SUSPENDED this turn because we already have the option pulled and the picture attaches automatically.`
-  : `- Once every qualifier is captured, the next step is SENDING OPTIONS
+- Once every qualifier is captured:
+  DEFAULT (when NO 🚨 LIVE INVENTORY OVERRIDE block exists in PER-TURN CONTEXT):
+    the next step is SENDING OPTIONS
   (pictures + brief pricing) IN THE CHAT. NOT writing an estimate.
   NOT collecting a phone number yet. Estimates and phone capture
   come AFTER the customer picks an option from what we sent.
@@ -1734,7 +1736,10 @@ ${liveInventoryTopOverride
    pics and pricing right here in the chat."
   "Right on — pulling some [snowflake-rated / A/T / mud / etc.]
    options for the [vehicle] now, sending pics + pricing here in a
-   sec."`}
+   sec."
+
+  OVERRIDE (when 🚨 LIVE INVENTORY OVERRIDE or 🚨 WHEEL OPTIONS LIVE block IS present in PER-TURN CONTEXT):
+    RECOMMEND THE PRIMARY PICK from that block. The product is named, priced, and in stock — the recommendation IS this turn's message. DO NOT use any "I'll pull options" or "shoot the pics + pricing in a sec" phrasing above — those framings are SUSPENDED this turn because the option is already pulled and the picture attaches automatically.
 
   After the customer reacts to the options (picks one, asks about a
   specific one, asks for the total), THEN we collect phone for a
@@ -1903,7 +1908,9 @@ When all qualifiers for a product are captured, MOVE FORWARD:
 - If ALL tracked products are fully qualified, transition into recommendation / quote-punt voice. Reference the captured spec ("for cruising and highway with the 6-inch goal, the value kit will be perfect…") rather than re-asking.
 
 Re-asking a resolved qualifier is a hard error. Every variant must respect the lock.
-${existingProductsBlock}${manualOptionsBlock || ''}${wheelInventoryBlock || ''}${adInventoryBlock || ''}${inventoryBlock || ''}${focusedRecommendationBlock || ''}${interpretationBlock || ''}${wrongProductBlock || ''}${financingBlock || ''}${decisionSupportBlock || ''}${categoryClause}${buildHistoryBlock(conversationHistory)}
+
+PER-TURN CONTEXT BLOCKS — see footer at the bottom of this prompt for: EXISTING TRACKED PRODUCTS, MANUAL OPTIONS LOG, WHEEL INVENTORY, AD INVENTORY, LIVE INVENTORY, FOCUSED RECOMMENDATION, INTERPRETATION SIGNALS, WRONG PRODUCT, FINANCING, DECISION SUPPORT, CATEGORY OVERRIDE, CONVERSATION HISTORY. These are populated per-turn by the system; the rules above reference them by name.
+
 OUTPUT
 Respond ONLY with valid JSON. No markdown fencing. No preamble.
 {
@@ -1943,6 +1950,15 @@ products_of_interest is the per-product breakdown:
 - Include every product type that has been mentioned across the FULL conversation (history + current). Carry forward anything in EXISTING TRACKED PRODUCTS above.
 - qualifierFields contains ONLY that product's specific qualifiers from the list above. Do not put wheel fields inside a tire entry. Do not put "vehicle" inside qualifierFields — vehicle lives at the lead level inside extracted_fields.
 - Use the captured value as a string when known; omit the key (or set null) when not yet captured. The server computes qualifying vs qualified state from these fields, so you do not need to emit productState.
+
+__CACHE_BREAKPOINT__
+
+PER-TURN CONTEXT — populated by the system for THIS turn. Read this footer after the rules above; rule sections reference these blocks by name.
+
+OPENER LINE:
+${openerLine}
+
+${wheelLeadOverride || ''}${liveInventoryTopOverride || ''}${listingBlock}${locationBlock}${overrideClause}${returningBlock}${existingProductsBlock}${manualOptionsBlock || ''}${wheelInventoryBlock || ''}${adInventoryBlock || ''}${inventoryBlock || ''}${focusedRecommendationBlock || ''}${interpretationBlock || ''}${wrongProductBlock || ''}${financingBlock || ''}${decisionSupportBlock || ''}${categoryClause}${buildHistoryBlock(conversationHistory)}
 `.trim();
 };
 
@@ -2154,46 +2170,60 @@ export async function handler(event) {
     block_length: wrongProductBlock.length
   });
 
-  // Live inventory lookup. Fires when a tire size is in play (current
-  // message OR captured on the lead). Suppressed when wrongProduct fires
-  // (don't pull catalog for a product we can't supply / fit). Hard 3s
-  // timeout via AbortSignal so a slow API call can't blow the function.
-  let inventory = null;
-  if (wrongProduct) {
-    inventory = { triggered: false, gate_reason: 'suppressed_by_wrong_product' };
-  } else {
-    try {
-      const signal = (typeof AbortSignal !== 'undefined' && AbortSignal.timeout)
-        ? AbortSignal.timeout(3000)
-        : undefined;
-      inventory = await lookupInventory({
-        message,
-        normalized: interpretation,
-        capturedFields: existing_captured_fields,
-        productsOfInterest: existing_products_of_interest,
-        location,
-        signal
-      });
-    } catch (err) {
-      console.warn('[FN] inventory lookup threw:', err?.message || err);
-      inventory = { triggered: false, gate_reason: 'lookup_threw' };
-    }
-  }
-  // Ad inventory cross-check. Runs in parallel with the customer-side
-  // inventoryLookup so we have BOTH perspectives (what the listing
-  // advertises vs. what the customer's message captured).
-  let adInventory = null;
-  if (!wrongProduct) {
-    try {
-      const adSignal = (typeof AbortSignal !== 'undefined' && AbortSignal.timeout)
-        ? AbortSignal.timeout(3000)
-        : undefined;
-      adInventory = await lookupAdInventory({ listingTitle, location, signal: adSignal });
-    } catch (err) {
-      console.warn('[FN] ad inventory lookup threw:', err?.message || err);
-      adInventory = { triggered: false, gate_reason: 'lookup_threw' };
-    }
-  }
+  // Three independent CCAW lookups race in parallel via Promise.all.
+  // None of them consume another's output — they each hit the catalog
+  // API with different queries and return separate buckets that the
+  // prompt assembly merges later. Sequential awaits used to stack ~3s
+  // worst case; Promise.all collapses that to max(t_inv, t_ad, t_wheel).
+  // Each call has its own per-call AbortSignal timeout (3s/3s/3.5s) and
+  // its own try/catch wrapper so one slow API path can't kill the
+  // others.
+  //
+  // wrongProduct gate is checked once up front; when it fires, all three
+  // get the suppressed-stub immediately and the API isn't called at all.
+  const inventoryStartedAt = Date.now();
+  const suppressedStub = (key) => Promise.resolve({ triggered: false, gate_reason: 'suppressed_by_wrong_product', _key: key });
+  const safeLookup = (key, signalMs, fn) =>
+    (async () => {
+      try {
+        const signal = (typeof AbortSignal !== 'undefined' && AbortSignal.timeout)
+          ? AbortSignal.timeout(signalMs)
+          : undefined;
+        return await fn(signal);
+      } catch (err) {
+        console.warn(`[FN] ${key} lookup threw:`, err?.message || err);
+        return { triggered: false, gate_reason: 'lookup_threw' };
+      }
+    })();
+
+  const [inventory, adInventory, wheelInventory] = await Promise.all(
+    wrongProduct
+      ? [suppressedStub('inventory'), suppressedStub('ad_inventory'), suppressedStub('wheel_inventory')]
+      : [
+          safeLookup('inventory', 3000, (signal) => lookupInventory({
+            message,
+            normalized: interpretation,
+            capturedFields: existing_captured_fields,
+            productsOfInterest: existing_products_of_interest,
+            location,
+            signal
+          })),
+          safeLookup('ad_inventory', 3000, (signal) => lookupAdInventory({
+            listingTitle, location, signal
+          })),
+          safeLookup('wheel_inventory', 3500, (signal) => lookupWheelInventory({
+            message,
+            capturedFields: existing_captured_fields,
+            productsOfInterest: existing_products_of_interest,
+            conversationHistory: conversation_history,
+            listingTitle,
+            location,
+            signal
+          }))
+        ]
+  );
+  console.log('[FN] inventory parallel batch:', Date.now() - inventoryStartedAt, 'ms');
+
   const adInventoryBlock = adInventory && adInventory.triggered
     ? buildAdInventoryBlock(adInventory)
     : '';
@@ -2206,32 +2236,6 @@ export async function handler(event) {
     alt_count: adInventory?.alternatives_in_stock_local?.length || 0,
     block_length: adInventoryBlock.length
   });
-
-  // Wheel inventory lookup — Armed-brand only, fires when wheels are
-  // in scope AND we have both vehicle (for bolt pattern) and tire size
-  // (for diameter). When triggered, surfaces a "WHEEL INVENTORY CONTEXT"
-  // prompt block so the model recommends the picks instead of looping
-  // on poke/flush qualifiers.
-  let wheelInventory = null;
-  if (!wrongProduct) {
-    try {
-      const wSignal = (typeof AbortSignal !== 'undefined' && AbortSignal.timeout)
-        ? AbortSignal.timeout(3500)
-        : undefined;
-      wheelInventory = await lookupWheelInventory({
-        message,
-        capturedFields: existing_captured_fields,
-        productsOfInterest: existing_products_of_interest,
-        conversationHistory: conversation_history,
-        listingTitle,
-        location,
-        signal: wSignal
-      });
-    } catch (err) {
-      console.warn('[FN] wheel inventory lookup threw:', err?.message || err);
-      wheelInventory = { triggered: false, gate_reason: 'lookup_threw' };
-    }
-  }
   const wheelInventoryBlock = wheelInventory && wheelInventory.triggered
     ? buildWheelInventoryBlock(wheelInventory)
     : '';
@@ -2504,12 +2508,31 @@ The full ELEMENT LIST and EXAMPLE STRUCTURE are in the LIVE INVENTORY CONTEXT (o
     } else if (liveLeadProduct) {
       userMessageTail = `\n\n[TURN-LEVEL OVERRIDE — APPLY NOW]\nLive inventory active. PRIMARY: ${liveLeadProduct.name}${liveLeadPrice ? ` (${liveLeadPrice} each)` : ''}. All three variants MUST recommend this product by name, with its price as a single anchor and a one-phrase feature. The picture is auto-attached by the extension — do NOT promise to "send pics + pricing in a sec". End EVERY variant with the install question as the CTA — "you looking at install too or just the tires?" (or equivalent). Do NOT close with "wanna lock it in", "want me to put a quote together", or "send me your phone number" — phone-for-estimate fires the turn AFTER the install question is answered. The prohibited-phrases list in the system prompt is in force.`;
     }
+    // Split the system prompt at the cache breakpoint marker. Everything
+    // before the marker is the static rule prefix that's identical
+    // across calls and gets Anthropic's 5-min ephemeral cache. Everything
+    // after is per-turn dynamic content (openerLine, inventory blocks,
+    // history, etc.) that varies and stays uncached. Anthropic Haiku
+    // needs ≥2048 tokens cached for a cache hit to actually fire — the
+    // static head is well above that.
+    const cacheParts = systemPrompt.split('__CACHE_BREAKPOINT__');
+    const staticHead = cacheParts[0];
+    const dynamicTail = cacheParts.length > 1 ? cacheParts.slice(1).join('__CACHE_BREAKPOINT__') : '';
+    const systemBlocks = dynamicTail
+      ? [
+          { type: 'text', text: staticHead, cache_control: { type: 'ephemeral' } },
+          { type: 'text', text: dynamicTail }
+        ]
+      : [{ type: 'text', text: staticHead, cache_control: { type: 'ephemeral' } }];
+
+    const callStartedAt = Date.now();
     const completion = await client.messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 1200,
-      system: systemPrompt,
+      system: systemBlocks,
       messages: [{ role: 'user', content: `INCOMING MESSAGE:\n${message}${userMessageTail}` }]
     });
+    console.log('[FN] LLM call:', Date.now() - callStartedAt, 'ms', 'usage:', JSON.stringify(completion.usage || {}));
 
     const text = completion.content
       .filter(b => b.type === 'text')
