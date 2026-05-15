@@ -19,3 +19,10 @@
   # changed in the latest commit. The first deploy after this config
   # lands WILL still run because netlify.toml is in the diff.
   ignore       = "git diff --quiet HEAD^ HEAD -- netlify/ netlify.toml"
+
+# Without this block, the root netlify.toml shadows the subdirectory
+# netlify/netlify.toml, and functions deploy unbundled — Lambda then
+# loads them as CJS and ESM `import` statements throw at runtime.
+# Esbuild bundles each function into a self-contained ESM module.
+[functions]
+  node_bundler = "esbuild"
