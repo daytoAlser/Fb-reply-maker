@@ -49,6 +49,35 @@ function homeQty(it, homeShort) {
   return hit ? hit.qty : 0;
 }
 
+// Resolves a wheel's diameter from multiple signals — the CCAW API's
+// specs.diameter is often null on wheels (only populated for some SKUs).
+// Falls back to parsing "NNxN" from the name ("Armed Frontline 18x9" →
+// 18) or from the SKU. Returns null if nothing usable.
+function resolveItemDiameter(it) {
+  if (!it) return null;
+  if (it.specs && it.specs.diameter) {
+    const n = Number(it.specs.diameter);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  const tryParse = (s) => {
+    if (typeof s !== 'string') return null;
+    const m = s.match(/\b(\d{2})\s*[xX]\s*\d/);
+    if (m) return parseInt(m[1], 10);
+    return null;
+  };
+  return tryParse(it.name) || tryParse(it.sku) || null;
+}
+
+// Bolt pattern is rarely surfaced on the item — best-effort scan over
+// name + description. Accepts both "6x139.7" and "6x139" forms.
+function itemHasBoltPattern(it, canonical) {
+  if (!it || !canonical) return false;
+  const noDec = String(canonical).replace(/\.\d+$/, '');
+  const re = new RegExp(`\\b${noDec.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\.\\d+)?\\b`, 'i');
+  const hay = [it.name, it.rawDescription, it.model].filter(Boolean).join(' ');
+  return re.test(hay);
+}
+
 function shapeWheelForPrompt(it, homeShort) {
   return {
     sku: it.sku,
@@ -187,7 +216,12 @@ export async function lookupWheelInventory({
     return { triggered: false, gate_reason: 'no_home_location' };
   }
 
-  const query = `Armed ${diameter} ${boltPattern}`;
+  // Query format the rep specified: diameter as "17x" (matches "17x9",
+  // "17x8.5" etc. wheel SKUs/names without locking width), bolt pattern
+  // without decimal as "6x139" (matches both "6x139" and "6x139.7" in
+  // fulltext).
+  const boltNoDecimal = String(boltPattern).replace(/\.\d+$/, '');
+  const query = `Armed ${diameter}x ${boltNoDecimal}`;
   const result = await searchInventory(query, { homeLocation: homeKey, limit: 100, signal });
   if (!result.ok) {
     return {
@@ -198,11 +232,16 @@ export async function lookupWheelInventory({
     };
   }
 
-  // Strict: brand or name must contain "Armed". Diameter must match
-  // (skip the filter when specs.diameter is missing — trust the query).
+  // Strict filtering: Armed brand AND diameter matches (parsed from
+  // specs OR name OR sku). Bolt pattern: best-effort name/description
+  // scan when specs don't include it (most wheels don't). The query
+  // already biased the result by bolt pattern; the filter just trims
+  // obvious mismatches.
   const items = (result.data.items || []).filter((it) => {
     if (!isArmed(it)) return false;
-    if (it.specs?.diameter && Number(it.specs.diameter) !== Number(diameter)) return false;
+    const d = resolveItemDiameter(it);
+    if (d !== null && d !== Number(diameter)) return false;
+    if (d === null) return false; // No diameter signal at all → can't trust the size, skip.
     return true;
   });
 
