@@ -77,10 +77,21 @@ export function detectWheelSizeTradeoff(message) {
 // includes already_modified (customer's clearly past pre-sale, no need
 // to clarify body for fitment).
 const RAM_MENTION = /\bram\s*\d?\d?\s*(?:1500|2500|3500|truck)?\b/i;
+// HD Rams (2500/3500) are always 8-lug regardless of body style — no
+// classic-vs-new ambiguity. The body-style question is RESERVED for 1500s.
+const RAM_HD_MENTION = /\bram\s*\d?\d?\s*(?:2500|3500|4500|5500|hd|heavy[\s-]?duty|cummins|hemi\s*hd)\b/i;
+// Conservative 1500-explicit signal so we only fire the body question when
+// we're confident it's a 1500. "ram 1500", "1500", or absence of HD signals
+// alongside a Ram mention.
+const RAM_1500_MENTION = /\bram\s*\d?\d?\s*1500\b|\b1500\b/i;
 
 export function detectRamBody({ message, vehicleEra, vehicleSubtype }) {
   if (typeof message !== 'string' || !message) return null;
   if (!RAM_MENTION.test(message)) return null;
+  // HD Ram → not the body-question case.
+  if (RAM_HD_MENTION.test(message)) {
+    return { generation: null, year: vehicleEra?.year || null, body_question_needed: false, sub_model: 'hd' };
+  }
   const year = vehicleEra?.year || null;
   if (!year) {
     // Customer said "Ram" but didn't anchor a year — soft signal only,
@@ -91,10 +102,15 @@ export function detectRamBody({ message, vehicleEra, vehicleSubtype }) {
   if (!gen) return null;
   const alreadyModified = Array.isArray(vehicleSubtype)
     && vehicleSubtype.includes('already_modified');
+  // Body question is ONLY a real ambiguity for 1500s. If we can't confirm
+  // 1500 from the message, suppress the flag — better to skip a useful
+  // question than to ask it on a 2500/3500 where it doesn't apply.
+  const isOneFiveHundred = RAM_1500_MENTION.test(message);
   return {
     year,
     generation: gen.gen,
-    body_question_needed: !!(gen.bodyQuestionNeeded && !alreadyModified)
+    sub_model: isOneFiveHundred ? '1500' : 'unknown',
+    body_question_needed: !!(gen.bodyQuestionNeeded && !alreadyModified && isOneFiveHundred)
   };
 }
 

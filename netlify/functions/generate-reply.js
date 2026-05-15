@@ -516,7 +516,9 @@ function buildInterpretationBlock(interpretation) {
 
   const ram = interpretation.ram_body;
   if (ram && ram.body_question_needed) {
-    lines.push(`- SOFT RULE — RAM BODY UNCLEAR: ${ram.year} Ram falls in the 5th-gen / "Classic" body overlap. If you're about to quote fitment specs, confirm body style first: "Is this the classic or the new body Ram?". Skip if already-modified subtype was detected.`);
+    lines.push(`- SOFT RULE — RAM 1500 BODY UNCLEAR: ${ram.year} Ram 1500 falls in the 5th-gen / "Classic" body overlap. If you're about to quote fitment specs, confirm body style first: "Is this the classic or the new body Ram?". Skip if already-modified subtype was detected.`);
+  } else if (ram && ram.sub_model === 'hd') {
+    lines.push(`- RAM HD DETECTED (${ram.year || 'year unknown'} Ram 2500/3500/4500/5500). DO NOT ask "is this the classic or the new body" — that question is for 1500s only. HD Rams are always 8-lug (8x165.1 / 8x6.5"); bolt pattern is unambiguous. Skip body-style framing entirely. The right next qualifiers for an HD Ram wheel buyer are: (1) "did you need tires to go with the rims as well, or just the rims?" and (2) "is the truck lifted, levelled, or stock?".`);
   }
 
   if (lines.length === 0) return '';
@@ -1561,7 +1563,7 @@ WORKFLOW INTEGRITY (hard rules, never violate):
 7. All CCAW product is brand new. Correct false claims cleanly + pivot to package value.
 
 FITMENT KNOWLEDGE (use when relevant):
-- Ram 1500: 5-bolt = Classic body, 6-bolt = new body. 35s with a 2" level only clear on Classic; new body rubs.
+- Ram 1500 ONLY (2019+): 5-bolt = Classic body, 6-bolt = new body. 35s with a 2" level only clear on Classic; new body rubs. The classic-vs-new body question is RESERVED for Ram 1500s in the 2019+ overlap years. DO NOT ask it on a Ram 2500/3500/4500/5500 — HD Rams are always 8-lug (8x165.1), no body-style ambiguity for bolt pattern. For an HD Ram wheel buyer, the right qualifiers are "tires too or just rims?" and "lifted/levelled/stock?", NOT a bolt-pattern question.
 - F150: factory tire sizes 17–22 inch depending on trim.
 - 24x14 with 37s on a 6" lift: trimming required for full turning.
 - Toyo Open Country AT3: P-rated vs 10-ply E-rated, different load capacity.
