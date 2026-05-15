@@ -872,7 +872,7 @@
     const card = document.createElement('article');
     card.className = 'fbrm-ar-variant-card';
     const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
-    const previewUrls = attachImageUrls.slice(0, 2);
+    const previewUrls = attachImageUrls.slice(0, 3);
     const imgCount = previewUrls.length;
 
     card.innerHTML = `
