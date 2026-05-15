@@ -16,6 +16,12 @@ import { lookupInventory } from './lib/interpretation/inventoryLookup.js';
 // + brand and reports exact-match local stock vs same-size alternatives.
 import { lookupAdInventory } from './lib/interpretation/adInventoryLookup.js';
 import { lookupWheelInventory } from './lib/interpretation/wheelInventoryLookup.js';
+// RideStyler-backed vehicle fitment lookup — gives the AI bolt pattern,
+// OEM tire sizes, offset/diameter/width ranges, lug specs, TPMS/runflat
+// flags for any year/make/model captured. Broader vehicle coverage than
+// the hardcoded vehicleBoltPattern.js table (which only handles trucks
+// the wheel inventory path needs).
+import { lookupFitment } from './lib/interpretation/fitmentLookup.js';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -969,6 +975,109 @@ function buildWheelInventoryBlock(wheels) {
   return '\n' + lines.join('\n') + '\n';
 }
 
+// VEHICLE FITMENT prompt block. Surfaces RideStyler-sourced fitment data
+// (bolt pattern, OEM tire sizes, offset/diameter/width ranges, lug specs)
+// to the AI as SOURCE OF TRUTH. Conservatively phrased so the AI does
+// NOT auto-quote tire options off this data — the "install y/n then phone
+// for estimate" CTA flow still owns that path.
+function buildFitmentBlock(fit) {
+  if (!fit || !fit.triggered) return '';
+  const lines = [];
+  lines.push('=== VEHICLE FITMENT DATA (SOURCE OF TRUTH — use these specs verbatim) ===');
+  lines.push('');
+  lines.push(`Vehicle: ${fit.vehicle}`);
+  lines.push(`Source: RideStyler · ${fit.variants_found} variants found, ${fit.variants_profiled} profiled`);
+  lines.push('');
+
+  if (fit.bolt_pattern) {
+    let line = `Bolt pattern: ${fit.bolt_pattern}`;
+    if (fit.bolt_pattern_secondary) line += ` (and ${fit.bolt_pattern_secondary} — varies by trim/body)`;
+    lines.push(line);
+  }
+  if (fit.bolt_pattern_note) lines.push(`Note: ${fit.bolt_pattern_note}`);
+
+  if (Array.isArray(fit.oem_tire_sizes) && fit.oem_tire_sizes.length > 0) {
+    const list = fit.oem_tire_sizes.join(', ');
+    const suffix = fit.oem_tire_sizes.length > 1 ? ' (varies by trim)' : '';
+    lines.push(`OEM tire size(s): ${list}${suffix}`);
+  }
+  if (Array.isArray(fit.oem_tire_staggered_pairs) && fit.oem_tire_staggered_pairs.length > 0) {
+    for (const p of fit.oem_tire_staggered_pairs) {
+      lines.push(`  Staggered pair: F ${p.front} / R ${p.rear}`);
+    }
+  }
+
+  if (fit.hub_bore_mm != null) lines.push(`Hub bore: ${fit.hub_bore_mm} mm`);
+
+  const lugBits = [];
+  if (fit.lug_type) lugBits.push(`Lug type: ${fit.lug_type}`);
+  if (fit.thread_pitch) lugBits.push(`Thread pitch: ${fit.thread_pitch}`);
+  if (fit.lug_torque_ftlb != null) {
+    const nm = fit.lug_torque_nm != null ? ` (${fit.lug_torque_nm} Nm)` : '';
+    lugBits.push(`Torque: ${fit.lug_torque_ftlb} ft·lb${nm}`);
+  }
+  if (lugBits.length) lines.push(lugBits.join(' · '));
+
+  const rangeBits = [];
+  if (fit.wheel_diameter_range && (fit.wheel_diameter_range.min != null || fit.wheel_diameter_range.max != null)) {
+    rangeBits.push(`Wheel diameter range: ${fit.wheel_diameter_range.min}" – ${fit.wheel_diameter_range.max}"`);
+  }
+  if (fit.wheel_width_range && (fit.wheel_width_range.min != null || fit.wheel_width_range.max != null)) {
+    rangeBits.push(`Width range: ${fit.wheel_width_range.min}" – ${fit.wheel_width_range.max}"`);
+  }
+  if (rangeBits.length) lines.push(rangeBits.join('   ·   '));
+
+  if (fit.offset_range && (fit.offset_range.min != null || fit.offset_range.max != null)) {
+    lines.push(`Offset range: ${fit.offset_range.min}mm to ${fit.offset_range.max}mm`);
+  }
+
+  const flagBits = [];
+  flagBits.push(`TPMS: ${fit.has_tpms ? 'yes' : 'no'}`);
+  flagBits.push(`Runflat: ${fit.has_runflat ? 'yes' : 'no'}`);
+  flagBits.push(`Staggered: ${fit.oem_tire_staggered ? 'yes (see pairs above)' : 'no'}`);
+  lines.push(flagBits.join(' · '));
+
+  // Per-variant map — only render when there's something useful to
+  // disambiguate (more than one variant OR more than one unique tire
+  // size). Single-trim cars don't need this section.
+  const showPerVariant = Array.isArray(fit.per_variant)
+    && fit.per_variant.length > 1
+    && (fit.oem_tire_sizes.length > 1 || fit.per_variant.some(v => v.tire_sizes && v.tire_sizes.length > 1));
+  if (showPerVariant) {
+    lines.push('');
+    lines.push('PER-VARIANT TIRE SIZES (use when customer names a trim):');
+    for (const v of fit.per_variant) {
+      const label = [v.trim, v.drivetrain, v.cab, v.bed].filter(Boolean).join(' · ') || v.full_description || '(variant)';
+      const sizes = (v.tire_sizes || []).map(ts => {
+        if (ts.staggered && ts.front && ts.rear) return `F ${ts.front} / R ${ts.rear} (staggered)`;
+        return ts.front || ts.rear || '(unknown)';
+      });
+      const sizeText = sizes.length ? sizes.join('; ') : '(no OEM tire data)';
+      lines.push(`- ${label}: ${sizeText}`);
+    }
+  }
+
+  lines.push('');
+  lines.push('USE THIS WHEN:');
+  lines.push('- Customer asks bolt pattern, tire size, offset, hub bore, lug specs, OEM size, or "what fits".');
+  lines.push('- You need to confirm a wheel/tire size is compatible — check against the ranges above.');
+  if (showPerVariant) {
+    lines.push('- Customer names a trim → quote from PER-VARIANT TIRE SIZES above, not the roll-up.');
+  }
+  if (Array.isArray(fit.oem_tire_sizes) && fit.oem_tire_sizes.length > 1) {
+    lines.push('- Multiple OEM sizes listed and trim is unknown → name the spread and ask which trim they\'re on.');
+  }
+  lines.push('');
+  lines.push('DO NOT:');
+  lines.push('- Auto-quote tire options off this data. Keep the "install y/n then phone for estimate" CTA flow.');
+  lines.push('- Combine with wheel inventory picks unless the wheel inventory block is also present.');
+  if (fit.bolt_pattern_secondary) {
+    lines.push('- Guess between the two bolt patterns. Ask the customer for body style / trim first.');
+  }
+  lines.push('===');
+  return '\n' + lines.join('\n') + '\n';
+}
+
 // FOCUSED RECOMMENDATION prompt block. Emitted when the rep clicks a
 // specific tire card in the side panel — all 3 variants get rewritten to
 // recommend THIS product by name. Overrides iLink-first and
@@ -1182,7 +1291,7 @@ ENDING:
 `;
 }
 
-const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock, decisionSupportBlock, wrongProductBlock, financingBlock, manualOptionsBlock, inventoryBlock, focusedRecommendationBlock, liveInventoryTopOverride, wheelLeadOverride, adInventoryBlock, wheelInventoryBlock }) => {
+const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock, decisionSupportBlock, wrongProductBlock, financingBlock, manualOptionsBlock, inventoryBlock, focusedRecommendationBlock, liveInventoryTopOverride, wheelLeadOverride, adInventoryBlock, wheelInventoryBlock, fitmentBlock }) => {
   const listingBlock = listingTitle && listingTitle.trim()
     ? `\nLISTING CONTEXT\nThe customer is messaging about this listing: "${listingTitle.trim()}". Use this together with the customer's message to infer ad_type (wheel / tire / accessory / lift) per the detection signals below.\n`
     : '';
@@ -1960,7 +2069,7 @@ PER-TURN CONTEXT — populated by the system for THIS turn. Read this footer aft
 OPENER LINE:
 ${openerLine}
 
-${wheelLeadOverride || ''}${liveInventoryTopOverride || ''}${listingBlock}${locationBlock}${overrideClause}${returningBlock}${existingProductsBlock}${manualOptionsBlock || ''}${wheelInventoryBlock || ''}${adInventoryBlock || ''}${inventoryBlock || ''}${focusedRecommendationBlock || ''}${interpretationBlock || ''}${wrongProductBlock || ''}${financingBlock || ''}${decisionSupportBlock || ''}${categoryClause}${buildHistoryBlock(conversationHistory)}
+${wheelLeadOverride || ''}${liveInventoryTopOverride || ''}${listingBlock}${locationBlock}${overrideClause}${returningBlock}${existingProductsBlock}${manualOptionsBlock || ''}${fitmentBlock || ''}${wheelInventoryBlock || ''}${adInventoryBlock || ''}${inventoryBlock || ''}${focusedRecommendationBlock || ''}${interpretationBlock || ''}${wrongProductBlock || ''}${financingBlock || ''}${decisionSupportBlock || ''}${categoryClause}${buildHistoryBlock(conversationHistory)}
 `.trim();
 };
 
@@ -2198,9 +2307,14 @@ export async function handler(event) {
       }
     })();
 
-  const [inventory, adInventory, wheelInventory] = await Promise.all(
+  const [inventory, adInventory, wheelInventory, fitment] = await Promise.all(
     wrongProduct
-      ? [suppressedStub('inventory'), suppressedStub('ad_inventory'), suppressedStub('wheel_inventory')]
+      ? [
+          suppressedStub('inventory'),
+          suppressedStub('ad_inventory'),
+          suppressedStub('wheel_inventory'),
+          suppressedStub('fitment')
+        ]
       : [
           safeLookup('inventory', 3000, (signal) => lookupInventory({
             message,
@@ -2222,6 +2336,12 @@ export async function handler(event) {
             conversationHistory: conversation_history,
             listingTitle,
             location,
+            signal
+          })),
+          safeLookup('fitment', 3500, (signal) => lookupFitment({
+            message,
+            capturedFields: existing_captured_fields,
+            conversationHistory: conversation_history,
             signal
           }))
         ]
@@ -2251,6 +2371,20 @@ export async function handler(event) {
     diameter: wheelInventory?.diameter || null,
     picks: wheelInventory?.picks?.length || 0,
     block_length: wheelInventoryBlock.length
+  });
+  const fitmentBlock = fitment && fitment.triggered
+    ? buildFitmentBlock(fitment)
+    : '';
+  console.log('[FN] fitment:', {
+    triggered: !!fitment?.triggered,
+    gate_reason: fitment?.gate_reason || null,
+    vehicle: fitment?.vehicle || null,
+    bolt_pattern: fitment?.bolt_pattern || null,
+    bolt_pattern_secondary: fitment?.bolt_pattern_secondary || null,
+    oem_tire_sizes: fitment?.oem_tire_sizes?.length || 0,
+    variants_found: fitment?.variants_found || 0,
+    variants_profiled: fitment?.variants_profiled || 0,
+    block_length: fitmentBlock.length
   });
 
   // Focused recommendation: if the rep clicked a specific pick, suppress the
@@ -2534,7 +2668,8 @@ The full ELEMENT LIST and EXAMPLE STRUCTURE are in the LIVE INVENTORY CONTEXT (o
     liveInventoryTopOverride,
     wheelLeadOverride,
     adInventoryBlock,
-    wheelInventoryBlock
+    wheelInventoryBlock,
+    fitmentBlock
   });
 
   console.log('[FN] resolved opener:', openerLine);
