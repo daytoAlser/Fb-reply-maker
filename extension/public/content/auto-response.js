@@ -389,6 +389,7 @@
     // CONTEXT both depend on it. Silently bail on prefetch (caller
     // surfaces a visible error when the user clicks).
     if (!settings.location || !settings.location.name) return null;
+    swlog('doGenerate fired thread=' + (threadId || '?') + ' partner=' + JSON.stringify(detect.partnerName || null) + ' listing=' + JSON.stringify((detect.listingTitle || '').slice(0, 60)) + ' location=' + JSON.stringify(settings.location.name));
     const payload = {
       endpoint: config.endpoint,
       secret: config.secret,
@@ -620,7 +621,7 @@
       };
 
       setLoadingStatus('Asking Claude for variants…');
-      swlog('generate request thread=' + (threadId || '?') + ' history=' + (detect.conversationHistory?.length || 0) + ' storage=' + Math.round(tStorage) + 'ms');
+      swlog('generate request thread=' + (threadId || '?') + ' history=' + (detect.conversationHistory?.length || 0) + ' storage=' + Math.round(tStorage) + 'ms partner=' + JSON.stringify(detect.partnerName || null) + ' listing=' + JSON.stringify((detect.listingTitle || '').slice(0, 60)));
       const tApi = performance.now();
       const resp = await chrome.runtime.sendMessage({ type: 'GENERATE_REPLY', payload });
       const tApiDone = performance.now();
