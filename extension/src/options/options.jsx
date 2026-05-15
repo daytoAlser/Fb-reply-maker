@@ -16,6 +16,28 @@ const CATEGORIES = [
   'other'
 ];
 
+// CCAW locations — mirrors netlify/functions/lib/inventory/client.js
+// LOCATIONS. The `name` field is what the backend's
+// homeLocationKeyFromName() uses to resolve the inventory sort key.
+// Keep names byte-identical to the client.js array.
+const CCAW_LOCATIONS = [
+  { name: 'Red Deer',       short: 'RD',  key: 'custitem_red_deer_int_ecomm_inv' },
+  { name: 'Calgary',        short: 'CAL', key: 'custitem_calgary_int_ecomm_inv' },
+  { name: 'Edmonton',       short: 'EDM', key: 'custitem_edmonton_int_ecomm_inv' },
+  { name: 'Airdrie',        short: 'AIR', key: 'custitem_airdrie_int_ecomm_inv' },
+  { name: 'Fort Sask',      short: 'FTS', key: 'custitem_ft_sask_int_ecomm_inv' },
+  { name: 'Grande Prairie', short: 'GP',  key: 'custitem_grande_prairie_int_ecomm_inv' },
+  { name: 'Lloydminster',   short: 'LLD', key: 'custitem_lloydminster_int_ecomm_inv' },
+  { name: 'Regina',         short: 'REG', key: 'custitem_regina_int_ecomm_inv' },
+  { name: 'Saskatoon',      short: 'SAS', key: 'custitem_saskatoon_int_ecomm_inv' },
+  { name: 'Spruce Grove',   short: 'SG',  key: 'custitem_spruce_grove_int_ecomm_inv' },
+  { name: 'Kelowna',        short: 'KEL', key: 'custitem_westbank_int_ecomm_inv' },
+  { name: 'Kamloops',       short: 'KAM', key: 'custitem_kamloops_int_ecomm_inv' },
+  { name: 'Lethbridge',     short: 'LTH', key: 'custitem_lethbridge_int_ecomm_inv' },
+  { name: 'Medicine Hat',   short: 'MH',  key: 'custitem_medicine_hat_int_ecomm_inv' },
+  { name: 'Fedco',          short: 'FED', key: 'custitem_fedco_int_ecomm_inv' }
+];
+
 function Options() {
   const [state, setState] = useState(null);
   const [saved, setSaved] = useState(false);
@@ -84,16 +106,31 @@ function Options() {
       <section className="card">
         <h2>Location</h2>
         <label className="field">
-          <span className="mono">LOCATION NAME</span>
-          <input
-            type="text"
+          <span className="mono">YOUR CCAW LOCATION</span>
+          <select
             value={state.location?.name || ''}
-            onChange={(e) => update('location', 'name', e.target.value)}
-            placeholder="e.g. Calgary"
-            spellCheck={false}
-          />
+            onChange={(e) => {
+              const picked = CCAW_LOCATIONS.find((l) => l.name === e.target.value);
+              setState({
+                ...state,
+                location: {
+                  ...state.location,
+                  name: picked ? picked.name : '',
+                  short: picked ? picked.short : '',
+                  key: picked ? picked.key : ''
+                }
+              });
+              setSaved(false);
+            }}
+            required
+          >
+            <option value="" disabled>Pick a location…</option>
+            {CCAW_LOCATIONS.map((l) => (
+              <option key={l.key} value={l.name}>{l.name}</option>
+            ))}
+          </select>
           <span className="field-hint">
-            Used in the missed-call reframe ("The Calgary store gets busy").
+            Drives inventory ranking — picks at YOUR location land first in every recommendation, with "ready to rock at {state.location?.name || '[location]'}" framing. Required.
           </span>
         </label>
         <label className="field">

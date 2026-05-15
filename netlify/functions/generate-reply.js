@@ -12,6 +12,9 @@ import { detectFinancingMode } from './lib/interpretation/financing.js';
 import { FINANCING_FAQ } from './lib/data/financing-faq.js';
 // Live inventory lookup — fires when a tire size is in play.
 import { lookupInventory } from './lib/interpretation/inventoryLookup.js';
+// Ad-driven inventory cross-check — parses the listing title for size
+// + brand and reports exact-match local stock vs same-size alternatives.
+import { lookupAdInventory } from './lib/interpretation/adInventoryLookup.js';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -827,6 +830,77 @@ HARD RULES (this turn):
 `;
 }
 
+// AD INVENTORY CONTEXT prompt block. Emitted when the customer came in
+// on a Marketplace listing whose product we can match against live
+// inventory at the rep's home location. The block tells the model:
+//   - what was advertised (brand + size)
+//   - whether the EXACT listed product is in stock locally
+//   - what in-stock-local alternatives exist in the same size
+// HARD RULES below instruct the model to push the in-stock-local
+// option first and gracefully acknowledge the listed brand if it's
+// only available via warehouse.
+function buildAdInventoryBlock(ad) {
+  if (!ad || !ad.triggered) return '';
+  const home = ad.home_location || 'your store';
+  const size = ad.listed_size;
+  const brand = ad.listed_brand;
+  const renderPick = (it, prefix = '') => {
+    if (!it) return '';
+    const price = it.priceFormatted || (it.price ? `$${it.price.toFixed(2)}` : '');
+    const framing = it.availabilityFraming === 'ready_to_rock'
+      ? `ready to rock at ${home}`
+      : it.availabilityFraming === 'we_can_get_those'
+        ? 'we can get those for ya (warehouse, few days out)'
+        : '';
+    const homeQty = it.homeStock ? it.homeStock.qty : 0;
+    return `${prefix}${it.name} — ${price} · ${home}: ${homeQty} · ${framing}`;
+  };
+
+  const lines = [];
+  lines.push('AD INVENTORY CONTEXT (the customer messaged from a Marketplace listing — checked against live inventory at the rep\'s home location).');
+  lines.push('');
+  lines.push(`Listing parsed: size=${size}` + (brand ? ` · brand=${brand}` : ' · brand=unknown'));
+  lines.push(`Home location: ${home}`);
+  lines.push('');
+  if (ad.listed_status === 'in_stock_local') {
+    lines.push(`✓ EXACT LISTED PRODUCT IS IN STOCK at ${home}:`);
+    ad.listed_in_stock_local.forEach((it) => lines.push('  - ' + renderPick(it)));
+  } else if (ad.listed_status === 'warehouse_only') {
+    lines.push(`◇ Listed ${brand || 'product'} is NOT in stock at ${home}, but IS available via warehouse (few days out):`);
+    ad.listed_warehouse_picks.forEach((it) => lines.push('  - ' + renderPick(it)));
+  } else if (ad.listed_status === 'not_in_catalog') {
+    lines.push(`✗ Listed ${brand || 'product'} not in our catalog at all (or zero results in ${size}).`);
+  } else {
+    lines.push(`◇ Listing didn't name a specific brand. Matching by size only.`);
+  }
+  lines.push('');
+  if (ad.alternatives_in_stock_local && ad.alternatives_in_stock_local.length > 0) {
+    lines.push(`In stock at ${home} in the same ${size} (any brand, alternatives):`);
+    ad.alternatives_in_stock_local.forEach((it) => lines.push('  - ' + renderPick(it)));
+  } else {
+    lines.push(`No other brand alternatives in ${size} are in stock at ${home} right now.`);
+  }
+  lines.push('');
+  lines.push('HARD RULES (this turn):');
+  if (ad.listed_status === 'in_stock_local') {
+    lines.push(`- ✓ The EXACT listed product is on the shelf at ${home}. Lead variants with this product — that's what the customer came in on AND we have it.`);
+    lines.push(`- Use the framing "ready to rock at ${home}" (NOT "in stock").`);
+  } else if (ad.listed_status === 'warehouse_only') {
+    lines.push(`- The listed ${brand || 'item'} is warehouse-only. ACKNOWLEDGE that honestly ("we can get those Transmate from the warehouse for sure, just a few days out").`);
+    if (ad.alternatives_in_stock_local && ad.alternatives_in_stock_local.length > 0) {
+      lines.push(`- THEN pivot to an in-stock-local alternative ("but we've got the iLink Multimatch in the same ${size} ready to roll at ${home} today — wanna do those instead?"). Push the in-stock option as the path to get rolling TODAY.`);
+    }
+  } else if (ad.listed_status === 'not_in_catalog' && ad.alternatives_in_stock_local && ad.alternatives_in_stock_local.length > 0) {
+    lines.push(`- The listed ${brand || 'product'} isn't something we carry. Don't promise we can get it. Instead, surface the same-size alternatives we DO have in stock at ${home} as the natural pivot.`);
+  }
+  if (ad.alternatives_in_stock_local && ad.alternatives_in_stock_local.length > 0) {
+    lines.push(`- Frame in-stock-local picks as "ready to rock at ${home}" — emphasize TODAY availability. Anchor ONE sticker price per variant max.`);
+  }
+  lines.push('- Real SKUs only. Do not invent products, prices, or stock claims. Everything above is live data.');
+  lines.push('- ABSOLUTE RULE D2 still applies: never say "in stock" generically — use "ready to rock at ' + home + '" / "we can get those".');
+  return '\n' + lines.join('\n') + '\n';
+}
+
 // FOCUSED RECOMMENDATION prompt block. Emitted when the rep clicks a
 // specific tire card in the side panel — all 3 variants get rewritten to
 // recommend THIS product by name. Overrides iLink-first and
@@ -1040,7 +1114,7 @@ ENDING:
 `;
 }
 
-const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock, decisionSupportBlock, wrongProductBlock, financingBlock, manualOptionsBlock, inventoryBlock, focusedRecommendationBlock, liveInventoryTopOverride }) => {
+const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock, decisionSupportBlock, wrongProductBlock, financingBlock, manualOptionsBlock, inventoryBlock, focusedRecommendationBlock, liveInventoryTopOverride, adInventoryBlock }) => {
   const listingBlock = listingTitle && listingTitle.trim()
     ? `\nLISTING CONTEXT\nThe customer is messaging about this listing: "${listingTitle.trim()}". Use this together with the customer's message to infer ad_type (wheel / tire / accessory / lift) per the detection signals below.\n`
     : '';
@@ -1632,7 +1706,7 @@ VARIANT LENGTH:
 - standard: opener + 1–2 qualifiers, 2–3 sentences.
 - detailed: opener + full qualifier chain for the ad type, 4+ sentences.
 
-DROP THE OPENER only when conversation_history shows the customer has directly answered 2+ qualifying questions. "Yes interested" / "still got these" do NOT count.
+ALWAYS USE THE OPENER LINE on every reply, regardless of how deep the conversation is. The opener is Dayton's brand signature — "Hey @CustomerName, Dayton here" or its no-mention equivalent — and it leads every variant in every turn. Do NOT drop the opener after qualifying questions are answered. Do NOT replace it with informal lead-ins like "Hey, perfect —" or just "Perfect, …". The opener line above is the FIRST text in every variant, character-for-character.
 
 MULTI-PRODUCT TRACKING
 
@@ -1714,7 +1788,7 @@ When all qualifiers for a product are captured, MOVE FORWARD:
 - If ALL tracked products are fully qualified, transition into recommendation / quote-punt voice. Reference the captured spec ("for cruising and highway with the 6-inch goal, the value kit will be perfect…") rather than re-asking.
 
 Re-asking a resolved qualifier is a hard error. Every variant must respect the lock.
-${existingProductsBlock}${manualOptionsBlock || ''}${inventoryBlock || ''}${focusedRecommendationBlock || ''}${interpretationBlock || ''}${wrongProductBlock || ''}${financingBlock || ''}${decisionSupportBlock || ''}${categoryClause}${buildHistoryBlock(conversationHistory)}
+${existingProductsBlock}${manualOptionsBlock || ''}${adInventoryBlock || ''}${inventoryBlock || ''}${focusedRecommendationBlock || ''}${interpretationBlock || ''}${wrongProductBlock || ''}${financingBlock || ''}${decisionSupportBlock || ''}${categoryClause}${buildHistoryBlock(conversationHistory)}
 OUTPUT
 Respond ONLY with valid JSON. No markdown fencing. No preamble.
 {
@@ -1977,6 +2051,34 @@ export async function handler(event) {
       inventory = { triggered: false, gate_reason: 'lookup_threw' };
     }
   }
+  // Ad inventory cross-check. Runs in parallel with the customer-side
+  // inventoryLookup so we have BOTH perspectives (what the listing
+  // advertises vs. what the customer's message captured).
+  let adInventory = null;
+  if (!wrongProduct) {
+    try {
+      const adSignal = (typeof AbortSignal !== 'undefined' && AbortSignal.timeout)
+        ? AbortSignal.timeout(3000)
+        : undefined;
+      adInventory = await lookupAdInventory({ listingTitle, location, signal: adSignal });
+    } catch (err) {
+      console.warn('[FN] ad inventory lookup threw:', err?.message || err);
+      adInventory = { triggered: false, gate_reason: 'lookup_threw' };
+    }
+  }
+  const adInventoryBlock = adInventory && adInventory.triggered
+    ? buildAdInventoryBlock(adInventory)
+    : '';
+  console.log('[FN] ad inventory:', {
+    triggered: !!adInventory?.triggered,
+    gate_reason: adInventory?.gate_reason || null,
+    listed_size: adInventory?.listed_size || null,
+    listed_brand: adInventory?.listed_brand || null,
+    listed_status: adInventory?.listed_status || null,
+    alt_count: adInventory?.alternatives_in_stock_local?.length || 0,
+    block_length: adInventoryBlock.length
+  });
+
   // Focused recommendation: if the rep clicked a specific pick, suppress the
   // multi-pick inventory block and emit a single-product FOCUSED block.
   // The two blocks would otherwise send mixed signals about which item to
@@ -2152,7 +2254,8 @@ The full ELEMENT LIST and EXAMPLE STRUCTURE are in the LIVE INVENTORY CONTEXT (o
     manualOptionsBlock,
     inventoryBlock,
     focusedRecommendationBlock,
-    liveInventoryTopOverride
+    liveInventoryTopOverride,
+    adInventoryBlock
   });
 
   console.log('[FN] resolved opener:', openerLine);

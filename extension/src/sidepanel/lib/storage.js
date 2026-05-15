@@ -14,6 +14,8 @@ export const DEFAULTS = {
   },
   location: {
     name: '',
+    short: '',
+    key: '',
     address: '',
     phone: '',
     etransferEmail: ''

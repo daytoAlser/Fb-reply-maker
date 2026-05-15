@@ -385,6 +385,10 @@
     ]);
     const config = settings.config || {};
     if (!config.endpoint || !config.secret) return null;
+    // Location is required — inventory ranking and AD INVENTORY
+    // CONTEXT both depend on it. Silently bail on prefetch (caller
+    // surfaces a visible error when the user clicks).
+    if (!settings.location || !settings.location.name) return null;
     const payload = {
       endpoint: config.endpoint,
       secret: config.secret,
@@ -584,6 +588,10 @@
       const config = settings.config || {};
       if (!config.endpoint || !config.secret) {
         renderError('Configure API endpoint + secret in the extension Options page first.');
+        return;
+      }
+      if (!settings.location || !settings.location.name) {
+        renderError('Pick your CCAW location in the Options page first — inventory ranking and ad-product checks depend on it.');
         return;
       }
       const tStorage = performance.now() - t0;

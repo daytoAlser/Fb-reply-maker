@@ -374,6 +374,10 @@ export default function App() {
       setError('Configure endpoint and secret in the options page.');
       return;
     }
+    if (!settings?.location?.name) {
+      setError('Pick your CCAW location in the Options page first — inventory ranking depends on it.');
+      return;
+    }
     if (!overrideFlags) setOverrideActive(false);
     // Tag this generate call with the thread + incoming it was fired
     // for. When the response arrives, we discard it if the user has
