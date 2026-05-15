@@ -49,6 +49,30 @@ function homeQty(it, homeShort) {
   return hit ? hit.qty : 0;
 }
 
+// Total available across home + other CCAW locations + the external
+// warehouse count. Used to decide whether a wheel can actually ship a
+// full set-of-four. Below 4 = drop the pick entirely.
+function totalQty(it) {
+  if (!it || !it.stock) return 0;
+  const local = Array.isArray(it.stock.byLocation)
+    ? it.stock.byLocation.reduce((s, x) => s + (Number(x.qty) || 0), 0)
+    : 0;
+  const ext = Number(it.stock.external) || 0;
+  return local + ext;
+}
+
+// Best non-home single location qty — used to decide whether a non-home
+// full set is reachable in one shipment vs. having to consolidate.
+function bestOtherLocationQty(it, homeShort) {
+  if (!it || !Array.isArray(it.stock?.byLocation)) return { short: null, qty: 0 };
+  let best = { short: null, qty: 0 };
+  for (const s of it.stock.byLocation) {
+    if (s.short === homeShort) continue;
+    if ((s.qty || 0) > best.qty) best = { short: s.short, qty: s.qty || 0 };
+  }
+  return best;
+}
+
 // Resolves a wheel's diameter from multiple signals — the CCAW API's
 // specs.diameter is often null on wheels (only populated for some SKUs).
 // Falls back to parsing "NNxN" from the name ("Armed Frontline 18x9" →
@@ -280,36 +304,66 @@ export async function lookupWheelInventory({
     return true;
   });
 
-  // Surface EVERY Armed wheel in stock at the home location, deduped by
-  // SKU. Cap at 8 to keep the prompt sane — when the rep sees more in
-  // the inventory tool they can override. Sort: in-stock-local first
-  // (highest local qty first), then warehouse-only, ties broken by
-  // price asc so the cheapest comparable option leads.
+  // Set-of-four rule: a wheel only qualifies if there are ≥4 units of
+  // that SKU somewhere reachable (home + other locations + external
+  // warehouse). Anything below 4 can't ship a full set — drop it so we
+  // don't promise wheels we can't deliver.
   const seen = new Set();
-  const candidates = [];
+  const qualified = [];
   for (const it of items) {
     if (!it || !it.sku || seen.has(it.sku)) continue;
     seen.add(it.sku);
-    candidates.push(it);
+    if (totalQty(it) < 4) continue;
+    qualified.push(it);
   }
-  candidates.sort((a, b) => {
-    const qA = homeQty(a, homeShort);
-    const qB = homeQty(b, homeShort);
-    if (qA !== qB) return qB - qA;
-    return (a.price || 0) - (b.price || 0);
-  });
-  // Keep only in-stock-local for the FIRST cut. If fewer than 3, top up
-  // with warehouse-only options so the rep still has variety to send.
-  const local = candidates.filter((it) => homeQty(it, homeShort) > 0);
-  const warehouse = candidates.filter((it) => homeQty(it, homeShort) === 0);
-  const top = local.length >= 3 ? local.slice(0, 8) : local.concat(warehouse).slice(0, 8);
 
-  const picks = top.map((it) => {
+  // Classify each pick by where the full set is reachable. Priority:
+  //   'home'         — home location has ≥4 units → "ready to roll at <home>"
+  //   'other_loc'    — a single other location has ≥4 → ship to home, few days
+  //   'warehouse'    — external warehouse has ≥4 → vendor ship, few days
+  //   'consolidate'  — total is ≥4 but no single source has 4; needs
+  //                    multi-location consolidation. Surface but with a
+  //                    softer framing.
+  const classify = (it) => {
+    const hq = homeQty(it, homeShort);
+    if (hq >= 4) return { setAvailability: 'home', sourceLabel: location?.name || 'home location' };
+    const other = bestOtherLocationQty(it, homeShort);
+    if (other.qty >= 4) return { setAvailability: 'other_loc', sourceLabel: `another store (${other.short})` };
+    const ext = Number(it.stock?.external) || 0;
+    if (ext >= 4) return { setAvailability: 'warehouse', sourceLabel: 'vendor warehouse' };
+    return { setAvailability: 'consolidate', sourceLabel: 'consolidated from multiple locations' };
+  };
+
+  // Sort: home full-sets first, then other-location, then warehouse,
+  // then consolidation. Ties by price ascending so the most accessible
+  // affordable wheel leads.
+  const ORDER = { home: 0, other_loc: 1, warehouse: 2, consolidate: 3 };
+  const annotated = qualified.map((it) => ({ it, cls: classify(it) }));
+  annotated.sort((a, b) => {
+    const oa = ORDER[a.cls.setAvailability];
+    const ob = ORDER[b.cls.setAvailability];
+    if (oa !== ob) return oa - ob;
+    return (a.it.price || 0) - (b.it.price || 0);
+  });
+
+  // Cap at 3 picks so the variant can name + show one image per wheel.
+  const top = annotated.slice(0, 3);
+  const picks = top.map(({ it, cls }) => {
     const shaped = shapeWheelForPrompt(it, homeShort);
     shaped.armedModel = classifyArmedModel(it) || 'Armed';
-    shaped.inStockLocal = shaped.homeQty > 0;
+    shaped.inStockLocal = shaped.homeQty >= 4;
+    shaped.setAvailability = cls.setAvailability;
+    shaped.sourceLabel = cls.sourceLabel;
+    shaped.totalQty = totalQty(it);
     return shaped;
   });
+
+  const setSummary = {
+    home_full: picks.filter((p) => p.setAvailability === 'home').length,
+    other_full: picks.filter((p) => p.setAvailability === 'other_loc').length,
+    warehouse_full: picks.filter((p) => p.setAvailability === 'warehouse').length,
+    consolidate: picks.filter((p) => p.setAvailability === 'consolidate').length
+  };
 
   if (picks.length === 0) {
     return {
@@ -329,9 +383,11 @@ export async function lookupWheelInventory({
     home_location_short: homeShort,
     query,
     picks,
+    set_summary: setSummary,
     totals: {
       armed_items_in_diameter: items.length,
-      models_surfaced: picks.length
+      qualified_full_sets: qualified.length,
+      surfaced: picks.length
     }
   };
 }

@@ -917,33 +917,53 @@ function buildWheelInventoryBlock(wheels) {
   lines.push(`Vehicle: ${wheels.vehicle} · Bolt pattern: ${wheels.bolt_pattern} · Diameter: ${wheels.diameter}"`);
   lines.push(`Home location: ${home}`);
   lines.push('');
-  lines.push(`Armed wheels available (${wheels.picks.length} options${wheels.picks.length === 8 ? ' — top 8 shown' : ''}):`);
+  const homeFullCount = wheels.set_summary?.home_full || 0;
+  const offHomeCount = (wheels.set_summary?.other_full || 0) + (wheels.set_summary?.warehouse_full || 0) + (wheels.set_summary?.consolidate || 0);
+  lines.push(`Picks (${wheels.picks.length} wheels — each is a full set of 4 SOMEWHERE reachable):`);
   wheels.picks.forEach((p, i) => {
     const price = p.priceFormatted || (p.price ? `$${p.price.toFixed(2)}` : '(price n/a)');
-    const stock = p.inStockLocal ? `${home}: ${p.homeQty}` : 'warehouse (few days)';
+    let sourceLine;
+    if (p.setAvailability === 'home') {
+      sourceLine = `READY AT ${home.toUpperCase()} (${p.homeQty} in stock — full set on the shelf)`;
+    } else if (p.setAvailability === 'other_loc') {
+      sourceLine = `Full set at ${p.sourceLabel} — transferable, few days`;
+    } else if (p.setAvailability === 'warehouse') {
+      sourceLine = `Full set in vendor warehouse — few days out`;
+    } else {
+      sourceLine = `Full set total across multiple locations (${p.totalQty} units total) — would need consolidation`;
+    }
     const widthPart = p.width ? ` ${p.width}"` : '';
     const finishPart = p.finish ? ` · ${p.finish}` : '';
-    lines.push(`  ${i + 1}. ${p.name}${widthPart}${finishPart} — ${price} each · ${stock}`);
+    lines.push(`  ${i + 1}. ${p.name}${widthPart}${finishPart} — ${price} each · ${sourceLine}`);
   });
+  lines.push('');
+  lines.push('AVAILABILITY FRAMING — STRICT BY PICK:');
+  lines.push(`- ${homeFullCount > 0 ? homeFullCount : 'NO'} pick(s) have a full set at ${home}. ONLY those may be framed as "ready to roll at ${home}" / "we\'ve got those on the shelf here".`);
+  lines.push(`- ${offHomeCount} pick(s) need to ship in from another store or vendor warehouse. Frame those as "ready from warehouse, few days out" / "we can pull a set from another location" — NEVER imply they\'re at ${home}.`);
+  if (homeFullCount === 0) {
+    lines.push(`- *** ${home} has ZERO full sets of these picks on the shelf. DO NOT say "we have these in stock here", "ready to roll at ${home}", "on the shelf in ${home}", or any equivalent. Lead with "I can get a set of these ordered in, few days out".`);
+  }
   lines.push('');
   lines.push('THIS TURN — DO THIS, NOTHING ELSE:');
   lines.push('1. Acknowledge the vehicle in one short phrase ("perfect on the Tacoma" / "got it on the [vehicle]").');
-  lines.push('2. Send the options. Name 2–4 of the picks above with their stickers. Match SKU to its price exactly — DO NOT invent prices or names.');
-  lines.push('3. Close with: "which of these are you feeling?" or equivalent ("any of these jump out?" / "what catches your eye?"). The rep will handle fitment + poke/flush once the customer picks one.');
+  lines.push('2. Send the options. Name ALL ' + wheels.picks.length + ' picks above (one per wheel, in the order listed). Each gets ONE inline sentence: brand+model+size, finish, sticker price, and the correct availability framing per the pick. Match SKU to its price exactly — DO NOT invent prices, names, or finishes.');
+  lines.push('3. Close with a NEUTRAL ask that does NOT assume they like one: pick from "Any of these catch your eye?" / "Any jump out at ya?" / "Any of these look like a vibe?" / "See anything you like or want me to try something different?". NEVER "which of these are you feeling?" — that assumes they like one.');
   lines.push('');
   lines.push('FORBIDDEN THIS TURN (any of these = HARD FAIL — the picks above eliminate the need):');
-  lines.push('- Asking "poke or flush" / "stance" / "wheels sticking out" — DO NOT ASK. Rep handles after they pick.');
+  lines.push('- "Which of these are you feeling?" / "Which one are you leaning toward?" — assumes the customer is into one. Use a neutral "any catch your eye?" form instead.');
+  lines.push('- Asking "poke or flush" / "stance" / "wheels sticking out" — rep handles after the customer picks one.');
   lines.push('- Asking year/make/model again — vehicle is resolved.');
   lines.push('- Asking tire size / wheel diameter — diameter is resolved.');
   lines.push('- Saying "let me pull options" / "I\'ll send pics + pricing in a sec" — options are right above, send them.');
   lines.push('- Naming any non-Armed brand (Fuel, KMC, XD, etc.). Armed only. If customer asks about another brand, defer: "let me loop a sales rep in on that one".');
+  lines.push('- Claiming a pick is at ' + home + ' when its `setAvailability` is not "home". Per-pick framing is strict, see above.');
   lines.push('');
   lines.push('VARIANT LENGTHS:');
-  lines.push('- Quick: opener + 1 short acknowledgment + 2 picks named with prices + "which catches your eye?". ~50–60 words.');
-  lines.push('- Standard: opener + 3 picks named with prices + ask. ~70–90 words.');
-  lines.push('- Detailed: opener + 3–4 picks with prices + a one-line note (finish or width variety) + ask. ~100–130 words.');
+  lines.push('- Quick: opener + acknowledgment + ALL ' + wheels.picks.length + ' picks named (one sentence each) + neutral ask. ~70–90 words.');
+  lines.push('- Standard: opener + acknowledgment + ALL ' + wheels.picks.length + ' picks + a one-line note (finish or availability variety if relevant) + neutral ask. ~100–120 words.');
+  lines.push('- Detailed: opener + acknowledgment + ALL ' + wheels.picks.length + ' picks with one extra detail each (finish or width) + neutral ask. ~130–160 words.');
   lines.push('');
-  lines.push('ABSOLUTE RULE D2 still applies: "ready to roll at ' + home + '" / "we can get those" — never the literal phrase "in stock".');
+  lines.push('ABSOLUTE RULE D2 still applies: never use the literal phrase "in stock". Use "ready to roll at ' + home + '" (home full set) / "ready from warehouse" (off-home full set).');
   return '\n' + lines.join('\n') + '\n';
 }
 
