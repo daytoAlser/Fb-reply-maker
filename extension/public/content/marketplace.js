@@ -90,7 +90,11 @@ const UI_BLOCKLIST = /^(Thread composer|Message|New message|Customize chat|Chat 
 // server prompt builds the history block from all of them.
 const MAX_CONTEXT_MESSAGES = 20;
 const MAX_HISTORY_MESSAGES = 20;
-const MIN_TEXT_LENGTH = 4;
+// Lowered from 4 to 2 so short-but-real customer replies survive the
+// scrape: "Yes" (3), "No" (2), "OK" (2), "Hi" (2), single-emoji thumbs-up
+// (length 2 surrogate pair). UI_BLOCKLIST + SYSTEM_PATTERNS still gate
+// against actual FB UI noise.
+const MIN_TEXT_LENGTH = 2;
 const MAX_TEXT_LENGTH = 500;
 const DEBOUNCE_MS = 300;
 
