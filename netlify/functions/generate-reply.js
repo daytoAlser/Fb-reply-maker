@@ -21,7 +21,11 @@ import { lookupWheelInventory } from './lib/interpretation/wheelInventoryLookup.
 // flags for any year/make/model captured. Broader vehicle coverage than
 // the hardcoded vehicleBoltPattern.js table (which only handles trucks
 // the wheel inventory path needs).
-import { lookupFitment } from './lib/interpretation/fitmentLookup.js';
+import {
+  lookupFitment,
+  resolveDiameterFromContext,
+  pickInventorySizeFromFitment
+} from './lib/interpretation/fitmentLookup.js';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -673,6 +677,18 @@ function buildInventoryBlock(inv) {
   const season = inv.season_context || null;
   const primarySku = inv.auto_primary ? inv.auto_primary.sku : null;
 
+  // OEM-derived notice — emitted when the size came from RideStyler
+  // fitment, not the customer. The AI needs to know it's working off an
+  // inferred size so it can stay honest, but the picks below are still
+  // real and should be quoted (not hedged).
+  const oemDerivedNotice = inv.fired_from_oem_fitment
+    ? `\n\n*** OEM-DERIVED SIZE — IMPORTANT FRAMING ***
+The customer asked for tires by wheel diameter only (no full tire size). The size below (${inv.oem_fitment_size}) is the OEM fitment for the ${inv.oem_fitment_vehicle} at that diameter, looked up automatically. Picks are real and in stock — quote them. ${inv.oem_fitment_pick_source === 'picked_dominant' && Array.isArray(inv.oem_fitment_alternatives) && inv.oem_fitment_alternatives.length
+      ? `If the customer has aftermarket / non-standard sizing, OEM alternatives at this diameter are: ${inv.oem_fitment_alternatives.join(', ')}. Optionally flag in passing if relevant ("running the standard ${inv.oem_fitment_size}; if you're on a staggered setup let me know").`
+      : 'No size disambiguation needed — this is the unambiguous OEM size at the diameter.'}
+DO NOT say "what size are you looking for" or "let me confirm the size" — the size is resolved, picks are below.\n`
+    : '';
+
   // Header text injected at the top of every layout.
   const seasonLine = season
     ? `Today: ${season.iso_date} · Season: ${season.season} · Winter-tire season active: ${season.isWinterSeason ? 'YES' : 'NO'}`
@@ -771,7 +787,7 @@ The rep can click a different inventory pick to override this auto-selection. Ot
     const houseSection = ilink.length
       ? `\n\n[HOUSE — iLink]\n${ilink.map(renderItem).join('\n')}`
       : '';
-    return `
+    return `${oemDerivedNotice}
 LIVE INVENTORY CONTEXT — BRAND-REQUESTED HAS ZERO MATCHES
 
 ${seasonLine}${winterDroppedLine}
@@ -792,7 +808,7 @@ HARD RULES (this turn):
     const houseSection = ilink.length
       ? `\n\n[HOUSE — iLink]\n${ilink.map(renderItem).join('\n')}`
       : '';
-    return `
+    return `${oemDerivedNotice}
 LIVE INVENTORY CONTEXT — BRAND-REQUESTED + HOUSE OPTIONS SIDE-BY-SIDE
 
 ${seasonLine}${winterDroppedLine}
@@ -819,7 +835,7 @@ HARD RULES (this turn):
   const otherSection = other.length
     ? `\n\n[OTHER]\n${other.map(renderItem).join('\n')}`
     : '';
-  return `
+  return `${oemDerivedNotice}
 LIVE INVENTORY CONTEXT (real-time CCAW catalog lookup — products physically available right now; use as SOURCE OF TRUTH if you reference specific tires)
 
 ${seasonLine}${winterDroppedLine}
@@ -2307,7 +2323,7 @@ export async function handler(event) {
       }
     })();
 
-  const [inventory, adInventory, wheelInventory, fitment] = await Promise.all(
+  let [inventory, adInventory, wheelInventory, fitment] = await Promise.all(
     wrongProduct
       ? [
           suppressedStub('inventory'),
@@ -2386,6 +2402,82 @@ export async function handler(event) {
     variants_profiled: fitment?.variants_profiled || 0,
     block_length: fitmentBlock.length
   });
+
+  // OEM tire-size auto-pipe.
+  //
+  // When the customer asks for a tire quote with only a wheel diameter
+  // (e.g. "19" quote me tires") the inventory lookup gates on no_tire_spec
+  // and the AI hedges with "I'll pull options and send pics" — not what
+  // the rep wants. If we have unambiguous OEM fitment data for the
+  // diameter the customer is on, rerun inventory with a synthetic
+  // captured tire size so picks actually surface this turn.
+  //
+  // Only kicks in when:
+  //   - first inventory pass gated on no_tire_spec
+  //   - fitment triggered with usable OEM tire sizes
+  //   - a wheel diameter is resolvable from the conversation
+  //   - fitment has at least one OEM size at that diameter
+  if (
+    !wrongProduct
+    && inventory && inventory.triggered === false && inventory.gate_reason === 'no_tire_spec'
+    && fitment && fitment.triggered
+    && Array.isArray(fitment.oem_tire_sizes) && fitment.oem_tire_sizes.length > 0
+  ) {
+    const diaResolved = resolveDiameterFromContext({
+      message,
+      conversationHistory: conversation_history,
+      listingTitle,
+      capturedFields: existing_captured_fields
+    });
+    const oemPick = diaResolved
+      ? pickInventorySizeFromFitment(fitment, diaResolved.diameter)
+      : null;
+    console.log('[FN] oem auto-pipe eval:', {
+      diameter: diaResolved?.diameter || null,
+      diameter_source: diaResolved?.source || null,
+      oem_size: oemPick?.size || null,
+      oem_source: oemPick?.source || null,
+      alternatives: oemPick?.alternatives?.length || 0
+    });
+    if (oemPick && oemPick.size) {
+      const retryStartedAt = Date.now();
+      const syntheticFields = { ...(existing_captured_fields || {}), tireSize: oemPick.size };
+      const retrySignal = (typeof AbortSignal !== 'undefined' && AbortSignal.timeout)
+        ? AbortSignal.timeout(3000)
+        : undefined;
+      try {
+        const retry = await lookupInventory({
+          message,
+          normalized: interpretation,
+          capturedFields: syntheticFields,
+          productsOfInterest: existing_products_of_interest,
+          conversationHistory: conversation_history,
+          listingTitle,
+          location,
+          signal: retrySignal
+        });
+        console.log('[FN] oem auto-pipe retry:', {
+          triggered: !!retry?.triggered,
+          gate_reason: retry?.gate_reason || null,
+          fired_from_size: retry?.fired_from_size || null,
+          surfaced: (retry?.ilink_items?.length || 0)
+            + (retry?.brand_requested_items?.length || 0)
+            + (retry?.other_items?.length || 0),
+          ms: Date.now() - retryStartedAt
+        });
+        if (retry && retry.triggered) {
+          retry.fired_from_oem_fitment = true;
+          retry.oem_fitment_vehicle = fitment.vehicle;
+          retry.oem_fitment_size = oemPick.size;
+          retry.oem_fitment_pick_source = oemPick.source;
+          retry.oem_fitment_alternatives = oemPick.alternatives || [];
+          inventory = retry;
+        }
+      } catch (err) {
+        console.warn('[FN] oem auto-pipe retry threw:', err?.message || err);
+      }
+    }
+  }
 
   // Focused recommendation: if the rep clicked a specific pick, suppress the
   // multi-pick inventory block and emit a single-product FOCUSED block.

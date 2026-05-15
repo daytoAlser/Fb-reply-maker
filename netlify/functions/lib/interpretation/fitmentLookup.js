@@ -358,3 +358,104 @@ export async function lookupFitment({
     source: 'ridestyler'
   };
 }
+
+// ---------------------------------------------------------------------
+// OEM size auto-pipe helpers
+// ---------------------------------------------------------------------
+// When the customer asks "quote me tires" with only a wheel diameter
+// (no full tire size), the inventory lookup gates out on no_tire_spec
+// and the AI hedges with "I'll pull options and send pics". These
+// helpers let the orchestrator (generate-reply.js) bridge fitment data
+// into the inventory query: resolve the diameter the customer is on,
+// pick the most-likely OEM tire size at that diameter, and rerun
+// lookupInventory with a synthetic captured tireSize.
+
+// Scans messages + history + listing title + captured field for a wheel
+// diameter the customer is targeting. Mirrors the lighter parts of
+// wheelInventoryLookup.resolveDiameter — accepts tire-spec patterns
+// (255/40R19, 245 45 18) or explicit inch markers (19", 19 inch). A
+// standalone "19" is too ambiguous and is rejected.
+export function resolveDiameterFromContext({ message, conversationHistory, listingTitle, capturedFields } = {}) {
+  const tryTire = (text) => {
+    if (typeof text !== 'string' || !text) return null;
+    const m = text.match(/\b(?:LT|ST|P)?\d{3}\s*[\/\s]\s*\d{2}\s*[\/RrZz]?\s*(\d{2})\b/i);
+    return m ? parseInt(m[1], 10) : null;
+  };
+  const tryInch = (text) => {
+    if (typeof text !== 'string' || !text) return null;
+    const m = text.match(/\b(\d{2})\s*(?:["”]|\s?in(?:ch(?:es)?)?\b|\s?inch\b)/i);
+    return m ? parseInt(m[1], 10) : null;
+  };
+  // Captured tire size has priority — already-validated full spec
+  if (capturedFields && typeof capturedFields.tireSize === 'string') {
+    const d = tryTire(capturedFields.tireSize);
+    if (d) return { diameter: d, source: 'captured_field' };
+  }
+  // Current message — tire spec first, then inch marker
+  const msgTire = tryTire(message);
+  if (msgTire) return { diameter: msgTire, source: 'current_message_tire' };
+  const msgInch = tryInch(message);
+  if (msgInch) return { diameter: msgInch, source: 'current_message_inch' };
+  // Conversation history — walk backwards (most recent first)
+  if (Array.isArray(conversationHistory)) {
+    for (let i = conversationHistory.length - 1; i >= 0; i--) {
+      const m = conversationHistory[i];
+      const t = m && (m.text || m.content || m.message);
+      const dT = tryTire(t);
+      if (dT) return { diameter: dT, source: 'history_tire' };
+      const dI = tryInch(t);
+      if (dI) return { diameter: dI, source: 'history_inch' };
+    }
+  }
+  if (listingTitle) {
+    const dT = tryTire(listingTitle);
+    if (dT) return { diameter: dT, source: 'listing_tire' };
+    const dI = tryInch(listingTitle);
+    if (dI) return { diameter: dI, source: 'listing_inch' };
+  }
+  return null;
+}
+
+// Parse a tire size into { width, aspect, diameter }. Returns null if
+// the string doesn't match the canonical NNN/NNRNN pattern.
+function parseTireSize(s) {
+  if (typeof s !== 'string') return null;
+  const m = s.match(/^(\d{3})\/(\d{2})R(\d{2})$/);
+  if (!m) return null;
+  return { width: parseInt(m[1], 10), aspect: parseInt(m[2], 10), diameter: parseInt(m[3], 10), raw: s };
+}
+
+// Given a fitment meta and a target wheel diameter, picks the most likely
+// OEM tire size for inventory chaining. Returns:
+//   { size, source: 'unambiguous' | 'picked_dominant', alternatives: [] }
+// or null when no OEM size exists at the diameter.
+//
+// Strategy:
+//   - Filter oem_tire_sizes to ones at the target diameter.
+//   - If 0 -> null (let the AI ask).
+//   - If 1 -> unambiguous; pipe it.
+//   - If 2+ -> staggered or trim-varied. Pick the SMALLEST width (front
+//     tire on staggered cars; the "standard" size on cars where the wide
+//     option is a Sport/M/Red Sport upgrade). Alternatives surface so
+//     the AI can flag them.
+export function pickInventorySizeFromFitment(fitment, diameter) {
+  if (!fitment || !fitment.triggered) return null;
+  if (!Number.isFinite(diameter)) return null;
+  if (!Array.isArray(fitment.oem_tire_sizes)) return null;
+
+  const matches = fitment.oem_tire_sizes
+    .map(parseTireSize)
+    .filter((s) => s && s.diameter === diameter);
+  if (matches.length === 0) return null;
+  if (matches.length === 1) {
+    return { size: matches[0].raw, source: 'unambiguous', alternatives: [] };
+  }
+  // Multiple — pick smallest width as the dominant choice
+  matches.sort((a, b) => a.width - b.width);
+  return {
+    size: matches[0].raw,
+    source: 'picked_dominant',
+    alternatives: matches.slice(1).map((m) => m.raw)
+  };
+}
+
