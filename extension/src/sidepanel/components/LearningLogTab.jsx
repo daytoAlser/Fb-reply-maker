@@ -33,6 +33,26 @@ function truncate(s, max = 120) {
   return s.slice(0, max - 1) + '…';
 }
 
+function ConversationHistory({ messages, partnerName }) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return <div className="learning-history-empty">No prior history captured.</div>;
+  }
+  return (
+    <div className="learning-history">
+      {messages.map((m, i) => {
+        const isMe = m?.sender === 'me';
+        const label = isMe ? 'ME' : (m?.senderName || partnerName || 'THEM').toString().toUpperCase();
+        return (
+          <div key={i} className={`learning-history-row ${isMe ? 'learning-history-row-me' : 'learning-history-row-them'}`}>
+            <span className="learning-history-sender">{label}</span>
+            <span className="learning-history-text">{typeof m?.text === 'string' ? m.text : ''}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function DiffView({ diff }) {
   if (!diff || !Array.isArray(diff.sentences)) {
     return <div className="learning-diff-empty">No structured diff available.</div>;
@@ -93,7 +113,22 @@ function LearningCard({ record, onFlagToggle }) {
       {expanded && (
         <div className="learning-card-body">
           <div className="learning-card-section">
-            <div className="learning-card-section-label">Customer message</div>
+            <div className="learning-card-section-label">
+              Conversation history
+              <span className="learning-card-section-label-meta">
+                {Array.isArray(record.conversation_history) ? `${record.conversation_history.length} msg` : 'none'}
+              </span>
+            </div>
+            <ConversationHistory
+              messages={record.conversation_history}
+              partnerName={record.partner_name}
+            />
+          </div>
+          <div className="learning-card-divider" aria-hidden="true">
+            <span>CONTEXT ABOVE · AI EVALUATION BELOW</span>
+          </div>
+          <div className="learning-card-section">
+            <div className="learning-card-section-label">Customer message (latest)</div>
             <div className="learning-card-section-content">{record.customer_message || '—'}</div>
           </div>
           <div className="learning-card-section">
