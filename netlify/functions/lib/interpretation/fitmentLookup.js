@@ -174,28 +174,48 @@ export async function lookupFitment({
     };
   }
 
-  // The query that gets sent to RideStyler. If we have a make use the
-  // full "year make model" string; if we only have year + model, send
-  // "year model" — RideStyler will resolve the make.
-  const descResp = await getDescriptions(parsed.searchString, { signal });
+  // Send the parsed search string first. If RideStyler returns zero
+  // results AND the raw vehicle differs (e.g. the AI extracted with
+  // weird casing or extra words our parser dropped), retry with the
+  // raw vehicle string as a belt-and-suspenders fallback.
+  let descResp = await getDescriptions(parsed.searchString, { signal });
   if (!descResp.ok) {
     return {
       triggered: false,
       gate_reason: 'lookup_failed',
       vehicle: resolved.vehicle,
+      search: parsed.searchString,
       error: descResp.error
     };
   }
 
-  const descriptions = (descResp.data && Array.isArray(descResp.data.Descriptions))
+  let descriptions = (descResp.data && Array.isArray(descResp.data.Descriptions))
     ? descResp.data.Descriptions
     : [];
+  let searchUsed = parsed.searchString;
+
+  // Fallback: raw vehicle string. Only retry if the parser's output
+  // differs from the raw input AND the first call returned nothing.
+  if (descriptions.length === 0) {
+    const rawLower = resolved.vehicle.toLowerCase().trim();
+    if (rawLower && rawLower !== parsed.searchString) {
+      const fallbackResp = await getDescriptions(resolved.vehicle, { signal });
+      if (fallbackResp.ok && fallbackResp.data && Array.isArray(fallbackResp.data.Descriptions)) {
+        if (fallbackResp.data.Descriptions.length > 0) {
+          descriptions = fallbackResp.data.Descriptions;
+          searchUsed = resolved.vehicle;
+        }
+      }
+    }
+  }
+
   if (descriptions.length === 0) {
     return {
       triggered: false,
       gate_reason: 'no_matches',
       vehicle: resolved.vehicle,
-      search: parsed.searchString
+      search: parsed.searchString,
+      parsed
     };
   }
 
@@ -349,6 +369,8 @@ export async function lookupFitment({
     vehicle: resolved.vehicle,
     vehicle_normalized: parsed.searchString,
     vehicle_source: resolved.source,
+    parsed,
+    search_used: searchUsed,
     variants_found: descriptions.length,
     variants_profiled: variants.length,
     bolt_pattern: dominant,
