@@ -1180,7 +1180,7 @@ ENDING:
 `;
 }
 
-const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock, decisionSupportBlock, wrongProductBlock, financingBlock, manualOptionsBlock, inventoryBlock, focusedRecommendationBlock, liveInventoryTopOverride, adInventoryBlock, wheelInventoryBlock }) => {
+const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock, decisionSupportBlock, wrongProductBlock, financingBlock, manualOptionsBlock, inventoryBlock, focusedRecommendationBlock, liveInventoryTopOverride, wheelLeadOverride, adInventoryBlock, wheelInventoryBlock }) => {
   const listingBlock = listingTitle && listingTitle.trim()
     ? `\nLISTING CONTEXT\nThe customer is messaging about this listing: "${listingTitle.trim()}". Use this together with the customer's message to infer ad_type (wheel / tire / accessory / lift) per the detection signals below.\n`
     : '';
@@ -1230,7 +1230,7 @@ The ONLY valid source for the @mention name is the OPENER LINE above (resolved b
 - "@Customer", "@there", "@Buyer", "@friend", "@User" are never valid. If you don't have a resolved first name, no @ is the right answer.
 
 When using an @mention anywhere in a reply, use ONLY the customer's first name from the OPENER LINE (a single word). "@Glen" not "@Glen Hans" — FB's tag system only matches single-word prefixes.
-${liveInventoryTopOverride || ''}${listingBlock}${locationBlock}${overrideClause}${returningBlock}
+${wheelLeadOverride || ''}${liveInventoryTopOverride || ''}${listingBlock}${locationBlock}${overrideClause}${returningBlock}
 ABSOLUTE RULES — these override every other rule in this prompt. Violating them is a hard fail.
 
 (A) NEVER ASK THE CUSTOMER FOR TIRE SIZE.
@@ -2250,6 +2250,52 @@ export async function handler(event) {
   // notice, the model defaults to those baked-in canonical phrasings.
   // Renders both AT THE TOP OF SYSTEM PROMPT (early attention) and is
   // also prepended to the user message (most direct attention).
+  // Wheel-side top-of-prompt override. Wheels follow a different rule
+  // set than tires (no install question; instead "any catch your eye?"),
+  // so they get their own override block. Wheels take priority when
+  // both fire — if the customer is asking about rims, that's the turn's
+  // focus regardless of any tire auto_primary.
+  const wheelLeadOverride = (wheelInventory && wheelInventory.triggered && Array.isArray(wheelInventory.picks) && wheelInventory.picks.length > 0)
+    ? (() => {
+        const home = wheelInventory.home_location || 'your store';
+        const homeFull = (wheelInventory.set_summary?.home_full || 0);
+        const picksList = wheelInventory.picks.map((p, i) => {
+          const price = p.priceFormatted || (p.price ? `$${p.price.toFixed(2)}` : '(price)');
+          const finish = p.finish ? ` · ${p.finish}` : '';
+          let where;
+          if (p.setAvailability === 'home') where = `ready at ${home}`;
+          else if (p.setAvailability === 'other_loc') where = `ship from another store, few days`;
+          else if (p.setAvailability === 'warehouse') where = `ship from vendor warehouse, few days`;
+          else where = `consolidate across locations`;
+          return `   ${i + 1}. ${p.name}${finish} — ${price} each · ${where}`;
+        }).join('\n');
+        return `
+
+🚨 WHEEL OPTIONS LIVE — TURN-LEVEL HARD RULE (READ FIRST, OVERRIDES EVERYTHING BELOW)
+
+The customer is asking about rims. Vehicle + bolt pattern + diameter are RESOLVED. We have ${wheelInventory.picks.length} Armed wheel option(s) in the customer's exact fitment (${wheelInventory.bolt_pattern}, ${wheelInventory.diameter}") with a full set of 4 reachable:
+
+${picksList}
+
+THIS TURN IS A SEND-OPTIONS TURN. The image of each pick is already attached automatically by the extension. Pricing is exact. The model output for THIS turn must:
+1. Acknowledge the vehicle ("perfect on the Tacoma" / equivalent) — ONE short phrase.
+2. List ALL ${wheelInventory.picks.length} picks above with their exact name + finish + sticker + correct availability (per the per-pick "where" above). Match each pick to its price exactly. DO NOT invent names, prices, finishes, or availability claims.
+3. Close with a NEUTRAL ask that does NOT assume they like one: "any of these catch your eye?" / "any jump out at ya?" / "any of these look like a vibe?". NEVER "which of these are you feeling?".
+
+CATEGORICALLY FORBIDDEN THIS TURN (using any of these = HARD FAIL — picks above eliminate the need):
+- ❌ "you thinking poke or flush" / "poke or flush on the stance" — the rep will handle stance after customer picks one
+- ❌ "let me pull options" / "I'll pull some options" / "pulling some solid options" — options are RIGHT ABOVE, send them
+- ❌ "I'll send pics + pricing right here" / "pics and pricing coming" — images already attached, prices already known
+- ❌ "what year/make/model" — vehicle resolved (${wheelInventory.vehicle})
+- ❌ "what size wheel" / "what diameter" — diameter resolved (${wheelInventory.diameter}")
+- ❌ Naming a wheel that isn't in the picks list above
+- ❌ Claiming a pick is "at ${home}" / "ready to roll at ${home}" when its line above says "ship from another store" or "ship from vendor warehouse"
+${homeFull === 0 ? `- ❌ Saying "we have these in stock at ${home}" / "ready to roll at ${home}" — ZERO of these picks have a full set on the shelf at ${home}. Lead with "I can get a set ordered in for ya, few days out".\n` : ''}
+The full WHEEL INVENTORY CONTEXT block further down has additional framing nuance. This top-of-prompt notice is the load-bearing one — read it twice.
+`;
+      })()
+    : '';
+
   const liveLeadProduct = (focused_product && focused_product.name)
     ? focused_product
     : (inventory && inventory.triggered && inventory.auto_primary ? inventory.auto_primary : null);
@@ -2401,6 +2447,7 @@ The full ELEMENT LIST and EXAMPLE STRUCTURE are in the LIVE INVENTORY CONTEXT (o
     inventoryBlock,
     focusedRecommendationBlock,
     liveInventoryTopOverride,
+    wheelLeadOverride,
     adInventoryBlock,
     wheelInventoryBlock
   });
@@ -2424,10 +2471,19 @@ The full ELEMENT LIST and EXAMPLE STRUCTURE are in the LIVE INVENTORY CONTEXT (o
     // so it's the very last thing the model reads before generating. The
     // canonical "pulling options" framing is hardcoded in many places in
     // the system prompt and tends to win without this last-position
-    // override. Only fires when a primary or focused product is set.
-    const userMessageTail = liveLeadProduct
-      ? `\n\n[TURN-LEVEL OVERRIDE — APPLY NOW]\nLive inventory active. PRIMARY: ${liveLeadProduct.name}${liveLeadPrice ? ` (${liveLeadPrice} each)` : ''}. All three variants MUST recommend this product by name, with its price as a single anchor and a one-phrase feature. The picture is auto-attached by the extension — do NOT promise to "send pics + pricing in a sec". End EVERY variant with the install question as the CTA — "you looking at install too or just the tires?" (or equivalent). Do NOT close with "wanna lock it in", "want me to put a quote together", or "send me your phone number" — phone-for-estimate fires the turn AFTER the install question is answered. The prohibited-phrases list in the system prompt is in force.`
-      : '';
+    // override. Wheels take priority when active — different rule set
+    // (no install question, neutral "any catch your eye?" close).
+    let userMessageTail = '';
+    if (wheelInventory && wheelInventory.triggered && Array.isArray(wheelInventory.picks) && wheelInventory.picks.length > 0) {
+      const pickSummary = wheelInventory.picks.map((p) => {
+        const price = p.priceFormatted || (p.price ? `$${p.price.toFixed(2)}` : '');
+        const where = p.setAvailability === 'home' ? `ready at ${wheelInventory.home_location}` : `ship from warehouse, few days`;
+        return `${p.name}${p.finish ? ' (' + p.finish + ')' : ''} — ${price} each · ${where}`;
+      }).join(' | ');
+      userMessageTail = `\n\n[TURN-LEVEL OVERRIDE — APPLY NOW]\nWheel inventory active. ALL THREE VARIANTS MUST name these ${wheelInventory.picks.length} picks exactly: ${pickSummary}. Each pick gets its own clause with name + finish + price + correct availability. Close with a NEUTRAL ask ("any of these catch your eye?" / "any jump out at ya?") — NEVER "which of these are you feeling?". DO NOT ask poke/flush. DO NOT say "let me pull options" / "pulling some options" — they are already pulled and attached. DO NOT name a wheel not in this list. Brand restriction: Armed only.`;
+    } else if (liveLeadProduct) {
+      userMessageTail = `\n\n[TURN-LEVEL OVERRIDE — APPLY NOW]\nLive inventory active. PRIMARY: ${liveLeadProduct.name}${liveLeadPrice ? ` (${liveLeadPrice} each)` : ''}. All three variants MUST recommend this product by name, with its price as a single anchor and a one-phrase feature. The picture is auto-attached by the extension — do NOT promise to "send pics + pricing in a sec". End EVERY variant with the install question as the CTA — "you looking at install too or just the tires?" (or equivalent). Do NOT close with "wanna lock it in", "want me to put a quote together", or "send me your phone number" — phone-for-estimate fires the turn AFTER the install question is answered. The prohibited-phrases list in the system prompt is in force.`;
+    }
     const completion = await client.messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 1200,
