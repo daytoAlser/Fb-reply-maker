@@ -2581,6 +2581,12 @@ The full WHEEL INVENTORY CONTEXT block further down has additional framing nuanc
     const installAskRe = /(install(?:ed|ation|ing)?\s+too|install\s+booked|doing\s+install|tires?\s+installed|just\s+the\s+tires?|install\s+or\s+(?:just|the)\s+tires?|need.{0,25}install|want.{0,25}install|installed?\s+(?:too|as\s+well|with\s+(?:that|them|those)))/i;
     const yesRe = /^(yes|yeah|yep|ya|yup|sure|please|ok|okay|absolutely|definitely|yes\s+please|of\s+course|for\s+sure|install\s+(?:please|too|as\s+well)|need\s+install|with\s+install|yeah\s+(?:please|sure)|sounds\s+good|sure\s+thing)\b/i;
     const noRe = /^(no|nope|nah|no\s+thanks?|just\s+(?:the\s+)?tires?|tires?\s+only|tire\s+only|skip\s+install|without\s+install|no\s+install)\b/i;
+    // Implicit-yes signals — the customer is asking install-progression
+    // questions instead of explicitly committing. In sales context, these
+    // mean the customer is mentally committed enough to ask about install
+    // logistics, so treat as yes and pivot to phone-for-estimate (which
+    // will answer all their questions via the formal breakdown).
+    const implicitYesRe = /(do\s+you\s+(?:install|offer\s+install|do\s+install|have\s+install)|do\s+(?:ya|you)\s+install|you\s+guys\s+install|you\s+install\??|balance\s+(?:free|included|fee|cost)|alignment\s+(?:hm|how\s+much|free|included|cost|price|fee|too)|how\s+much.{0,15}install|install\s+(?:cost|price|fee|charge|rate)|whats?\s+install|whats?\s+the\s+install|tire\s+install\s+(?:cost|price|fee)|mount(?:ing)?\s+(?:and|&)?\s*balance|mount\s+and\s+balance|when\s+can\s+(?:you|i)\s+(?:do|book|install))/i;
     const followupRe = /(phone\s+number|good\s+(?:phone|number)|cell\s+(?:number|phone)|send.{0,25}(?:phone|number)|whats?\s+a?\s*good\s+(?:phone|number)|formal\s+estimate|written\s+estimate|estimate\s+(?:sent|over|together|broken)|i'?ll\s+(?:get|have|send).{0,30}estimate|shoot.{0,15}estimate)/i;
 
     const getText = (m) => {
@@ -2608,33 +2614,58 @@ The full WHEEL INVENTORY CONTEXT block further down has additional framing nuanc
       return { state: 'not_asked', affirmative: null };
     }
 
-    // Find the first customer message AFTER the install ask.
-    let customerResponse = null;
+    // Walk forward through ALL customer messages after the install ask.
+    // Explicit signals (yes/no) take priority; implicit-yes signals
+    // (asking about install logistics) are a softer fallback. Also
+    // check the current message as the latest customer signal.
+    const customerResponses = [];
     for (let i = installAskIdx + 1; i < conversation_history.length; i++) {
       const m = conversation_history[i];
       if (isRep(m)) continue;
       const t = getText(m).trim().toLowerCase();
-      if (t) { customerResponse = t; break; }
+      if (t) customerResponses.push(t);
     }
-
-    // If no customer response found in history yet, the CURRENT message
-    // (the one we're generating a reply to) IS the customer's response.
     let fromCurrent = false;
-    if (!customerResponse && typeof message === 'string' && message.trim()) {
-      customerResponse = message.trim().toLowerCase();
-      fromCurrent = true;
+    if (typeof message === 'string' && message.trim()) {
+      const cur = message.trim().toLowerCase();
+      if (customerResponses.length === 0 || customerResponses[customerResponses.length - 1] !== cur) {
+        customerResponses.push(cur);
+        fromCurrent = true;
+      }
     }
 
-    if (!customerResponse) {
+    if (customerResponses.length === 0) {
       return { state: 'awaiting', affirmative: null };
     }
 
+    let explicitAffirmative = null;
+    let implicitYes = false;
+    let signalSource = null;
+    for (const r of customerResponses) {
+      if (explicitAffirmative === null) {
+        if (yesRe.test(r)) {
+          explicitAffirmative = true;
+          signalSource = 'explicit_yes';
+        } else if (noRe.test(r)) {
+          explicitAffirmative = false;
+          signalSource = 'explicit_no';
+        }
+      }
+      if (implicitYesRe.test(r)) implicitYes = true;
+    }
+
     let affirmative = null;
-    if (yesRe.test(customerResponse)) affirmative = true;
-    else if (noRe.test(customerResponse)) affirmative = false;
+    let soft = false;
+    if (explicitAffirmative !== null) {
+      affirmative = explicitAffirmative;
+    } else if (implicitYes) {
+      affirmative = true;
+      soft = true;
+      signalSource = 'implicit_install_questions';
+    }
 
     if (affirmative === null) {
-      return { state: 'awaiting', affirmative: null, response_seen: customerResponse.slice(0, 40) };
+      return { state: 'awaiting', affirmative: null, response_seen: customerResponses[customerResponses.length - 1].slice(0, 60) };
     }
 
     // Has the rep ALREADY followed up with phone-for-estimate after the
@@ -2649,9 +2680,9 @@ The full WHEEL INVENTORY CONTEXT block further down has additional framing nuanc
     }
 
     if (followedUp) {
-      return { state: 'followed_up', affirmative, response_from: fromCurrent ? 'current' : 'history' };
+      return { state: 'followed_up', affirmative, soft, signal: signalSource, response_from: fromCurrent ? 'current' : 'history' };
     }
-    return { state: 'answered', affirmative, response_from: fromCurrent ? 'current' : 'history' };
+    return { state: 'answered', affirmative, soft, signal: signalSource, response_from: fromCurrent ? 'current' : 'history' };
   })();
   console.log('[FN] install answer:', installAnswer);
   const liveInventoryTopOverride = liveLeadProduct
@@ -2684,9 +2715,9 @@ ALL THREE VARIANTS (quick / standard / detailed) MUST:
    GENERIC safe phrases that don't require a signal: "solid ride", "smooth drive", "daily driver", "value pick", "comfort", "build quality".
    HARD FAIL: claiming 3PMS / snowflake / severe-snow / "winter-rated" / all-season / all-weather / touring when the corresponding signal is NOT in the list above. If none of the seasonal/use mappings apply, fall back to a GENERIC phrase or omit the feature phrase entirely — better to leave it out than to invent a rating.
 5. Anchor the sticker price: ${liveLeadPrice || '$XX.XX'} each (or /tire).
-6. CTA — depends on whether install has been answered yet (installAnswer.state = "${installAnswer.state}"${(installAnswer.state === 'answered' || installAnswer.state === 'followed_up') ? `, affirmative=${installAnswer.affirmative}` : ''}):
+6. CTA — depends on whether install has been answered yet (installAnswer.state = "${installAnswer.state}"${(installAnswer.state === 'answered' || installAnswer.state === 'followed_up') ? `, affirmative=${installAnswer.affirmative}${installAnswer.soft ? ', signal=implicit (customer asked install-progression questions like "do you install? balance free? alignment?")' : ''}` : ''}):
    ${installAnswer.state === 'answered' && installAnswer.affirmative === true
-     ? `INSTALL ANSWERED AFFIRMATIVE — customer has confirmed they want install. The rep has NOT yet followed up with phone-for-estimate. Do NOT ask the install question again. Pivot to PHONE-FOR-ESTIMATE: "Wicked — send me your phone number and I'll get the formal estimate over with everything (tires + install + taxes) broken down line by line." / "Awesome, send a good phone number and I'll have a sales rep shoot you the full estimate broken down — tires, install, all in." Variants must end with this phone ask, NOT "when do you want it booked" or "when are you free to come in" — that's premature; phone first, scheduling after the estimate is in their hands. FORBIDDEN: "when would you want to get them on the truck", "when are you looking to book that in", "when's good for you to come in", any scheduling question.`
+     ? `INSTALL ANSWERED AFFIRMATIVE${installAnswer.soft ? ' (IMPLICIT — customer asked install-progression questions like "do you install? balance? alignment?" rather than saying "yes"; treat as committed)' : ''}. The rep has NOT yet followed up with phone-for-estimate. Do NOT ask the install question again.${installAnswer.soft ? ' FIRST: in 1 short clause per question, answer any substantive questions the customer asked (install: "yep we install", balance: "balance included with install", alignment: "alignment we can add on", warranty: "iLink backs it with a multi-year, sales rep has the exact length", "lowest price": stay at the sticker — no discount). Combine concisely; do not turn into a paragraph.' : ''} ${installAnswer.soft ? 'THEN' : ''} Pivot to PHONE-FOR-ESTIMATE: "Wicked — send me your phone number and I'll get the formal estimate over with everything (tires + install + taxes${installAnswer.soft ? ' + balance + alignment' : ''}) broken down line by line." / "Awesome, send a good phone number and I'll have a sales rep shoot you the full estimate broken down — tires, install, all in." Variants must end with this phone ask, NOT "when do you want it booked" or "when are you free to come in" — that's premature; phone first, scheduling after the estimate is in their hands. FORBIDDEN: "when would you want to get them on the truck", "when are you looking to book that in", "when's good for you to come in", any scheduling question.`
      : installAnswer.state === 'answered' && installAnswer.affirmative === false
        ? `INSTALL ANSWERED NEGATIVE ("just tires"). The rep has NOT yet followed up with phone-for-estimate. Do NOT ask the install question again. Pivot to PHONE-FOR-ESTIMATE for the tires alone: "Cool — send me your phone number and I'll have the formal estimate sent over with the tires + taxes broken out." Variants must end with the phone ask. No scheduling question.`
        : installAnswer.state === 'followed_up'
@@ -2865,7 +2896,11 @@ The full ELEMENT LIST and EXAMPLE STRUCTURE are in the LIVE INVENTORY CONTEXT (o
       // "ask install" (default) or "ask for phone" (install just answered).
       let ctaInstruction;
       if (installAnswer.state === 'answered' && installAnswer.affirmative === true) {
-        ctaInstruction = `Install has been answered AFFIRMATIVE (yes) — do NOT ask install again. CLOSE every variant by asking for the PHONE NUMBER so a formal estimate (tires + install + taxes) can be sent. Example phrasing: "Send me your phone number and I'll get the full estimate over broken down line by line." FORBIDDEN this turn: asking install again, asking "when do you want it booked", asking "when's good for you" — scheduling fires AFTER the estimate is delivered.`;
+        if (installAnswer.soft) {
+          ctaInstruction = `Install has been answered AFFIRMATIVE (IMPLICIT — customer asked install-progression questions like "do you install? balance free? alignment?" instead of saying "yes"; treat as committed). DO NOT re-ask install. FIRST: answer the customer's substantive questions in 1 short clause each (install: "yep we install", balance: "balance is included with install", alignment: "alignment we can add on when you're in", warranty: "iLink backs it with a multi-year, sales rep has the exact length"). Keep it tight — combine into one sentence if you can. DO NOT discount the sticker price if they asked "lowest price". THEN close with the PHONE NUMBER ask: "Send me your phone number and I'll have the full estimate over — tires, install, balance, alignment, taxes all broken down." FORBIDDEN: asking install again, asking timing/scheduling, dropping the sticker.`;
+        } else {
+          ctaInstruction = `Install has been answered AFFIRMATIVE (yes) — do NOT ask install again. CLOSE every variant by asking for the PHONE NUMBER so a formal estimate (tires + install + taxes) can be sent. Example phrasing: "Send me your phone number and I'll get the full estimate over broken down line by line." FORBIDDEN this turn: asking install again, asking "when do you want it booked", asking "when's good for you" — scheduling fires AFTER the estimate is delivered.`;
+        }
       } else if (installAnswer.state === 'answered' && installAnswer.affirmative === false) {
         ctaInstruction = `Install has been answered NEGATIVE ("just tires"). CLOSE every variant by asking for the PHONE NUMBER so a tire-only estimate can be sent. FORBIDDEN this turn: asking install again, asking when they want install.`;
       } else if (installAnswer.state === 'followed_up') {
