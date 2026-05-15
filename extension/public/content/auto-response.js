@@ -1536,14 +1536,15 @@
       }
 
       .fbrm-ar-image-preview {
-        display: grid;
-        grid-template-columns: repeat(2, 1fr);
+        display: flex;
+        flex-wrap: wrap;
         gap: 6px;
       }
       .fbrm-ar-image-preview:empty { display: none; }
       .fbrm-ar-pick-wrap {
         position: relative;
-        aspect-ratio: 1 / 1;
+        width: 130px;
+        height: 130px;
         background: #ffffff;
         border: 1px solid #2a2a2a;
         border-radius: 8px;

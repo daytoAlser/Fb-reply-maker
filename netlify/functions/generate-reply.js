@@ -1720,6 +1720,15 @@ VARIANT LENGTH:
 - standard: opener + 1–2 qualifiers, 2–3 sentences.
 - detailed: opener + full qualifier chain for the ad type, 4+ sentences.
 
+QUALIFIER PRIORITY WHEN WHEELS IN SCOPE (overrides default qualifier choice for ALL variants including Quick):
+When the rim+tire SPLIT trigger fires (customer mentioned rims/wheels), the qualifier is ALWAYS the vehicle-for-rims ask. NEVER the install y/n question. This holds even for Quick where you only get ONE qualifier — that single qualifier MUST be the rim-vehicle ask, not "install too or just the tires". Install is the WRONG qualifier when wheels are open; it leaves the rim branch dangling.
+
+EXAMPLE — wheels in scope, customer just got tire price:
+- Quick (CORRECT):     "[Opener] We've got the iLink Multimatch 225/50R18 at $131.75 each ready to roll. For the rims, what year/make/model?"
+- Quick (FORBIDDEN):   "[Opener] We've got the iLink Multimatch 225/50R18 at $131.75 each ready to roll. You looking at install too or just the tires?"
+- Standard (CORRECT):  "[Opener] Perfect on the size — we've got the iLink Multimatch 225/50R18 99W BSW ready to roll at $131.75 each. For the rims, year/make/model and I'll match the bolt pattern."
+- Standard (FORBIDDEN): "...$131.75 each. You looking at install too or just the tires? And on the rim side, what year/make/model..." (BOTH qualifiers — drop install)
+
 ALWAYS USE THE OPENER LINE on every reply, regardless of how deep the conversation is. The opener is Dayton's brand signature — "Hey @CustomerName, Dayton here" or its no-mention equivalent — and it leads every variant in every turn. Do NOT drop the opener after qualifying questions are answered. Do NOT replace it with informal lead-ins like "Hey, perfect —" or just "Perfect, …". The opener line above is the FIRST text in every variant, character-for-character.
 
 MULTI-PRODUCT TRACKING
@@ -2422,6 +2431,45 @@ The full ELEMENT LIST and EXAMPLE STRUCTURE are in the LIVE INVENTORY CONTEXT (o
     }
 
     console.log('[FN] supabase check: thread_id=', thread_id, 'type=', typeof thread_id);
+
+    // OPENER POST-FIX — the model intermittently strips "@Julie," from the
+    // resolved opener (Quick variants most often). The opener line is fully
+    // deterministic at this point, so just enforce it: replace each variant's
+    // first sentence with the resolved opener verbatim. Skips returning-customer
+    // flows where the opener is intentionally overridden.
+    try {
+      const m = typeof openerLine === 'string' ? openerLine.match(/^Opener:\s*"(.+)"\s*$/) : null;
+      const resolvedOpener = m ? m[1] : null;
+      const isReturning = effectiveConversationMode === 'returning';
+      if (resolvedOpener && !isReturning && parsed.variants && typeof parsed.variants === 'object') {
+        const fixOne = (text) => {
+          if (typeof text !== 'string' || !text.trim()) return text;
+          if (text.startsWith(resolvedOpener)) return text;
+          // Find end of first sentence (! or . or ? at boundary). Cap search
+          // at 180 chars to avoid rewriting a whole paragraph if no terminator.
+          const cap = Math.min(180, text.length);
+          let cut = -1;
+          for (let i = 0; i < cap; i++) {
+            const c = text[i];
+            if (c === '!' || c === '.' || c === '?') { cut = i + 1; break; }
+          }
+          if (cut < 0) return resolvedOpener + ' ' + text.trim();
+          const rest = text.slice(cut).replace(/^\s+/, '');
+          return rest ? resolvedOpener + ' ' + rest : resolvedOpener;
+        };
+        const before = { q: parsed.variants.quick, s: parsed.variants.standard, d: parsed.variants.detailed };
+        parsed.variants.quick    = fixOne(parsed.variants.quick);
+        parsed.variants.standard = fixOne(parsed.variants.standard);
+        parsed.variants.detailed = fixOne(parsed.variants.detailed);
+        const fixed = [];
+        if (before.q !== parsed.variants.quick)    fixed.push('quick');
+        if (before.s !== parsed.variants.standard) fixed.push('standard');
+        if (before.d !== parsed.variants.detailed) fixed.push('detailed');
+        if (fixed.length) console.log('[FN] opener post-fix applied to:', fixed.join(','));
+      }
+    } catch (err) {
+      console.warn('[FN] opener post-fix threw:', err?.message || err);
+    }
 
     if (thread_id) {
       try {
