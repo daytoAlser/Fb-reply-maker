@@ -775,6 +775,56 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  // LOG_LEARNING_INSERT / LOG_LEARNING_FINALIZE / UPDATE_LEARNING_FLAG /
+  // FETCH_LEARNING_RECENT — proxies to netlify/functions/learning-log.js.
+  // Same shape as GENERATE_REPLY above. Writes are fire-and-forget from
+  // the content script (never blocks INSERT UX); reads block the side
+  // panel until the records arrive.
+  const LEARNING_TYPES = {
+    LOG_LEARNING_INSERT:   'insert_event',
+    LOG_LEARNING_FINALIZE: 'finalize_event',
+    UPDATE_LEARNING_FLAG:  'update_flag',
+    FETCH_LEARNING_RECENT: 'recent'
+  };
+  if (msg && LEARNING_TYPES[msg.type]) {
+    const action = LEARNING_TYPES[msg.type];
+    (async () => {
+      try {
+        const data = await chrome.storage.sync.get(['config']);
+        const config = data.config || {};
+        // Fallback: existing users who saved config before this field
+        // existed will have no learningEndpoint. Derive it from the
+        // generate-reply endpoint they already configured.
+        const endpoint = config.learningEndpoint
+          || (typeof config.endpoint === 'string' && config.endpoint
+              ? config.endpoint.replace(/\/generate-reply$/, '/learning-log')
+              : '');
+        const secret = config.secret;
+        if (!endpoint || !secret) {
+          sendResponse({ ok: false, reason: 'missing_endpoint_or_secret' });
+          return;
+        }
+        const payload = { action, ...(msg.payload || {}) };
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-api-secret': secret },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => '');
+          sendResponse({ ok: false, reason: `${res.status} ${text || res.statusText}` });
+          return;
+        }
+        const body = await res.json();
+        sendResponse(body && typeof body === 'object' ? body : { ok: true });
+      } catch (err) {
+        console.warn('[SW]', msg.type, 'failed:', err?.message || err);
+        sendResponse({ ok: false, reason: err?.message || String(err) });
+      }
+    })();
+    return true;
+  }
+
   // FETCH_IMAGE_FOR_CLIPBOARD — content script asks the SW to fetch a
   // product image URL. SW has full host_permissions bypass for CORS,
   // so this works reliably even when the content-script-side fetch

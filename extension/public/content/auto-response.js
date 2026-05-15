@@ -462,6 +462,333 @@
   // can build the CONTEXT section without re-scraping.
   let panelContext = { detect: null, threadId: null, lead: null };
 
+  // ──────────────────────────────────────────────────────────────────
+  // LEARNING CAPTURE
+  // ──────────────────────────────────────────────────────────────────
+  // One entry per active INSERT awaiting send detection. Keyed by
+  // thread_id so a fresh INSERT in the same thread can cancel an
+  // in-flight watcher cleanly. Server-side supersession handles the
+  // database side; this map handles in-page cleanup.
+  const pendingLearningByThread = new Map();
+
+  // Tiered conversation_history truncation: most recent customer
+  // message keeps up to 1500 chars (it's the signal that drove the
+  // variant), all other messages cap at 500. See plan §"Conversation
+  // history truncation".
+  function truncateHistoryForLearning(history) {
+    if (!Array.isArray(history)) return [];
+    const last10 = history.slice(-10);
+    let mostRecentCustomerIdx = -1;
+    for (let i = last10.length - 1; i >= 0; i--) {
+      const m = last10[i];
+      if (m && m.sender && m.sender !== 'me') { mostRecentCustomerIdx = i; break; }
+    }
+    return last10.map((m, i) => {
+      const cap = i === mostRecentCustomerIdx ? 1500 : 500;
+      const text = typeof m?.text === 'string' ? m.text.slice(0, cap) : '';
+      return { ...m, text };
+    });
+  }
+
+  // Normalized key for sentence-level alignment. Case + whitespace fold;
+  // punctuation preserved so "$160.00" vs "$160" still aligns as the
+  // same sentence position (the per-token diff then highlights the
+  // punctuation difference).
+  function normalizeSentenceKey(s) {
+    return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  }
+
+  // Splits text into sentences. Keeps trailing terminal punctuation
+  // attached to the sentence. "Hi. How are you!" → ["Hi.", " How are you!"].
+  function splitSentences(text) {
+    if (typeof text !== 'string' || !text) return [];
+    // Match: any run of non-terminator chars followed by one or more
+    // terminators, OR a trailing tail with no terminator.
+    const parts = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g);
+    return parts ? parts.map((s) => s) : [text];
+  }
+
+  // Tokenizes preserving whitespace + punctuation so output reassembles
+  // back into readable text. "hi there!" → ["hi", " ", "there", "!"].
+  function tokenizeForWordDiff(text) {
+    if (typeof text !== 'string' || !text) return [];
+    const m = text.match(/\S+|\s+/g);
+    return m ? m : [];
+  }
+
+  // Builds an LCS table over two arrays using `keyFn` to compare. O(n*m)
+  // time/space; fine for the small arrays we feed it (sentences <50,
+  // tokens per sentence <200).
+  function buildLCS(a, b, keyFn) {
+    const n = a.length, m = b.length;
+    const dp = Array.from({ length: n + 1 }, () => new Int32Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) {
+      const ka = keyFn(a[i]);
+      for (let j = m - 1; j >= 0; j--) {
+        if (ka === keyFn(b[j])) dp[i][j] = dp[i + 1][j + 1] + 1;
+        else dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+    return dp;
+  }
+
+  // Walks an LCS table to produce an aligned ribbon. Each output entry
+  // is { type: 'matched'|'added'|'removed', a, b } where matched has
+  // both a (original) and b (final), added has only b, removed has
+  // only a.
+  function alignWithLCS(a, b, keyFn) {
+    const dp = buildLCS(a, b, keyFn);
+    const out = [];
+    let i = 0, j = 0;
+    while (i < a.length && j < b.length) {
+      if (keyFn(a[i]) === keyFn(b[j])) {
+        out.push({ type: 'matched', a: a[i], b: b[j] });
+        i++; j++;
+      } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+        out.push({ type: 'removed', a: a[i] });
+        i++;
+      } else {
+        out.push({ type: 'added', b: b[j] });
+        j++;
+      }
+    }
+    while (i < a.length) { out.push({ type: 'removed', a: a[i] }); i++; }
+    while (j < b.length) { out.push({ type: 'added', b: b[j] }); j++; }
+    return out;
+  }
+
+  // Word-level diff within a single matched sentence pair. Returns
+  // [{ type: 'kept'|'added'|'removed', text }, ...] preserving raw
+  // casing/punctuation/whitespace.
+  function wordDiffSentence(originalRaw, finalRaw) {
+    const a = tokenizeForWordDiff(originalRaw);
+    const b = tokenizeForWordDiff(finalRaw);
+    const aligned = alignWithLCS(a, b, (t) => t);
+    // Merge consecutive same-type tokens into one entry for compact
+    // rendering. "kept 'we' kept "'" kept 've' kept ' ' kept 'got'" →
+    // "kept 'we've got'".
+    const merged = [];
+    for (const e of aligned) {
+      const type = e.type === 'matched' ? 'kept' : e.type;
+      const text = e.type === 'matched' ? e.a : (e.a || e.b);
+      const last = merged[merged.length - 1];
+      if (last && last.type === type) last.text += text;
+      else merged.push({ type, text });
+    }
+    return merged;
+  }
+
+  // Top-level diff. Returns the edit_diff shape stored in Supabase.
+  function computeEditDiff(originalRaw, finalRaw) {
+    const aSent = splitSentences(originalRaw);
+    const bSent = splitSentences(finalRaw);
+    const aligned = alignWithLCS(aSent, bSent, normalizeSentenceKey);
+    let tokensAdded = 0, tokensRemoved = 0;
+    let matched = 0, added = 0, removed = 0;
+    const sentences = aligned.map((e) => {
+      if (e.type === 'matched') {
+        matched++;
+        if (normalizeSentenceKey(e.a) === normalizeSentenceKey(e.b) && e.a === e.b) {
+          return { type: 'matched', original_raw: e.a, final_raw: e.b, tokens: [{ type: 'kept', text: e.a }] };
+        }
+        const tokens = wordDiffSentence(e.a, e.b);
+        for (const t of tokens) {
+          if (t.type === 'added') tokensAdded++;
+          else if (t.type === 'removed') tokensRemoved++;
+        }
+        return { type: 'matched', original_raw: e.a, final_raw: e.b, tokens };
+      }
+      if (e.type === 'added') {
+        added++; tokensAdded += tokenizeForWordDiff(e.b).filter((t) => /\S/.test(t)).length;
+        return { type: 'added', final_raw: e.b };
+      }
+      removed++; tokensRemoved += tokenizeForWordDiff(e.a).filter((t) => /\S/.test(t)).length;
+      return { type: 'removed', original_raw: e.a };
+    });
+    return {
+      sentences,
+      summary: {
+        sentences_matched: matched,
+        sentences_added: added,
+        sentences_removed: removed,
+        tokens_added: tokensAdded,
+        tokens_removed: tokensRemoved
+      }
+    };
+  }
+
+  // was_edited check uses a normalized comparison so casing-only and
+  // whitespace-only changes don't register as edits, but punctuation
+  // and content changes do. Punctuation is meaningful ("$160.00" vs
+  // "$160" matters), so it's NOT stripped.
+  function normalizeForEditCheck(s) {
+    return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  }
+
+  function newClientEventId() {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+    return 'le-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+  }
+
+  // Snapshots the set of outbound message texts currently visible in
+  // the thread. Used to identify "new" outbounds appearing after INSERT.
+  function snapshotOutboundTexts() {
+    try {
+      const api = globalThis.FBRM_API;
+      if (!api || typeof api.scanThreadMessages !== 'function' || typeof api.extractThreadInfo !== 'function') return new Set();
+      const container = document.querySelector('[role="main"]') || document.body;
+      const info = api.extractThreadInfo(container);
+      const { messages } = api.scanThreadMessages(container, info?.partner, { permissive: true });
+      const set = new Set();
+      for (const m of messages || []) {
+        if (m && m.sender === 'me' && typeof m.text === 'string' && m.text.trim()) {
+          set.add(m.text.trim());
+        }
+      }
+      return set;
+    } catch (err) {
+      swlog('snapshotOutboundTexts failed: ' + (err?.message || err));
+      return new Set();
+    }
+  }
+
+  // Finds the most recent outbound message NOT in the baseline snapshot.
+  // Returns its raw text, or null if no new outbound exists yet.
+  function findNewOutbound(baseline) {
+    try {
+      const api = globalThis.FBRM_API;
+      if (!api || typeof api.scanThreadMessages !== 'function' || typeof api.extractThreadInfo !== 'function') return null;
+      const container = document.querySelector('[role="main"]') || document.body;
+      const info = api.extractThreadInfo(container);
+      const { messages } = api.scanThreadMessages(container, info?.partner, { permissive: true });
+      // Walk newest-first to grab the latest new outbound.
+      for (let i = (messages || []).length - 1; i >= 0; i--) {
+        const m = messages[i];
+        if (m && m.sender === 'me' && typeof m.text === 'string' && m.text.trim() && !baseline.has(m.text.trim())) {
+          return m.text;
+        }
+      }
+      return null;
+    } catch (err) {
+      swlog('findNewOutbound failed: ' + (err?.message || err));
+      return null;
+    }
+  }
+
+  function cancelPendingForThread(threadId) {
+    if (!threadId) return;
+    const prev = pendingLearningByThread.get(threadId);
+    if (!prev) return;
+    try { prev.observer?.disconnect(); } catch {}
+    if (prev.pollHandle) clearInterval(prev.pollHandle);
+    if (prev.timeoutHandle) clearTimeout(prev.timeoutHandle);
+    pendingLearningByThread.delete(threadId);
+    swlog('learning capture cancelled for thread=' + threadId + ' (superseded by fresh INSERT)');
+  }
+
+  // Fire-and-forget message to the SW. Errors are logged but never
+  // surfaced to the panel UX.
+  function sendLearningMessage(type, payload) {
+    try {
+      chrome.runtime.sendMessage({ type, payload }, (resp) => {
+        if (chrome.runtime.lastError) {
+          swlog(type + ' SW error: ' + chrome.runtime.lastError.message);
+          return;
+        }
+        if (!resp || !resp.ok) {
+          swlog(type + ' returned non-ok: ' + JSON.stringify(resp));
+        }
+      });
+    } catch (err) {
+      swlog(type + ' threw: ' + (err?.message || err));
+    }
+  }
+
+  // Captures an INSERT event and starts watching for the send. Called
+  // synchronously from handleInsert; never blocks (writes are SW-proxied
+  // and fire-and-forget).
+  function captureInsert({ kind, variantText, threadId, detect, lead }) {
+    if (!variantText || !kind) return;
+    // If a previous capture for this thread is still pending, cancel
+    // its watcher — server-side will mark it as superseded.
+    if (threadId) cancelPendingForThread(threadId);
+
+    const clientEventId = newClientEventId();
+    const baseline = snapshotOutboundTexts();
+
+    const insertPayload = {
+      client_event_id: clientEventId,
+      thread_id: threadId || null,
+      variant_kind: kind,
+      variant_shown: variantText,
+      customer_message: detect?.latestIncoming || null,
+      conversation_history: truncateHistoryForLearning(detect?.conversationHistory),
+      captured_fields: lead?.capturedFields || null,
+      listing_title: detect?.listingTitle || null,
+      partner_name: detect?.partnerName || null
+    };
+    sendLearningMessage('LOG_LEARNING_INSERT', insertPayload);
+    swlog('learning insert posted thread=' + (threadId || '?') + ' kind=' + kind + ' event=' + clientEventId);
+
+    let finalized = false;
+    const finalize = (finalText, sendTimeout) => {
+      if (finalized) return;
+      finalized = true;
+      // Clean up watchers BEFORE the network call (the call is f-a-f).
+      try { entry.observer?.disconnect(); } catch {}
+      if (entry.pollHandle) clearInterval(entry.pollHandle);
+      if (entry.timeoutHandle) clearTimeout(entry.timeoutHandle);
+      pendingLearningByThread.delete(threadId);
+
+      let was_edited = null;
+      let edit_diff = null;
+      let char_distance = null;
+      if (typeof finalText === 'string') {
+        was_edited = normalizeForEditCheck(variantText) !== normalizeForEditCheck(finalText);
+        edit_diff = computeEditDiff(variantText, finalText);
+        char_distance = Math.abs(variantText.length - finalText.length);
+      }
+      sendLearningMessage('LOG_LEARNING_FINALIZE', {
+        client_event_id: clientEventId,
+        final_sent_message: finalText ?? null,
+        was_edited,
+        edit_diff,
+        char_distance,
+        send_timeout: !!sendTimeout
+      });
+      swlog('learning finalize posted event=' + clientEventId + ' edited=' + was_edited + ' timeout=' + !!sendTimeout);
+    };
+
+    // Watch the messages region for new outbound rows.
+    const container = document.querySelector('[role="main"]') || document.body;
+    const observer = new MutationObserver(() => {
+      const newText = findNewOutbound(baseline);
+      if (newText !== null) finalize(newText, false);
+    });
+    try { observer.observe(container, { childList: true, subtree: true, characterData: true }); } catch {}
+
+    // Belt-and-suspenders poll. If FB renders the new message via a
+    // mutation the observer misses, the poll still catches it.
+    const pollHandle = setInterval(() => {
+      const newText = findNewOutbound(baseline);
+      if (newText !== null) finalize(newText, false);
+    }, 2500);
+
+    // 60s timeout fallback.
+    const timeoutHandle = setTimeout(() => {
+      finalize(null, true);
+    }, 60000);
+
+    const entry = {
+      clientEventId,
+      threadId,
+      observer,
+      pollHandle,
+      timeoutHandle
+    };
+    pendingLearningByThread.set(threadId, entry);
+  }
+
   function openPanel() {
     if (panelEl) return;
     dispatchCounter = 0;
@@ -512,6 +839,7 @@
     panel.innerHTML = `
       <header class="fbrm-ar-panel-header">
         <span class="fbrm-ar-panel-title">▌AUTO RESPONSE</span>
+        <span class="fbrm-ar-learning-indicator" title="Capturing INSERT→send pairs to the Learning Log">● Learning</span>
         <button type="button" class="fbrm-ar-panel-refresh" aria-label="Regenerate" title="Force a fresh generate (bust the cache)">⟳</button>
         <button type="button" class="fbrm-ar-panel-close" aria-label="Close">×</button>
       </header>
@@ -961,7 +1289,7 @@
 
     // INSERT
     card.querySelector('.fbrm-ar-btn-insert').addEventListener('click', () => {
-      handleInsert(card, text, previewUrls, blobs, imgRowEls);
+      handleInsert(card, text, previewUrls, blobs, imgRowEls, kind);
     });
 
     return card;
@@ -1099,9 +1427,25 @@
     return pasted;
   }
 
-  async function handleInsert(card, text, previewUrls, blobs, imgRowEls) {
+  async function handleInsert(card, text, previewUrls, blobs, imgRowEls, kind) {
     setInsertState(card, 'pending');
     setHint(card, '');
+
+    // Learning capture: snapshot what the rep is inserting + start the
+    // send-detection watcher. Fire-and-forget — never blocks the INSERT
+    // UX. Falls through silently if FBRM_API is missing or storage is
+    // unavailable.
+    try {
+      captureInsert({
+        kind: kind || 'unknown',
+        variantText: text,
+        threadId: panelContext?.threadId || null,
+        detect: panelContext?.detect || null,
+        lead: panelContext?.lead || null
+      });
+    } catch (err) {
+      swlog('captureInsert threw: ' + (err?.message || err));
+    }
 
     // 1. Text insert via the shared INSERT_REPLY pipeline.
     const res = await callInsertReply(text);
@@ -1311,6 +1655,22 @@
         letter-spacing: 0.14em;
         text-transform: uppercase;
         color: #ef4444;
+      }
+      .fbrm-ar-learning-indicator {
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: #4ade80;
+        opacity: 0.65;
+        margin-left: 10px;
+        margin-right: auto;
+        padding: 2px 6px;
+        border: 1px solid rgba(74, 222, 128, 0.2);
+        border-radius: 3px;
+        background: rgba(74, 222, 128, 0.05);
+        white-space: nowrap;
       }
       .fbrm-ar-panel-close,
       .fbrm-ar-panel-refresh {

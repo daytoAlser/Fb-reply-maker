@@ -38,6 +38,16 @@ export default function TabBar({ activeTab, onChange, leadsBadgeCount, inboxBadg
           </span>
         )}
       </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={activeTab === 'learning'}
+        className={`tab ${activeTab === 'learning' ? 'tab-active' : ''}`}
+        onClick={() => onChange('learning')}
+        title="Recent INSERT → send captures for prompt review"
+      >
+        <span>{'\u{1F4DA}'} Learning</span>
+      </button>
     </nav>
   );
 }

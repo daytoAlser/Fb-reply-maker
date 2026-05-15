@@ -7,7 +7,8 @@
   "host_permissions": [
     "https://*.facebook.com/*",
     "https://*.messenger.com/*",
-    "https://*.canadacustomautoworks.com/*"
+    "https://*.canadacustomautoworks.com/*",
+    "https://*.netlify.app/*"
   ],
   "background": {
     "service_worker": "src/background/service-worker.js",

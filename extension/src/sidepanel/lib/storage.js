@@ -2,6 +2,7 @@ export const DEFAULTS = {
   userName: '',
   config: {
     endpoint: 'https://ccacash.netlify.app/.netlify/functions/generate-reply',
+    learningEndpoint: 'https://ccacash.netlify.app/.netlify/functions/learning-log',
     secret: ''
   },
   context: {

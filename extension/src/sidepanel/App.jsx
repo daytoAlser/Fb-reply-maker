@@ -7,6 +7,7 @@ import ErrorBanner from './components/ErrorBanner.jsx';
 import AutoDetectCard from './components/AutoDetectCard.jsx';
 import TabBar from './components/TabBar.jsx';
 import LeadsTab from './components/LeadsTab.jsx';
+import LearningLogTab from './components/LearningLogTab.jsx';
 import FlagBanner from './components/FlagBanner.jsx';
 import MultiProductChips from './components/MultiProductChips.jsx';
 import ReturningCustomerBanner from './components/ReturningCustomerBanner.jsx';
@@ -139,7 +140,7 @@ export default function App() {
     let q = 0;
     let f = 0;
     chrome.storage.local.get(['activeTab', 'unviewedQualifiedCount', 'unviewedFlaggedCount']).then((d) => {
-      if (d.activeTab === 'reply' || d.activeTab === 'leads' || d.activeTab === 'inbox') setActiveTab(d.activeTab);
+      if (d.activeTab === 'reply' || d.activeTab === 'leads' || d.activeTab === 'inbox' || d.activeTab === 'learning') setActiveTab(d.activeTab);
       if (typeof d.unviewedQualifiedCount === 'number') q = d.unviewedQualifiedCount;
       if (typeof d.unviewedFlaggedCount === 'number') f = d.unviewedFlaggedCount;
       setLeadsBadgeCount(q + f);
@@ -695,8 +696,10 @@ export default function App() {
             </section>
           )}
         </>
-      ) : (
+      ) : activeTab === 'leads' ? (
         <LeadsTab />
+      ) : (
+        <LearningLogTab />
       )}
 
       <LogOptionsModal
