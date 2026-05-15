@@ -1208,7 +1208,7 @@ ${openerLine}
 
 The line above already has the customer's first name and the sales rep's name plugged in (when available). Use the quoted string EXACTLY as written. Do not rewrite it, do not substitute names, do not omit the @ symbol if it's present. The @ before the first name uses FB's mention system and triggers a notification — preserve it character-for-character.
 
-OPENER MUTATION FORBIDDEN — HARD RULE
+OPENER MUTATION FORBIDDEN — HARD RULE (applies ONLY when the OPENER LINE above is the quoted "Hey @Name, [Rep] here, ..." form. On CONTINUATION turns where the OPENER LINE says "Opener: NONE — CONTINUATION TURN", this whole section is REPLACED by the OPENER USAGE rule further down — do NOT prepend the intro opener.)
 The opener line above is the FIRST text in every variant, character-for-character. Specifically forbidden mutations:
 - Adding "there" after "Hey," ("Hey there, ..." is BANNED — use the line above as-is, even when it's the no-mention form "Hey, [Rep] here, ...")
 - Adding "friend", "man", "bud", "buddy", "dude", "boss", "bro", or any other address term after the opener's comma
@@ -1795,7 +1795,14 @@ EXAMPLE — wheels in scope, customer just got tire price:
 - Standard (CORRECT):  "[Opener] Perfect on the size — we've got the iLink Multimatch 225/50R18 99W BSW ready to roll at $131.75 each. For the rims, year/make/model and I'll match the bolt pattern."
 - Standard (FORBIDDEN): "...$131.75 each. You looking at install too or just the tires? And on the rim side, what year/make/model..." (BOTH qualifiers — drop install)
 
-ALWAYS USE THE OPENER LINE on every reply, regardless of how deep the conversation is. The opener is Dayton's brand signature — "Hey @CustomerName, Dayton here" or its no-mention equivalent — and it leads every variant in every turn. Do NOT drop the opener after qualifying questions are answered. Do NOT replace it with informal lead-ins like "Hey, perfect —" or just "Perfect, …". The opener line above is the FIRST text in every variant, character-for-character.
+OPENER USAGE — FIRST CONTACT vs. CONTINUATION:
+- FIRST CONTACT (the OPENER LINE above is a quoted "Hey @Name, [Rep] here, I'd be happy to help you out today!" string): use that opener VERBATIM as the first sentence of every variant. This is the rep's brand signature for the first reply in a thread.
+- CONTINUATION (the OPENER LINE above starts with "Opener: NONE — CONTINUATION TURN"): the rep has already greeted the customer earlier in this thread. DO NOT repeat the intro opener. Specifically FORBIDDEN this turn:
+   ❌ "Hey @Name, ..." anywhere in the first sentence
+   ❌ "[Rep] here, ..." anywhere in the first sentence
+   ❌ "I'd be happy to help you out today" anywhere
+   ❌ "Hey there," / "Hi @Name" / "Hello @Name" / any greeting form
+   Lead with substance: acknowledge what the customer just said and move forward. Examples of correct continuation openings: "Perfect on the 225/55R19 —", "Got it, ", "Gotcha, ", "Sweet, ", "Right on —", or dive straight into the substance ("That size puts you on …"). Informal lead-ins like "Perfect, …" or "Sweet, …" that you would NOT use on first contact are CORRECT on continuation turns.
 
 MULTI-PRODUCT TRACKING
 
@@ -1992,7 +1999,20 @@ export async function handler(event) {
   const overrideFlags = override_flags === true;
   const customerFirstName = firstWord(partnerName);
   const rep = (userName || '').trim() || null;
-  const openerLine = buildOpenerLine(customerFirstName, rep);
+
+  // The "Hey @Name, Dayton here, I'd be happy to help you out today!"
+  // opener is a FIRST-CONTACT signature only. Using it on every reply
+  // makes follow-ups feel like an intro reset every turn. Detect whether
+  // the rep has already replied in this thread (any message in history
+  // with sender='me'); if so, the opener line becomes a "lead with
+  // substance" directive instead of the full greeting.
+  const repAlreadyGreeted = Array.isArray(conversation_history)
+    && conversation_history.some((m) => m && m.sender === 'me' && typeof m.text === 'string' && m.text.trim());
+  const introOpenerLine = buildOpenerLine(customerFirstName, rep);
+  const openerLine = repAlreadyGreeted
+    ? `Opener: NONE — CONTINUATION TURN. The full intro opener (${introOpenerLine.replace(/^Opener:\s*/, '')}) has ALREADY been used earlier in this thread. DO NOT repeat it. DO NOT start with "Hey ${customerFirstName ? '@' + customerFirstName + ', ' : ''}${rep ? rep + ' here, ' : ''}I'd be happy to help you out today" or any variant of it. Lead with the substance directly — acknowledge what the customer just said and move the conversation forward. The first ~6 words should engage their latest message, not greet them again.`
+    : introOpenerLine;
+  console.log('[FN] opener mode:', repAlreadyGreeted ? 'continuation (intro opener suppressed)' : 'first-contact');
 
   // Phase E.2: server-authoritative returning-customer detection. Trust prev
   // state from extension cache, run the trigger logic here, freeze
@@ -2617,15 +2637,42 @@ The full ELEMENT LIST and EXAMPLE STRUCTURE are in the LIVE INVENTORY CONTEXT (o
 
     console.log('[FN] supabase check: thread_id=', thread_id, 'type=', typeof thread_id);
 
-    // OPENER POST-FIX — the model intermittently strips "@Julie," from the
-    // resolved opener (Quick variants most often). The opener line is fully
-    // deterministic at this point, so just enforce it: replace each variant's
-    // first sentence with the resolved opener verbatim. Skips returning-customer
-    // flows where the opener is intentionally overridden.
+    // OPENER POST-FIX — handles both directions deterministically:
+    //   - FIRST-CONTACT turn: model sometimes strips "@Julie," from the
+    //     opener. We enforce the resolved opener verbatim as the first
+    //     sentence of every variant.
+    //   - CONTINUATION turn: model sometimes re-uses the intro opener
+    //     even after the rep has already replied. We strip any
+    //     "Hey [@?Name,] [Rep] here, I'd be happy to help you out today!"
+    //     prefix and let the substance lead.
+    // Both paths skip when the conversation is in returning-customer
+    // mode (the returning flow has its own opener policy).
     try {
       const m = typeof openerLine === 'string' ? openerLine.match(/^Opener:\s*"(.+)"\s*$/) : null;
       const resolvedOpener = m ? m[1] : null;
       const isReturning = effectiveConversationMode === 'returning';
+
+      // Continuation-turn strip: detect and remove the intro opener if
+      // the model produced it anyway. Pattern is intentionally
+      // tolerant of @mention presence/absence and casing variants.
+      const INTRO_OPENER_RE = /^\s*Hey\b[^.!?\n]{0,140}?(?:I[' ]?d|I would)\s+be\s+happy\s+to\s+help\s+you\s+out\s+today\s*[!.?]\s*/i;
+      if (repAlreadyGreeted && !isReturning && parsed.variants && typeof parsed.variants === 'object') {
+        const stripOne = (text) => {
+          if (typeof text !== 'string' || !text.trim()) return text;
+          const stripped = text.replace(INTRO_OPENER_RE, '').trimStart();
+          return stripped || text; // never collapse to empty
+        };
+        const before = { q: parsed.variants.quick, s: parsed.variants.standard, d: parsed.variants.detailed };
+        parsed.variants.quick    = stripOne(parsed.variants.quick);
+        parsed.variants.standard = stripOne(parsed.variants.standard);
+        parsed.variants.detailed = stripOne(parsed.variants.detailed);
+        const stripped = [];
+        if (before.q !== parsed.variants.quick)    stripped.push('quick');
+        if (before.s !== parsed.variants.standard) stripped.push('standard');
+        if (before.d !== parsed.variants.detailed) stripped.push('detailed');
+        if (stripped.length) console.log('[FN] continuation-turn intro opener stripped from:', stripped.join(','));
+      }
+
       if (resolvedOpener && !isReturning && parsed.variants && typeof parsed.variants === 'object') {
         const fixOne = (text) => {
           if (typeof text !== 'string' || !text.trim()) return text;
