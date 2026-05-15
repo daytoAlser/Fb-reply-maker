@@ -2328,6 +2328,42 @@ The full WHEEL INVENTORY CONTEXT block further down has additional framing nuanc
     ? focused_product
     : (inventory && inventory.triggered && inventory.auto_primary ? inventory.auto_primary : null);
   const liveLeadPrice = liveLeadProduct && (liveLeadProduct.priceFormatted || (liveLeadProduct.price ? `$${liveLeadProduct.price.toFixed(2)}` : ''));
+
+  // Install-just-answered detection. When the previous rep message asked
+  // the install Y/N qualifier AND the customer's latest reply is an
+  // affirmative or negative, the install qualifier has been resolved
+  // THIS turn. The LIVE INVENTORY OVERRIDE's default CTA (ask install
+  // again) becomes wrong and the variants should pivot to phone-for-
+  // estimate instead. The "fires on the NEXT turn, after install is
+  // answered" line in the override has been failing because the override
+  // itself was fixed to "ask install"; this signal makes the override
+  // branch correctly.
+  const installAnswer = (() => {
+    if (!Array.isArray(conversation_history) || conversation_history.length === 0) {
+      return { state: 'unknown', affirmative: null };
+    }
+    // Find the most recent rep message.
+    let lastRepText = null;
+    for (let i = conversation_history.length - 1; i >= 0; i--) {
+      const m = conversation_history[i];
+      if (m && m.sender === 'me' && typeof m.text === 'string' && m.text.trim()) {
+        lastRepText = m.text;
+        break;
+      }
+    }
+    if (!lastRepText) return { state: 'unknown', affirmative: null };
+    const installAskRe = /(install(?:ed|ation)?\s+too|install\s+booked|doing\s+install|tires?\s+installed|just\s+the\s+tires?|install\s+or\s+(?:just|the)\s+tires?)/i;
+    if (!installAskRe.test(lastRepText)) return { state: 'not_asked', affirmative: null };
+    // Customer's current message is the latest reply.
+    const reply = typeof message === 'string' ? message.trim().toLowerCase() : '';
+    if (!reply) return { state: 'awaiting', affirmative: null };
+    const yesRe = /^(yes|yeah|yep|ya|yup|sure|please|ok|okay|absolutely|definitely|yes\s+please|of\s+course|for\s+sure|install\s+(?:please|too|as\s+well)|need\s+install|with\s+install)\b/i;
+    const noRe = /^(no|nope|nah|no\s+thanks?|just\s+(?:the\s+)?tires?|tires?\s+only|tire\s+only|skip\s+install|without\s+install)\b/i;
+    if (yesRe.test(reply)) return { state: 'answered', affirmative: true };
+    if (noRe.test(reply)) return { state: 'answered', affirmative: false };
+    return { state: 'awaiting', affirmative: null };
+  })();
+  console.log('[FN] install answer:', installAnswer);
   const liveInventoryTopOverride = liveLeadProduct
     ? `
 
@@ -2358,7 +2394,12 @@ ALL THREE VARIANTS (quick / standard / detailed) MUST:
    GENERIC safe phrases that don't require a signal: "solid ride", "smooth drive", "daily driver", "value pick", "comfort", "build quality".
    HARD FAIL: claiming 3PMS / snowflake / severe-snow / "winter-rated" / all-season / all-weather / touring when the corresponding signal is NOT in the list above. If none of the seasonal/use mappings apply, fall back to a GENERIC phrase or omit the feature phrase entirely — better to leave it out than to invent a rating.
 5. Anchor the sticker price: ${liveLeadPrice || '$XX.XX'} each (or /tire).
-6. Close with the INSTALL QUESTION (binary ask): "you looking at install too or just the tires?" / "want install booked too or tires only?" / "are we doing install or just the tires?". This is the only acceptable CTA this turn. Phone-for-estimate fires on the NEXT turn, after install is answered.
+6. CTA — depends on whether install has been answered yet (installAnswer.state = "${installAnswer.state}"${installAnswer.state === 'answered' ? `, affirmative=${installAnswer.affirmative}` : ''}):
+   ${installAnswer.state === 'answered' && installAnswer.affirmative === true
+     ? `INSTALL ANSWERED AFFIRMATIVE THIS TURN. Do NOT ask the install question again. Pivot to PHONE-FOR-ESTIMATE: "Wicked — send me your phone number and I'll get the formal estimate over with everything (tires + install + taxes) broken down line by line." / "Awesome, send a good phone number and I'll have a sales rep shoot you the full estimate broken down — tires, install, all in." Variants must end with this phone ask, NOT "when do you want it booked" or "when are you free to come in" — that's premature; phone first, scheduling after the estimate is in their hands. FORBIDDEN: "when would you want to get them on the truck", "when are you looking to book that in", "when's good for you to come in", any scheduling question.`
+     : installAnswer.state === 'answered' && installAnswer.affirmative === false
+       ? `INSTALL ANSWERED NEGATIVE THIS TURN ("just tires"). Do NOT ask the install question again. Pivot to PHONE-FOR-ESTIMATE for the tires alone: "Cool — send me your phone number and I'll have the formal estimate sent over with the tires + taxes broken out." Variants must end with the phone ask. No scheduling question.`
+       : `Close with the INSTALL QUESTION (binary ask): "you looking at install too or just the tires?" / "want install booked too or tires only?" / "are we doing install or just the tires?". This is the only acceptable CTA this turn. Phone-for-estimate fires on the NEXT turn, after install is answered.`}
 
 PROHIBITED CTAs THIS TURN (closing-style asks that skip the install qualifier):
 - "Wanna lock it in?"
@@ -2526,7 +2567,18 @@ The full ELEMENT LIST and EXAMPLE STRUCTURE are in the LIVE INVENTORY CONTEXT (o
       }).join(' | ');
       userMessageTail = `\n\n[TURN-LEVEL OVERRIDE — APPLY NOW]\nWheel inventory active. ALL THREE VARIANTS MUST name these ${wheelInventory.picks.length} picks exactly: ${pickSummary}. Each pick gets its own clause with name + finish + price + correct availability. Close with a NEUTRAL ask ("any of these catch your eye?" / "any jump out at ya?") — NEVER "which of these are you feeling?". DO NOT ask poke/flush. DO NOT say "let me pull options" / "pulling some options" — they are already pulled and attached. DO NOT name a wheel not in this list. Brand restriction: Armed only.`;
     } else if (liveLeadProduct) {
-      userMessageTail = `\n\n[TURN-LEVEL OVERRIDE — APPLY NOW]\nLive inventory active. PRIMARY: ${liveLeadProduct.name}${liveLeadPrice ? ` (${liveLeadPrice} each)` : ''}. All three variants MUST recommend this product by name, with its price as a single anchor and a one-phrase feature. The picture is auto-attached by the extension — do NOT promise to "send pics + pricing in a sec". End EVERY variant with the install question as the CTA — "you looking at install too or just the tires?" (or equivalent). Do NOT close with "wanna lock it in", "want me to put a quote together", or "send me your phone number" — phone-for-estimate fires the turn AFTER the install question is answered. The prohibited-phrases list in the system prompt is in force.`;
+      // CTA branches off install-answer state — feature claim is constrained
+      // by the seasonSignals tagged on the SKU, and the closer is either
+      // "ask install" (default) or "ask for phone" (install just answered).
+      let ctaInstruction;
+      if (installAnswer.state === 'answered' && installAnswer.affirmative === true) {
+        ctaInstruction = `Install was JUST answered AFFIRMATIVE in the customer's current message — do NOT ask install again. CLOSE every variant by asking for the PHONE NUMBER so a formal estimate (tires + install + taxes) can be sent. Example phrasing: "Send me your phone number and I'll get the full estimate over broken down line by line." FORBIDDEN this turn: asking install again, asking "when do you want it booked", asking "when's good for you" — scheduling fires AFTER the estimate is delivered.`;
+      } else if (installAnswer.state === 'answered' && installAnswer.affirmative === false) {
+        ctaInstruction = `Install was JUST answered NEGATIVE in the customer's current message ("just tires"). CLOSE every variant by asking for the PHONE NUMBER so a tire-only estimate can be sent. FORBIDDEN this turn: asking install again, asking when they want install.`;
+      } else {
+        ctaInstruction = `End EVERY variant with the install question as the CTA — "you looking at install too or just the tires?" (or equivalent). Do NOT close with "wanna lock it in", "want me to put a quote together", or "send me your phone number" — phone-for-estimate fires the turn AFTER the install question is answered.`;
+      }
+      userMessageTail = `\n\n[TURN-LEVEL OVERRIDE — APPLY NOW]\nLive inventory active. PRIMARY: ${liveLeadProduct.name}${liveLeadPrice ? ` (${liveLeadPrice} each)` : ''}. All three variants MUST recommend this product by name, with its price as a single anchor and a one-phrase feature. Feature claims must be grounded in the VERIFIED SEASON/USE SIGNALS in the system prompt — do NOT invent ratings (3PMS, snowflake, etc.) that aren't in the signal list. The picture is auto-attached by the extension — do NOT promise to "send pics + pricing in a sec". ${ctaInstruction} The prohibited-phrases list in the system prompt is in force.`;
     }
     // Split the system prompt at the cache breakpoint marker. Everything
     // before the marker is the static rule prefix that's identical
