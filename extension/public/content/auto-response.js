@@ -346,7 +346,8 @@
     if ((entry.partnerName || '').trim() !== (partnerName || '').trim()) return null;
     // 60s TTL — short enough that backend prompt updates land for
     // the next click; long enough that a quick click-after-prefetch
-    // still hits the cache.
+    // still hits the cache. The prefetch is the speed win — don't
+    // gut it.
     if (Date.now() - entry.generatedAt > 60 * 1000) return null;
     return entry.result;
   }
@@ -450,13 +451,22 @@
 
   let panelEl = null;
   let escHandler = null;
+  // Per-panel-session counter for renderResult — guards against any
+  // double-render path (cache HIT then prefetch-await fall-through,
+  // or a stray second runGenerate call) that could "flash" a good
+  // variant then revert to an older one. forceRegenerate explicitly
+  // bumps this so it CAN re-render.
+  let renderSessionId = 0;
+  let lastRenderedSessionId = -1;
   // Stash of the current panel's context (detect + lead) so renderResult
   // can build the CONTEXT section without re-scraping.
   let panelContext = { detect: null, threadId: null, lead: null };
 
   function openPanel() {
     if (panelEl) return;
-    dispatchCounter = 0; // reset per-session counter
+    dispatchCounter = 0;
+    renderSessionId++;
+    lastRenderedSessionId = -1;
     injectStylesOnce();
     panelEl = buildPanelSkeleton();
     document.body.appendChild(panelEl);
@@ -523,10 +533,12 @@
   function forceRegenerate() {
     // Bust the cache for the current thread + reset prefetch tracking
     // so the next runGenerate skips the cache and fires a fresh
-    // request. Useful when backend prompt changes deploy and the rep
-    // wants new variants without waiting for the TTL.
+    // request. Bump the render session so the next renderResult is
+    // allowed to overwrite.
     if (panelContext && panelContext.threadId) cache.delete(panelContext.threadId);
     lastPrefetchedKey = null;
+    renderSessionId++;
+    lastRenderedSessionId = -1;
     swlog('manual regenerate triggered');
     const body = panelEl && panelEl.querySelector('.fbrm-ar-panel-body');
     if (body) {
@@ -694,15 +706,19 @@
 
   function renderResult(result) {
     if (!panelEl) return;
+    // Guard: only ONE renderResult per panel session. If two code
+    // paths race (e.g., cache HIT renders, then a prefetch fall-
+    // through tries to re-render with a stale fetch result), the
+    // second is ignored. forceRegenerate bumps the session id so it
+    // can render again.
+    if (renderSessionId === lastRenderedSessionId) {
+      swlog('renderResult IGNORED (session already rendered): session=' + renderSessionId);
+      return;
+    }
+    lastRenderedSessionId = renderSessionId;
     const body = panelEl.querySelector('.fbrm-ar-panel-body');
     const ctxHtml = renderContextSection();
-    swlog('renderResult ctx-html-len=' + ctxHtml.length + ' panelCtx=' + JSON.stringify({
-      hasDetect: !!(panelContext && panelContext.detect),
-      hasLead: !!(panelContext && panelContext.lead),
-      listing: panelContext?.detect?.listingTitle || null,
-      partner: panelContext?.detect?.partnerName || null,
-      history: panelContext?.detect?.conversationHistory?.length || 0
-    }));
+    swlog('renderResult session=' + renderSessionId + ' ctx-html-len=' + ctxHtml.length + ' partner=' + JSON.stringify(panelContext?.detect?.partnerName || null) + ' history=' + (panelContext?.detect?.conversationHistory?.length || 0));
     body.innerHTML = `
       ${ctxHtml}
       <p class="fbrm-ar-tip">Tip: click @name in FB's reply box to convert it to a real tag before sending.</p>
@@ -1255,10 +1271,10 @@
         top: 50%;
         left: 50%;
         transform: translate(-50%, -50%);
-        width: 640px;
+        width: 760px;
         max-width: calc(100vw - 32px);
         height: calc(100vh - 80px);
-        max-height: 900px;
+        max-height: 1000px;
         min-height: 600px;
         border: 1px solid #2a2a2a;
         border-radius: 12px;
