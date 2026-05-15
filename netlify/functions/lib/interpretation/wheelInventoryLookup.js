@@ -68,14 +68,48 @@ function resolveItemDiameter(it) {
   return tryParse(it.name) || tryParse(it.sku) || null;
 }
 
-// Bolt pattern is rarely surfaced on the item — best-effort scan over
-// name + description. Accepts both "6x139.7" and "6x139" forms.
-function itemHasBoltPattern(it, canonical) {
-  if (!it || !canonical) return false;
-  const noDec = String(canonical).replace(/\.\d+$/, '');
-  const re = new RegExp(`\\b${noDec.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\.\\d+)?\\b`, 'i');
-  const hay = [it.name, it.rawDescription, it.model].filter(Boolean).join(' ');
-  return re.test(hay);
+// Parses every bolt pattern signal out of the item — CCAW wheels list
+// their bolt pattern(s) directly in the name field, e.g. "ARMED OFF-ROAD
+// TANK 108.1 17x9 6x135|6x139.7 12 MATTE BLACK". Returns an array of
+// canonical "NxNNN" / "NxNNN.N" strings. Falls back to rawDescription
+// for SKUs that don't include the bolt pattern in the name.
+//
+// CRITICAL: distinguishes "NxNNN" bolt patterns (lug count single digit,
+// PCD 100+) from "NNxN.N" wheel-size patterns (diameter 2 digits, width
+// 1-2 digits). Wheel-size hits are dropped.
+function getItemBoltPatterns(it) {
+  if (!it) return [];
+  const out = new Set();
+  const scan = (text) => {
+    if (typeof text !== 'string' || !text) return;
+    const re = /\b(\d)x(\d{2,3}(?:\.\d+)?)\b/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const lugDigits = m[1].length;
+      const pcdNum = parseFloat(m[2]);
+      if (lugDigits === 1 && pcdNum >= 100) {
+        out.add(`${m[1]}x${m[2]}`);
+      }
+    }
+  };
+  scan(it.name);
+  if (out.size === 0) scan(it.rawDescription);
+  return [...out];
+}
+
+// Bolt-pattern match: accepts both "6x139.7" and "6x139" forms — items
+// listed as "6x139.7" still match a target of "6x139.7", and items
+// listed as "6x139" (older listings) also match.
+function itemBoltMatches(it, canonical) {
+  if (!canonical) return false;
+  const targetNoDec = String(canonical).replace(/\.\d+$/, '');
+  const patterns = getItemBoltPatterns(it);
+  if (patterns.length === 0) return false;
+  return patterns.some((p) => {
+    if (p === canonical) return true;
+    if (p.replace(/\.\d+$/, '') === targetNoDec) return true;
+    return false;
+  });
 }
 
 function shapeWheelForPrompt(it, homeShort) {
@@ -89,10 +123,11 @@ function shapeWheelForPrompt(it, homeShort) {
     price: it.price,
     image: it.image,
     allImages: Array.isArray(it.allImages) ? it.allImages.slice(0, 4) : [],
-    diameter: it.specs?.diameter || null,
+    diameter: resolveItemDiameter(it),
     width: it.specs?.width || null,
     offsetMin: it.specs?.offsetMin || null,
     offsetMax: it.specs?.offsetMax || null,
+    boltPatterns: getItemBoltPatterns(it),
     homeQty: homeQty(it, homeShort),
     url: it.url || null
   };
@@ -232,16 +267,16 @@ export async function lookupWheelInventory({
     };
   }
 
-  // Strict filtering: Armed brand AND diameter matches (parsed from
-  // specs OR name OR sku). Bolt pattern: best-effort name/description
-  // scan when specs don't include it (most wheels don't). The query
-  // already biased the result by bolt pattern; the filter just trims
-  // obvious mismatches.
+  // Strict filtering: Armed brand AND diameter matches AND bolt pattern
+  // matches. All three are required — leaking any one of them sends the
+  // customer wheels that won't fit. Bolt pattern is parsed from the
+  // item name (CCAW wheel SKUs include "NxNNN.N" directly in their
+  // names) with rawDescription as fallback.
   const items = (result.data.items || []).filter((it) => {
     if (!isArmed(it)) return false;
     const d = resolveItemDiameter(it);
-    if (d !== null && d !== Number(diameter)) return false;
-    if (d === null) return false; // No diameter signal at all → can't trust the size, skip.
+    if (d === null || d !== Number(diameter)) return false;
+    if (!itemBoltMatches(it, boltPattern)) return false;
     return true;
   });
 
