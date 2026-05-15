@@ -69,29 +69,75 @@ function shapeWheelForPrompt(it, homeShort) {
   };
 }
 
-function resolveDiameter({ capturedFields, productsOfInterest, listingTitle }) {
-  const tryParse = (raw) => {
+function resolveDiameter({ capturedFields, productsOfInterest, listingTitle, message, conversationHistory }) {
+  const tryParseTire = (raw) => {
     if (!raw) return null;
     const spec = normalizeTireSpec(raw);
     if (spec && spec.diameter) return spec.diameter;
-    const m = String(raw).match(/\b(\d{2})["”]?\b/);
-    if (m) return parseInt(m[1], 10);
+    return null;
+  };
+  // Scan free text for a tire-spec pattern (265/60/17, 265/60R17, etc.).
+  // Stand-alone "17" is too ambiguous — only accept it when paired with
+  // an explicit inch marker.
+  const scanText = (text) => {
+    if (typeof text !== 'string' || !text.trim()) return null;
+    const tireMatch = text.match(/\b(?:LT|ST|P)?\d{3}\s*\/\s*\d{2}\s*[\/R]\s*(\d{2})\b/i);
+    if (tireMatch) return parseInt(tireMatch[1], 10);
+    const inchMatch = text.match(/\b(\d{2})\s*(?:["”]|\s?in(?:ch(?:es)?)?\b|\s?inch\b)/i);
+    if (inchMatch) return parseInt(inchMatch[1], 10);
     return null;
   };
   if (capturedFields) {
-    const fromTire = tryParse(capturedFields.tireSize);
+    const fromTire = tryParseTire(capturedFields.tireSize);
     if (fromTire) return { diameter: fromTire, source: 'captured_tire_size' };
   }
   if (Array.isArray(productsOfInterest)) {
     const tire = productsOfInterest.find((p) => p && p.productType === 'tire');
     if (tire && tire.qualifierFields && tire.qualifierFields.tireSize) {
-      const d = tryParse(tire.qualifierFields.tireSize);
+      const d = tryParseTire(tire.qualifierFields.tireSize);
       if (d) return { diameter: d, source: 'product_of_interest' };
     }
   }
+  // Current turn — scan the customer's message AND the conversation
+  // history for a tire size. This catches the case where the customer
+  // JUST revealed the vehicle and size; captured_fields hasn't caught
+  // up yet because this AI call is the one that would have populated it.
+  const fromMessage = scanText(message);
+  if (fromMessage) return { diameter: fromMessage, source: 'current_message' };
+  if (Array.isArray(conversationHistory)) {
+    for (let i = conversationHistory.length - 1; i >= 0; i--) {
+      const m = conversationHistory[i];
+      const t = m && (m.text || m.content || m.message);
+      const d = scanText(t);
+      if (d) return { diameter: d, source: 'conversation_history' };
+    }
+  }
   if (listingTitle) {
-    const d = tryParse(listingTitle);
+    const d = scanText(listingTitle);
     if (d) return { diameter: d, source: 'listing_title' };
+  }
+  return null;
+}
+
+function resolveVehicle({ capturedFields, conversationHistory, message }) {
+  if (capturedFields && typeof capturedFields.vehicle === 'string' && capturedFields.vehicle.trim()) {
+    return { vehicle: capturedFields.vehicle.trim(), source: 'captured_field' };
+  }
+  // Same fallback: customer may have JUST revealed the vehicle this turn.
+  const scan = (text) => {
+    if (typeof text !== 'string') return null;
+    if (resolveBoltPatternFromVehicle(text)) return text;
+    return null;
+  };
+  const fromMsg = scan(message);
+  if (fromMsg) return { vehicle: fromMsg, source: 'current_message' };
+  if (Array.isArray(conversationHistory)) {
+    for (let i = conversationHistory.length - 1; i >= 0; i--) {
+      const m = conversationHistory[i];
+      const t = m && (m.text || m.content || m.message);
+      const v = scan(t);
+      if (v) return { vehicle: v, source: 'conversation_history' };
+    }
   }
   return null;
 }
@@ -121,14 +167,15 @@ export async function lookupWheelInventory({
     return { triggered: false, gate_reason: 'wheel_not_in_scope' };
   }
 
-  const vehicle = capturedFields && capturedFields.vehicle;
-  if (!vehicle) return { triggered: false, gate_reason: 'no_vehicle_captured' };
+  const vehicleResolved = resolveVehicle({ capturedFields, conversationHistory, message });
+  if (!vehicleResolved) return { triggered: false, gate_reason: 'no_vehicle_resolvable' };
+  const vehicle = vehicleResolved.vehicle;
   const boltPattern = resolveBoltPatternFromVehicle(vehicle);
   if (!boltPattern) {
     return { triggered: false, gate_reason: 'bolt_pattern_unresolved', vehicle };
   }
 
-  const diameterResolved = resolveDiameter({ capturedFields, productsOfInterest, listingTitle });
+  const diameterResolved = resolveDiameter({ capturedFields, productsOfInterest, listingTitle, message, conversationHistory });
   if (!diameterResolved) {
     return { triggered: false, gate_reason: 'no_wheel_diameter', vehicle, bolt_pattern: boltPattern };
   }
@@ -151,38 +198,44 @@ export async function lookupWheelInventory({
     };
   }
 
-  // Strict: brand or name must contain "Armed". Diameter must match.
+  // Strict: brand or name must contain "Armed". Diameter must match
+  // (skip the filter when specs.diameter is missing — trust the query).
   const items = (result.data.items || []).filter((it) => {
     if (!isArmed(it)) return false;
     if (it.specs?.diameter && Number(it.specs.diameter) !== Number(diameter)) return false;
     return true;
   });
 
-  // Group by Armed model. For each model, pick the best in-stock-local
-  // option (highest local qty, tie-break by price asc). Falls back to
-  // any in-stock (warehouse) if no local hit.
-  const byModel = new Map();
+  // Surface EVERY Armed wheel in stock at the home location, deduped by
+  // SKU. Cap at 8 to keep the prompt sane — when the rep sees more in
+  // the inventory tool they can override. Sort: in-stock-local first
+  // (highest local qty first), then warehouse-only, ties broken by
+  // price asc so the cheapest comparable option leads.
+  const seen = new Set();
+  const candidates = [];
   for (const it of items) {
-    const model = classifyArmedModel(it);
-    if (!model) continue;
-    const cur = byModel.get(model);
-    const q = homeQty(it, homeShort);
-    if (!cur) { byModel.set(model, it); continue; }
-    const curQ = homeQty(cur, homeShort);
-    if (q > curQ) byModel.set(model, it);
-    else if (q === curQ && (it.price || 0) < (cur.price || 0)) byModel.set(model, it);
+    if (!it || !it.sku || seen.has(it.sku)) continue;
+    seen.add(it.sku);
+    candidates.push(it);
   }
+  candidates.sort((a, b) => {
+    const qA = homeQty(a, homeShort);
+    const qB = homeQty(b, homeShort);
+    if (qA !== qB) return qB - qA;
+    return (a.price || 0) - (b.price || 0);
+  });
+  // Keep only in-stock-local for the FIRST cut. If fewer than 3, top up
+  // with warehouse-only options so the rep still has variety to send.
+  const local = candidates.filter((it) => homeQty(it, homeShort) > 0);
+  const warehouse = candidates.filter((it) => homeQty(it, homeShort) === 0);
+  const top = local.length >= 3 ? local.slice(0, 8) : local.concat(warehouse).slice(0, 8);
 
-  const picks = ARMED_MODELS
-    .map((model) => {
-      const it = byModel.get(model);
-      if (!it) return null;
-      const shaped = shapeWheelForPrompt(it, homeShort);
-      shaped.armedModel = model;
-      shaped.inStockLocal = shaped.homeQty > 0;
-      return shaped;
-    })
-    .filter(Boolean);
+  const picks = top.map((it) => {
+    const shaped = shapeWheelForPrompt(it, homeShort);
+    shaped.armedModel = classifyArmedModel(it) || 'Armed';
+    shaped.inStockLocal = shaped.homeQty > 0;
+    return shaped;
+  });
 
   if (picks.length === 0) {
     return {

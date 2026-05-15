@@ -912,27 +912,38 @@ function buildWheelInventoryBlock(wheels) {
   }
   const home = wheels.home_location || 'your store';
   const lines = [];
-  lines.push('WHEEL INVENTORY CONTEXT — Armed-brand wheels matching the customer\'s vehicle. WE HAVE A DEFINITIVE OPTIONS SET TO SEND THIS TURN.');
+  lines.push('🚨 WHEEL OPTIONS READY TO SEND — TURN-LEVEL HARD OVERRIDE (read first)');
   lines.push('');
-  lines.push(`Vehicle: ${wheels.vehicle} · Bolt pattern: ${wheels.bolt_pattern} · Wheel diameter: ${wheels.diameter}"`);
+  lines.push(`Vehicle: ${wheels.vehicle} · Bolt pattern: ${wheels.bolt_pattern} · Diameter: ${wheels.diameter}"`);
   lines.push(`Home location: ${home}`);
   lines.push('');
-  lines.push('Picks (top option per Armed model, in stock at ' + home + ' first):');
-  wheels.picks.forEach((p) => {
+  lines.push(`Armed wheels available (${wheels.picks.length} options${wheels.picks.length === 8 ? ' — top 8 shown' : ''}):`);
+  wheels.picks.forEach((p, i) => {
     const price = p.priceFormatted || (p.price ? `$${p.price.toFixed(2)}` : '(price n/a)');
-    const stock = p.inStockLocal ? `${home}: ${p.homeQty} in stock` : 'warehouse only (few days)';
-    const widthPart = p.width ? ` width ${p.width}` : '';
-    const offsetPart = (p.offsetMin || p.offsetMax) ? ` offset ${p.offsetMin || ''}${p.offsetMin && p.offsetMax ? '–' : ''}${p.offsetMax || ''}` : '';
-    lines.push(`  - ${p.armedModel}: ${p.name}${p.finish ? ' (' + p.finish + ')' : ''} — ${price} each · ${stock}${widthPart}${offsetPart}`);
+    const stock = p.inStockLocal ? `${home}: ${p.homeQty}` : 'warehouse (few days)';
+    const widthPart = p.width ? ` ${p.width}"` : '';
+    const finishPart = p.finish ? ` · ${p.finish}` : '';
+    lines.push(`  ${i + 1}. ${p.name}${widthPart}${finishPart} — ${price} each · ${stock}`);
   });
   lines.push('');
-  lines.push('HARD RULES (this turn — overrides any "poke/flush", "year/make/model", or "lemme grab options" hedge):');
-  lines.push('- The diameter and bolt pattern are RESOLVED. Do NOT ask for them again. Do NOT ask poke/flush this turn — the picks already span the lineup.');
-  lines.push('- ALL THREE VARIANTS must name the actual Armed picks above and quote the sticker prices. Match SKU to its sticker — never invent prices.');
-  lines.push('- Lead with the in-stock-local picks (ready to roll at ' + home + '). Mention warehouse-only picks as "few days out".');
-  lines.push('- Brand restriction: ONLY Armed Street / Armed Syndicate / Armed Off-Road may be quoted. Any other brand is sales-rep territory — if asked about it, defer ("let me have a sales rep loop in on that").');
-  lines.push('- Variant CTA when picks are sent: ask which one they\'re vibing on (e.g., "which of these are you feeling?" / "any of these jump out?"). Do NOT close with "want me to put a quote together" — keep it picking-options open.');
-  lines.push('- ABSOLUTE RULE D2 still applies: "ready to roll at ' + home + '" / "we can get those" — never "in stock".');
+  lines.push('THIS TURN — DO THIS, NOTHING ELSE:');
+  lines.push('1. Acknowledge the vehicle in one short phrase ("perfect on the Tacoma" / "got it on the [vehicle]").');
+  lines.push('2. Send the options. Name 2–4 of the picks above with their stickers. Match SKU to its price exactly — DO NOT invent prices or names.');
+  lines.push('3. Close with: "which of these are you feeling?" or equivalent ("any of these jump out?" / "what catches your eye?"). The rep will handle fitment + poke/flush once the customer picks one.');
+  lines.push('');
+  lines.push('FORBIDDEN THIS TURN (any of these = HARD FAIL — the picks above eliminate the need):');
+  lines.push('- Asking "poke or flush" / "stance" / "wheels sticking out" — DO NOT ASK. Rep handles after they pick.');
+  lines.push('- Asking year/make/model again — vehicle is resolved.');
+  lines.push('- Asking tire size / wheel diameter — diameter is resolved.');
+  lines.push('- Saying "let me pull options" / "I\'ll send pics + pricing in a sec" — options are right above, send them.');
+  lines.push('- Naming any non-Armed brand (Fuel, KMC, XD, etc.). Armed only. If customer asks about another brand, defer: "let me loop a sales rep in on that one".');
+  lines.push('');
+  lines.push('VARIANT LENGTHS:');
+  lines.push('- Quick: opener + 1 short acknowledgment + 2 picks named with prices + "which catches your eye?". ~50–60 words.');
+  lines.push('- Standard: opener + 3 picks named with prices + ask. ~70–90 words.');
+  lines.push('- Detailed: opener + 3–4 picks with prices + a one-line note (finish or width variety) + ask. ~100–130 words.');
+  lines.push('');
+  lines.push('ABSOLUTE RULE D2 still applies: "ready to roll at ' + home + '" / "we can get those" — never the literal phrase "in stock".');
   return '\n' + lines.join('\n') + '\n';
 }
 
