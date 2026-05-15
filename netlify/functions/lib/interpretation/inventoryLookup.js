@@ -29,8 +29,14 @@ import {
   selectAutoPrimary
 } from '../inventory/rank.js';
 
-function resolveTireSize({ normalized, capturedFields, productsOfInterest }) {
-  // Priority: current turn -> captured field -> product_of_interest.
+function resolveTireSize({ normalized, capturedFields, productsOfInterest, message, conversationHistory, listingTitle }) {
+  // Priority: current turn (normalize) -> captured field -> product_of_interest
+  // -> raw scan of current message -> raw scan of conversation history
+  // -> raw scan of listing title. The history scan handles the common
+  // case where the customer mentioned a size 1-2 turns back and the
+  // current turn is on a different topic (e.g., they just gave us their
+  // vehicle); capturedFields hasn't synced yet because the prior turn's
+  // extract didn't catch the size or the extension hasn't propagated it.
   if (normalized && normalized.tire_spec) {
     const spec = normalizeTireSpec(normalized.tire_spec);
     if (spec) return { spec, source: 'current_message' };
@@ -50,6 +56,25 @@ function resolveTireSize({ normalized, capturedFields, productsOfInterest }) {
       if (spec) return { spec, source: 'product_of_interest' };
     }
   }
+  // Fallback raw scans — normalizeTireSpec returns null cleanly if the
+  // text doesn't contain a tire-size pattern.
+  if (typeof message === 'string' && message) {
+    const spec = normalizeTireSpec(message);
+    if (spec) return { spec, source: 'current_message_raw' };
+  }
+  if (Array.isArray(conversationHistory)) {
+    for (let i = conversationHistory.length - 1; i >= 0; i--) {
+      const m = conversationHistory[i];
+      const t = m && (m.text || m.content || m.message);
+      if (typeof t !== 'string' || !t) continue;
+      const spec = normalizeTireSpec(t);
+      if (spec) return { spec, source: 'conversation_history' };
+    }
+  }
+  if (typeof listingTitle === 'string' && listingTitle) {
+    const spec = normalizeTireSpec(listingTitle);
+    if (spec) return { spec, source: 'listing_title' };
+  }
   return null;
 }
 
@@ -58,10 +83,19 @@ export async function lookupInventory({
   normalized,
   capturedFields,
   productsOfInterest,
+  conversationHistory,
+  listingTitle,
   location,
   signal
 } = {}) {
-  const resolved = resolveTireSize({ normalized, capturedFields, productsOfInterest });
+  const resolved = resolveTireSize({
+    normalized,
+    capturedFields,
+    productsOfInterest,
+    message,
+    conversationHistory,
+    listingTitle
+  });
   if (!resolved) return { triggered: false, gate_reason: 'no_tire_spec' };
 
   const { spec, source } = resolved;

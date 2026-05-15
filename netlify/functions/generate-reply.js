@@ -2207,6 +2207,8 @@ export async function handler(event) {
             normalized: interpretation,
             capturedFields: existing_captured_fields,
             productsOfInterest: existing_products_of_interest,
+            conversationHistory: conversation_history,
+            listingTitle,
             location,
             signal
           })),
