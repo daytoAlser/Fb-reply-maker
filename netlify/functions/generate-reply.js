@@ -1146,13 +1146,13 @@ OPENER MUTATION FORBIDDEN — HARD RULE
 The opener line above is the FIRST text in every variant, character-for-character. Specifically forbidden mutations:
 - Adding "there" after "Hey," ("Hey there, ..." is BANNED — use the line above as-is, even when it's the no-mention form "Hey, [Rep] here, ...")
 - Adding "friend", "man", "bud", "buddy", "dude", "boss", "bro", or any other address term after the opener's comma
-- DROPPING "@Name," when it's in the opener line — this is the most common mutation and the most severe HARD FAIL. If the OPENER LINE is `Opener: "Hey @Julie, Dayton here, I'd be happy to help you out today!"` the variant MUST start with `Hey @Julie, Dayton here, I'd be happy to help you out today!` — NEVER with `Hey, Dayton here, I'd be happy to help you out today!` (which silently strips @Julie). The "@Name," is the customer notification trigger; removing it defeats the entire point of the opener.
+- DROPPING "@Name," when it's in the opener line — this is the most common mutation and the most severe HARD FAIL. If the OPENER LINE is 'Opener: "Hey @Julie, Dayton here, I'd be happy to help you out today!"' the variant MUST start with 'Hey @Julie, Dayton here, I'd be happy to help you out today!' — NEVER with 'Hey, Dayton here, I'd be happy to help you out today!' (which silently strips @Julie). The "@Name," is the customer notification trigger; removing it defeats the entire point of the opener.
 - Replacing "@Name" with bare "Name" (no @ prefix)
 - Replacing "@Name" with "there" or "friend" or any other generic
 - Splitting "Hey @Name, [Rep] here," into separate sentences
 - Adding any leading word or phrase before "Hey"
 
-VERIFICATION: every variant's first ~60 characters must match the opener line's quoted text byte-for-byte (after stripping the `Opener: "..."` wrapper). If the opener has `@Julie,` then variants 1, 2, and 3 ALL have `@Julie,` in the same position. No exceptions for length-constrained Quick variants. No exceptions for "informal feel". No exceptions ever.
+VERIFICATION: every variant's first ~60 characters must match the opener line's quoted text byte-for-byte (after stripping the 'Opener: "..."' wrapper). If the opener has '@Julie,' then variants 1, 2, and 3 ALL have '@Julie,' in the same position. No exceptions for length-constrained Quick variants. No exceptions for "informal feel". No exceptions ever.
 
 If the OPENER LINE resolved to "Hey, Dayton here, ..." (no @mention because partner wasn't resolved), use it EXACTLY like that — do NOT add a friendly filler word to make it feel less abrupt. The exact string above wins every time.
 
