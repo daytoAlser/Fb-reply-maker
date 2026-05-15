@@ -2970,9 +2970,16 @@ The full ELEMENT LIST and EXAMPLE STRUCTURE are in the LIVE INVENTORY CONTEXT (o
       const attachSource = (focused_product && typeof focused_product === 'object' && focused_product.name)
         ? focused_product
         : (inventory.auto_primary || null);
-      const attachImages = attachSource && Array.isArray(attachSource.allImages) && attachSource.allImages.length > 0
-        ? attachSource.allImages.slice(0, 2)
-        : (attachSource && attachSource.image ? [attachSource.image] : []);
+      // Suppress attachments once the install Y/N has been answered. By
+      // that point the product was pitched in a prior rep turn and the
+      // images already sit in the chat — re-attaching duplicates them.
+      // Phone-for-estimate and followed-up turns shouldn't carry pics.
+      const picsAlreadySent = installAnswer.state === 'answered' || installAnswer.state === 'followed_up';
+      const attachImages = picsAlreadySent
+        ? []
+        : (attachSource && Array.isArray(attachSource.allImages) && attachSource.allImages.length > 0
+          ? attachSource.allImages.slice(0, 2)
+          : (attachSource && attachSource.image ? [attachSource.image] : []));
       // Mark the primary pick in the picks array so the UI can highlight it.
       const primarySku = inventory.auto_primary ? inventory.auto_primary.sku : null;
       const focusedSku = (focused_product && focused_product.sku) || null;
@@ -3006,9 +3013,16 @@ The full ELEMENT LIST and EXAMPLE STRUCTURE are in the LIVE INVENTORY CONTEXT (o
     // is a flat list of image URLs the variant should attach when INSERT
     // fires — one per Armed model surfaced.
     if (wheelInventory && wheelInventory.triggered) {
-      const attach = wheelInventory.picks
-        .map((p) => p.image)
-        .filter((u) => typeof u === 'string' && u);
+      // Suppress wheel attachments once the rep has already pitched and
+      // the customer has moved into install / phone-for-estimate flow.
+      // (Wheel flow doesn't strictly use the install question, but if
+      // it ever triggers, the same dup-image logic applies.)
+      const wheelPicsAlreadySent = installAnswer.state === 'answered' || installAnswer.state === 'followed_up';
+      const attach = wheelPicsAlreadySent
+        ? []
+        : wheelInventory.picks
+          .map((p) => p.image)
+          .filter((u) => typeof u === 'string' && u);
       parsed.wheel_inventory_meta = {
         triggered: true,
         vehicle: wheelInventory.vehicle,
