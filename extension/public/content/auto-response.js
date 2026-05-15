@@ -270,22 +270,35 @@
     window.addEventListener('popstate', () => { scheduleMount(); schedulePrefetch(); });
     let lastHref = location.href;
     let lastIncoming = '';
+    let lastPartner = '';
     const obs = new MutationObserver(() => {
       if (location.href !== lastHref) {
         lastHref = location.href;
-        lastPrefetchedKey = null; // new thread, allow a fresh prefetch
+        lastPrefetchedKey = null;
+        lastIncoming = '';
+        lastPartner = '';
         scheduleMount();
         schedulePrefetch();
         if (!isMarketplaceThread() && panelEl) closePanel();
       }
-      // Watch for new customer messages on the current thread — that
-      // invalidates any cached variants and means we should re-prefetch.
       if (isMarketplaceThread() && globalThis.FBRM_API && globalThis.FBRM_API.detectThread) {
         try {
           const d = globalThis.FBRM_API.detectThread();
           const incoming = (d && d.latestIncoming) || '';
+          const partner = (d && d.partnerName) || '';
           if (incoming && incoming !== lastIncoming) {
             lastIncoming = incoming;
+            lastPrefetchedKey = null;
+            schedulePrefetch();
+          }
+          // Partner-name resolution can happen LATE on FB's SPA — the
+          // initial scrape on thread arrival often shows empty
+          // partnerName, then a later mutation renders the thread
+          // header and the name resolves. When that happens we want
+          // to invalidate any in-flight or completed prefetch that
+          // was built without the name.
+          if (partner && partner !== lastPartner) {
+            lastPartner = partner;
             lastPrefetchedKey = null;
             schedulePrefetch();
           }
@@ -318,24 +331,30 @@
   const cache = new Map();
   let lastPrefetchedKey = null;
 
-  function cacheKey(threadId, latestIncoming) {
-    return threadId + '|' + (latestIncoming || '').trim();
+  function cacheKey(threadId, latestIncoming, partnerName) {
+    return threadId + '|' + (latestIncoming || '').trim() + '|' + (partnerName || '').trim();
   }
 
-  function getCached(threadId, latestIncoming) {
+  function getCached(threadId, latestIncoming, partnerName) {
     const entry = cache.get(threadId);
     if (!entry || !entry.result) return null;
     if ((entry.latestIncoming || '').trim() !== (latestIncoming || '').trim()) return null;
-    // Stale after 5 minutes — covers slow-typist flows where the
-    // background prefetch beat the rep into the thread but the
-    // customer hasn't said anything new yet.
-    if (Date.now() - entry.generatedAt > 5 * 60 * 1000) return null;
+    // Partner name change invalidates the cache — a prefetch that
+    // ran before FB rendered the partner name produces an opener
+    // without @Name, and rendering that stale opener is the bug
+    // the user keeps hitting.
+    if ((entry.partnerName || '').trim() !== (partnerName || '').trim()) return null;
+    // 60s TTL — short enough that backend prompt updates land for
+    // the next click; long enough that a quick click-after-prefetch
+    // still hits the cache.
+    if (Date.now() - entry.generatedAt > 60 * 1000) return null;
     return entry.result;
   }
 
-  function setCached(threadId, latestIncoming, result) {
+  function setCached(threadId, latestIncoming, partnerName, result) {
     cache.set(threadId, {
       latestIncoming: (latestIncoming || '').trim(),
+      partnerName: (partnerName || '').trim(),
       result,
       generatedAt: Date.now(),
       inFlight: null
@@ -351,17 +370,24 @@
     if (!detect || detect.status !== 'ok') return;
     const threadId = getThreadIdFromUrl(detect.url);
     if (!threadId) return;
-    const key = cacheKey(threadId, detect.latestIncoming);
-    if (key === lastPrefetchedKey) return; // already fetched / in-flight for this key
+    // Skip prefetch if partner name isn't resolved yet — caching a
+    // result with an empty opener locks in "Hey, Dayton here" forever
+    // until the cache TTL expires.
+    if (!detect.partnerName || !detect.partnerName.trim()) {
+      swlog('prefetch skipped: partner name not resolved yet');
+      return;
+    }
+    const key = cacheKey(threadId, detect.latestIncoming, detect.partnerName);
+    if (key === lastPrefetchedKey) return;
     const existing = cache.get(threadId);
-    if (existing && existing.inFlight) return; // already in-flight
-    if (getCached(threadId, detect.latestIncoming)) return; // already cached
+    if (existing && existing.inFlight) return;
+    if (getCached(threadId, detect.latestIncoming, detect.partnerName)) return;
     lastPrefetchedKey = key;
-    swlog('prefetch start thread=' + threadId);
+    swlog('prefetch start thread=' + threadId + ' partner=' + JSON.stringify(detect.partnerName));
     const inFlight = doGenerate(detect, threadId)
       .then((result) => {
         if (result) {
-          setCached(threadId, detect.latestIncoming, result);
+          setCached(threadId, detect.latestIncoming, detect.partnerName, result);
           swlog('prefetch ready thread=' + threadId);
         }
       })
@@ -370,6 +396,7 @@
       });
     cache.set(threadId, {
       latestIncoming: (detect.latestIncoming || '').trim(),
+      partnerName: (detect.partnerName || '').trim(),
       result: null,
       generatedAt: 0,
       inFlight
@@ -475,6 +502,7 @@
     panel.innerHTML = `
       <header class="fbrm-ar-panel-header">
         <span class="fbrm-ar-panel-title">▌AUTO RESPONSE</span>
+        <button type="button" class="fbrm-ar-panel-refresh" aria-label="Regenerate" title="Force a fresh generate (bust the cache)">⟳</button>
         <button type="button" class="fbrm-ar-panel-close" aria-label="Close">×</button>
       </header>
       <div class="fbrm-ar-panel-body">
@@ -487,8 +515,31 @@
       </div>
     `;
     panel.querySelector('.fbrm-ar-panel-close').addEventListener('click', closePanel);
+    panel.querySelector('.fbrm-ar-panel-refresh').addEventListener('click', forceRegenerate);
     wrapper.appendChild(panel);
     return wrapper;
+  }
+
+  function forceRegenerate() {
+    // Bust the cache for the current thread + reset prefetch tracking
+    // so the next runGenerate skips the cache and fires a fresh
+    // request. Useful when backend prompt changes deploy and the rep
+    // wants new variants without waiting for the TTL.
+    if (panelContext && panelContext.threadId) cache.delete(panelContext.threadId);
+    lastPrefetchedKey = null;
+    swlog('manual regenerate triggered');
+    const body = panelEl && panelEl.querySelector('.fbrm-ar-panel-body');
+    if (body) {
+      body.innerHTML = `
+        <div class="fbrm-ar-loading">
+          <div class="fbrm-ar-loading-status">Regenerating…</div>
+          <div class="fbrm-ar-loading-bar"></div>
+          <div class="fbrm-ar-loading-bar"></div>
+          <div class="fbrm-ar-loading-bar"></div>
+        </div>
+      `;
+    }
+    runGenerate();
   }
 
   function setLoadingStatus(text) {
@@ -556,8 +607,9 @@
       const leadP = getLeadByThreadId(threadId).then((l) => { panelContext.lead = l; });
 
       // CACHE HIT — render instantly. Prefetch ran on thread arrival
-      // and produced variants for the same latestIncoming text.
-      const cached = getCached(threadId, detect.latestIncoming);
+      // and produced variants for the same latestIncoming text +
+      // partner name.
+      const cached = getCached(threadId, detect.latestIncoming, detect.partnerName);
       if (cached) {
         swlog('cache HIT thread=' + threadId);
         await leadP;
@@ -632,7 +684,7 @@
       swlog('generate response in ' + Math.round(tApiDone - tApi) + 'ms (total ' + Math.round(tApiDone - t0) + 'ms)');
       setLoadingStatus('Rendering…');
       // Cache the result for next time on this thread.
-      setCached(threadId, detect.latestIncoming, resp.data);
+      setCached(threadId, detect.latestIncoming, detect.partnerName, resp.data);
       renderResult(resp.data);
     } catch (err) {
       swlog('runGenerate threw: ' + (err?.message || err));
@@ -1235,7 +1287,8 @@
         text-transform: uppercase;
         color: #ef4444;
       }
-      .fbrm-ar-panel-close {
+      .fbrm-ar-panel-close,
+      .fbrm-ar-panel-refresh {
         background: transparent;
         border: 1px solid #2a2a2a;
         color: #f0f0f0;
@@ -1245,8 +1298,11 @@
         cursor: pointer;
         font-size: 16px;
         line-height: 1;
+        margin-left: 4px;
       }
-      .fbrm-ar-panel-close:hover { background: #1a1a1a; border-color: #ef4444; color: #ef4444; }
+      .fbrm-ar-panel-close:hover,
+      .fbrm-ar-panel-refresh:hover { background: #1a1a1a; border-color: #ef4444; color: #ef4444; }
+      .fbrm-ar-panel-refresh:active { transform: rotate(180deg); transition: transform 200ms ease; }
 
       .fbrm-ar-panel-body {
         flex: 1;
