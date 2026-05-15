@@ -15,6 +15,7 @@ import { lookupInventory } from './lib/interpretation/inventoryLookup.js';
 // Ad-driven inventory cross-check — parses the listing title for size
 // + brand and reports exact-match local stock vs same-size alternatives.
 import { lookupAdInventory } from './lib/interpretation/adInventoryLookup.js';
+import { lookupWheelInventory } from './lib/interpretation/wheelInventoryLookup.js';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -901,6 +902,40 @@ function buildAdInventoryBlock(ad) {
   return '\n' + lines.join('\n') + '\n';
 }
 
+// WHEEL INVENTORY CONTEXT prompt block. Surfaces Armed-brand wheels in
+// the customer's diameter + bolt pattern that are in stock at the rep's
+// home location. When this fires, the variants should NAME the picks
+// and quote prices — no more poke/flush qualifier loop.
+function buildWheelInventoryBlock(wheels) {
+  if (!wheels || !wheels.triggered || !Array.isArray(wheels.picks) || wheels.picks.length === 0) {
+    return '';
+  }
+  const home = wheels.home_location || 'your store';
+  const lines = [];
+  lines.push('WHEEL INVENTORY CONTEXT — Armed-brand wheels matching the customer\'s vehicle. WE HAVE A DEFINITIVE OPTIONS SET TO SEND THIS TURN.');
+  lines.push('');
+  lines.push(`Vehicle: ${wheels.vehicle} · Bolt pattern: ${wheels.bolt_pattern} · Wheel diameter: ${wheels.diameter}"`);
+  lines.push(`Home location: ${home}`);
+  lines.push('');
+  lines.push('Picks (top option per Armed model, in stock at ' + home + ' first):');
+  wheels.picks.forEach((p) => {
+    const price = p.priceFormatted || (p.price ? `$${p.price.toFixed(2)}` : '(price n/a)');
+    const stock = p.inStockLocal ? `${home}: ${p.homeQty} in stock` : 'warehouse only (few days)';
+    const widthPart = p.width ? ` width ${p.width}` : '';
+    const offsetPart = (p.offsetMin || p.offsetMax) ? ` offset ${p.offsetMin || ''}${p.offsetMin && p.offsetMax ? '–' : ''}${p.offsetMax || ''}` : '';
+    lines.push(`  - ${p.armedModel}: ${p.name}${p.finish ? ' (' + p.finish + ')' : ''} — ${price} each · ${stock}${widthPart}${offsetPart}`);
+  });
+  lines.push('');
+  lines.push('HARD RULES (this turn — overrides any "poke/flush", "year/make/model", or "lemme grab options" hedge):');
+  lines.push('- The diameter and bolt pattern are RESOLVED. Do NOT ask for them again. Do NOT ask poke/flush this turn — the picks already span the lineup.');
+  lines.push('- ALL THREE VARIANTS must name the actual Armed picks above and quote the sticker prices. Match SKU to its sticker — never invent prices.');
+  lines.push('- Lead with the in-stock-local picks (ready to roll at ' + home + '). Mention warehouse-only picks as "few days out".');
+  lines.push('- Brand restriction: ONLY Armed Street / Armed Syndicate / Armed Off-Road may be quoted. Any other brand is sales-rep territory — if asked about it, defer ("let me have a sales rep loop in on that").');
+  lines.push('- Variant CTA when picks are sent: ask which one they\'re vibing on (e.g., "which of these are you feeling?" / "any of these jump out?"). Do NOT close with "want me to put a quote together" — keep it picking-options open.');
+  lines.push('- ABSOLUTE RULE D2 still applies: "ready to roll at ' + home + '" / "we can get those" — never "in stock".');
+  return '\n' + lines.join('\n') + '\n';
+}
+
 // FOCUSED RECOMMENDATION prompt block. Emitted when the rep clicks a
 // specific tire card in the side panel — all 3 variants get rewritten to
 // recommend THIS product by name. Overrides iLink-first and
@@ -1114,7 +1149,7 @@ ENDING:
 `;
 }
 
-const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock, decisionSupportBlock, wrongProductBlock, financingBlock, manualOptionsBlock, inventoryBlock, focusedRecommendationBlock, liveInventoryTopOverride, adInventoryBlock }) => {
+const SYSTEM_PROMPT_TEMPLATE = ({ openerLine, listingTitle, categoryOverride, conversationHistory, location, overrideFlags, existingProductsOfInterest, conversationMode, priorStatus, silenceDurationMs, interpretationBlock, decisionSupportBlock, wrongProductBlock, financingBlock, manualOptionsBlock, inventoryBlock, focusedRecommendationBlock, liveInventoryTopOverride, adInventoryBlock, wheelInventoryBlock }) => {
   const listingBlock = listingTitle && listingTitle.trim()
     ? `\nLISTING CONTEXT\nThe customer is messaging about this listing: "${listingTitle.trim()}". Use this together with the customer's message to infer ad_type (wheel / tire / accessory / lift) per the detection signals below.\n`
     : '';
@@ -1830,7 +1865,7 @@ When all qualifiers for a product are captured, MOVE FORWARD:
 - If ALL tracked products are fully qualified, transition into recommendation / quote-punt voice. Reference the captured spec ("for cruising and highway with the 6-inch goal, the value kit will be perfect…") rather than re-asking.
 
 Re-asking a resolved qualifier is a hard error. Every variant must respect the lock.
-${existingProductsBlock}${manualOptionsBlock || ''}${adInventoryBlock || ''}${inventoryBlock || ''}${focusedRecommendationBlock || ''}${interpretationBlock || ''}${wrongProductBlock || ''}${financingBlock || ''}${decisionSupportBlock || ''}${categoryClause}${buildHistoryBlock(conversationHistory)}
+${existingProductsBlock}${manualOptionsBlock || ''}${wheelInventoryBlock || ''}${adInventoryBlock || ''}${inventoryBlock || ''}${focusedRecommendationBlock || ''}${interpretationBlock || ''}${wrongProductBlock || ''}${financingBlock || ''}${decisionSupportBlock || ''}${categoryClause}${buildHistoryBlock(conversationHistory)}
 OUTPUT
 Respond ONLY with valid JSON. No markdown fencing. No preamble.
 {
@@ -2121,6 +2156,44 @@ export async function handler(event) {
     block_length: adInventoryBlock.length
   });
 
+  // Wheel inventory lookup — Armed-brand only, fires when wheels are
+  // in scope AND we have both vehicle (for bolt pattern) and tire size
+  // (for diameter). When triggered, surfaces a "WHEEL INVENTORY CONTEXT"
+  // prompt block so the model recommends the picks instead of looping
+  // on poke/flush qualifiers.
+  let wheelInventory = null;
+  if (!wrongProduct) {
+    try {
+      const wSignal = (typeof AbortSignal !== 'undefined' && AbortSignal.timeout)
+        ? AbortSignal.timeout(3500)
+        : undefined;
+      wheelInventory = await lookupWheelInventory({
+        message,
+        capturedFields: existing_captured_fields,
+        productsOfInterest: existing_products_of_interest,
+        conversationHistory: conversation_history,
+        listingTitle,
+        location,
+        signal: wSignal
+      });
+    } catch (err) {
+      console.warn('[FN] wheel inventory lookup threw:', err?.message || err);
+      wheelInventory = { triggered: false, gate_reason: 'lookup_threw' };
+    }
+  }
+  const wheelInventoryBlock = wheelInventory && wheelInventory.triggered
+    ? buildWheelInventoryBlock(wheelInventory)
+    : '';
+  console.log('[FN] wheel inventory:', {
+    triggered: !!wheelInventory?.triggered,
+    gate_reason: wheelInventory?.gate_reason || null,
+    vehicle: wheelInventory?.vehicle || null,
+    bolt_pattern: wheelInventory?.bolt_pattern || null,
+    diameter: wheelInventory?.diameter || null,
+    picks: wheelInventory?.picks?.length || 0,
+    block_length: wheelInventoryBlock.length
+  });
+
   // Focused recommendation: if the rep clicked a specific pick, suppress the
   // multi-pick inventory block and emit a single-product FOCUSED block.
   // The two blocks would otherwise send mixed signals about which item to
@@ -2297,7 +2370,8 @@ The full ELEMENT LIST and EXAMPLE STRUCTURE are in the LIVE INVENTORY CONTEXT (o
     inventoryBlock,
     focusedRecommendationBlock,
     liveInventoryTopOverride,
-    adInventoryBlock
+    adInventoryBlock,
+    wheelInventoryBlock
   });
 
   console.log('[FN] resolved opener:', openerLine);
@@ -2427,6 +2501,30 @@ The full ELEMENT LIST and EXAMPLE STRUCTURE are in the LIVE INVENTORY CONTEXT (o
       parsed.inventory_meta = {
         triggered: false,
         gate_reason: inventory.gate_reason || null
+      };
+    }
+
+    // Wheel picks ride alongside tire inventory_meta. Auto-response panel
+    // renders one image per wheel pick (vs two per tire). attach_images
+    // is a flat list of image URLs the variant should attach when INSERT
+    // fires — one per Armed model surfaced.
+    if (wheelInventory && wheelInventory.triggered) {
+      const attach = wheelInventory.picks
+        .map((p) => p.image)
+        .filter((u) => typeof u === 'string' && u);
+      parsed.wheel_inventory_meta = {
+        triggered: true,
+        vehicle: wheelInventory.vehicle,
+        bolt_pattern: wheelInventory.bolt_pattern,
+        diameter: wheelInventory.diameter,
+        home_location: wheelInventory.home_location,
+        picks: wheelInventory.picks,
+        attach_images: attach
+      };
+    } else if (wheelInventory) {
+      parsed.wheel_inventory_meta = {
+        triggered: false,
+        gate_reason: wheelInventory.gate_reason || null
       };
     }
 

@@ -746,9 +746,18 @@
       });
     }
     const container = body.querySelector('.fbrm-ar-variants');
-    const attachImages = (result.inventory_meta && Array.isArray(result.inventory_meta.attach_images))
+    // Wheel inventory takes priority over tire images — when the AI is
+    // recommending Armed wheels (one image per pick), those are the
+    // images the rep wants to attach. Tire inventory falls back when
+    // wheels aren't in scope.
+    const wheelMeta = result.wheel_inventory_meta;
+    const wheelImages = (wheelMeta && wheelMeta.triggered && Array.isArray(wheelMeta.attach_images))
+      ? wheelMeta.attach_images.slice(0, 3)
+      : [];
+    const tireImages = (result.inventory_meta && Array.isArray(result.inventory_meta.attach_images))
       ? result.inventory_meta.attach_images.slice(0, 2)
       : [];
+    const attachImages = wheelImages.length > 0 ? wheelImages : tireImages;
     const variants = result.variants || {};
     for (const kind of ['quick', 'standard', 'detailed']) {
       const text = variants[kind];
