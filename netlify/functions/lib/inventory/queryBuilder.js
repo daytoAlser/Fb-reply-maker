@@ -78,10 +78,12 @@ export function normalizeTireSpec(spec) {
   }
   if (typeof spec !== 'string') return null;
   // Width/aspect separator can be "/" or whitespace ("225/55R19", "225 55 r19",
-  // "225 55r19"). The R between aspect and diameter stays optional. Customers
-  // type tire sizes a half-dozen different ways; accept the common ones rather
-  // than re-asking when we already have the size.
-  const m = spec.match(/\b(?:ST|LT|P)?(\d{3})\s*[\/\s]\s*(\d{2})\s*[ZRr]?\s*(\d{2})\b/i);
+  // "225 55r19"). The R between aspect and diameter is optional, but a SECOND
+  // "/" is also accepted because customers commonly type "265/40/22" with
+  // slashes everywhere — and rejecting that means inventory gates on
+  // no_tire_spec and the AI fails to surface picks. Accept the common
+  // variations rather than re-asking when we already have the size.
+  const m = spec.match(/\b(?:ST|LT|P)?(\d{3})\s*[\/\s]\s*(\d{2})\s*[ZRr\/]?\s*(\d{2})\b/i);
   if (!m) return null;
   return {
     width: parseInt(m[1], 10),
