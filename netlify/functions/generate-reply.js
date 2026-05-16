@@ -821,7 +821,7 @@ ${requestedSection}${houseSection}
 HARD RULES (this turn):
 - Customer named ${inv.brand_requested}. Lead with the ${inv.brand_requested} options. Do NOT push iLink as a default — the iLink block is here ONLY so you can mention it as a value alternative if the customer's tone is price-sensitive ("anything close?", "what do you have under $X?", explicit budget mention).
 - TIRE SIZE IS CAPTURED → recommend by name THIS TURN. This OVERRIDES the PRIORITY ORDER FOR MISSING QUALIFIERS above for the tire product: when tire size is in hand, do NOT ask vehicle as a gate for tire recommendations. Vehicle is an UPSTREAM input (used to figure out the size); once size is known its job is done. Other qualifiers (tireType, useCase) refine WHICH option to lean toward (snow vs A/T vs touring) but never block naming products. Surface 1–2 picks now AND, if useful, ask the next refining qualifier in the same reply.
-- If you reference a specific product in your reply, it MUST be one of the items above. Do NOT invent SKUs, model names, prices, or stock claims.
+- If you reference a specific product in your reply, it MUST be one of the items above. Do NOT invent SKUs, model names, prices, or stock claims. SPECIFICALLY FORBIDDEN names that have shown up as training-data hallucinations: "Haida HD878RT", "Sailun", "Wanli", and any other brand+model combination not in the items above. These are NOT in stock and naming them is a hard fail.
 - Use the availability framing from each item ("ready to rock" / "we can get those for ya"). NEVER say "in stock" or pin to a specific location — ABSOLUTE RULE D2 still applies.
 - Do NOT quote totals in chat. You may anchor ONE sticker price by product ("the ${inv.brand_requested} Open Country is $324 ea") as a single data point. Full package pricing stays in the phone-then-estimate punt.
 - Reference 1–2 products by name. The full catalog is the rep's tool, not the reply text.${seasonRule}${winterRule}${primaryRule}
@@ -847,7 +847,7 @@ ${houseSection}${otherSection}
 
 HARD RULES (this turn):
 - TIRE SIZE IS CAPTURED → recommend by name THIS TURN. This OVERRIDES the PRIORITY ORDER FOR MISSING QUALIFIERS above for the tire product: when tire size is in hand, do NOT ask vehicle as a gate for tire recommendations. Vehicle is an UPSTREAM input (used to figure out the size); once size is known its job is done. Other qualifiers (tireType, useCase) refine WHICH option to lean toward (snow vs A/T vs touring) but never block naming products. Surface 1–2 picks now AND, if useful, ask the next refining qualifier in the same reply.
-- If you reference a specific product in your reply, it MUST be one of the items above. Do NOT invent SKUs, model names, prices, or stock claims.
+- If you reference a specific product in your reply, it MUST be one of the items above. Do NOT invent SKUs, model names, prices, or stock claims. SPECIFICALLY FORBIDDEN names that have shown up as training-data hallucinations: "Haida HD878RT", "Sailun", "Wanli", and any other brand+model combination not in the items above. These are NOT in stock and naming them is a hard fail.
 - iLink is our house brand and default value tier. Since the customer did not name a brand, lead with iLink unless the conversation strongly signals a premium tier (off-road, hard use, "I want the best", etc.). If the customer signaled a tire type (snowflake / 3PMS / A/T / mud / highway), pick the iLink option that matches it.
 - Use the availability framing from each item ("ready to rock" / "we can get those for ya"). NEVER say "in stock" or pin to a specific location — ABSOLUTE RULE D2 still applies.
 - Do NOT quote totals in chat. You may anchor ONE sticker price by product ("the iLink MultiMatch is $189 ea") as a single data point. Full package pricing stays in the phone-then-estimate punt.
@@ -2695,6 +2695,80 @@ The full WHEEL INVENTORY CONTEXT block further down has additional framing nuanc
     return { state: 'answered', affirmative, soft, signal: signalSource, response_from: fromCurrent ? 'current' : 'history' };
   })();
   console.log('[FN] install answer:', installAnswer);
+
+  // Budget-objection detection.
+  //
+  // When the customer pushes back on price after the estimate is sent
+  // ("can't afford", "too expensive", "anything cheaper"), the AI has
+  // historically hallucinated a "swap" tire — naming something like
+  // "Haida HD878RT" that isn't in live inventory. That's a hard fail —
+  // breaks customer trust. Real behavior should be: name a CHEAPER pick
+  // from the current inventory if one exists, OR acknowledge no cheaper
+  // option in the current size and ask if the customer is open to a
+  // different size for a better price.
+  const priceObjection = (() => {
+    const budgetRe = /(can'?t\s+(?:not\s+)?afford|cannot\s+afford|too\s+(?:expensive|pricey|much|high)|(?:any|some|anything|something)\s+(?:cheaper|less\s+expensive|more\s+affordable|under)|cheaper(?:\s+option|\s+tire)?|better\s+(?:price|deal|rate)|lower\s+(?:price|cost)|(?:out\s+of|over|above|past)\s+(?:my\s+)?budget|more\s+affordable|less\s+expensive|got\s+anything\s+(?:cheaper|less)|that's\s+(?:too|a\s+bit)\s+(?:expensive|much|high|pricey)|outta\s+my\s+budget)/i;
+    const getText = (m) => {
+      if (!m) return '';
+      const t = m.text || m.content || m.message;
+      return typeof t === 'string' ? t : '';
+    };
+    // Check current message first
+    if (typeof message === 'string' && budgetRe.test(message)) {
+      return { triggered: true, source: 'current_message', snippet: message.slice(0, 80) };
+    }
+    // Check last 1-2 customer messages in history (recent pushback)
+    if (Array.isArray(conversation_history)) {
+      let custChecked = 0;
+      for (let i = conversation_history.length - 1; i >= 0 && custChecked < 2; i--) {
+        const m = conversation_history[i];
+        if (!m || m.sender === 'me') continue;
+        custChecked += 1;
+        const t = getText(m);
+        if (budgetRe.test(t)) {
+          return { triggered: true, source: 'recent_history', snippet: t.slice(0, 80) };
+        }
+      }
+    }
+    return { triggered: false };
+  })();
+
+  // When budget objection fires, compute the cheapest REAL alternative
+  // in the same size: an iLink/Other pick whose price is below the lead
+  // pick's price. If found, AI is told to name it exactly. If not, AI is
+  // told to acknowledge iLink is the value tier and pivot to size flex.
+  const cheaperAlternative = (() => {
+    if (!priceObjection.triggered) return null;
+    if (!inventory || !inventory.triggered) return null;
+    const leadPrice = liveLeadProduct && typeof liveLeadProduct.price === 'number' ? liveLeadProduct.price : null;
+    if (leadPrice == null) return null;
+    const leadSku = liveLeadProduct.sku || null;
+    const allPicks = [
+      ...(Array.isArray(inventory.ilink_items) ? inventory.ilink_items : []),
+      ...(Array.isArray(inventory.other_items) ? inventory.other_items : [])
+    ];
+    // Find picks strictly cheaper than the lead. Filter out same SKU.
+    // Pick the cheapest qualifying one.
+    let cheapest = null;
+    for (const p of allPicks) {
+      if (!p || typeof p.price !== 'number') continue;
+      if (leadSku && p.sku === leadSku) continue;
+      if (p.price >= leadPrice) continue;
+      if (!cheapest || p.price < cheapest.price) cheapest = p;
+    }
+    return cheapest;
+  })();
+  console.log('[FN] price objection:', {
+    triggered: !!priceObjection.triggered,
+    source: priceObjection.source || null,
+    snippet: priceObjection.snippet || null,
+    lead_price: liveLeadProduct && liveLeadProduct.price ? liveLeadProduct.price : null,
+    cheaper_alt: cheaperAlternative ? {
+      name: cheaperAlternative.name,
+      price: cheaperAlternative.price,
+      sku: cheaperAlternative.sku
+    } : null
+  });
   const liveInventoryTopOverride = liveLeadProduct
     ? `
 
@@ -2905,7 +2979,22 @@ The full ELEMENT LIST and EXAMPLE STRUCTURE are in the LIVE INVENTORY CONTEXT (o
       // by the seasonSignals tagged on the SKU, and the closer is either
       // "ask install" (default) or "ask for phone" (install just answered).
       let ctaInstruction;
-      if (installAnswer.state === 'answered' && installAnswer.affirmative === true) {
+      // Price-objection takes priority over install-CTA branches. When the
+      // customer pushes back on price, addressing that is the turn's job
+      // — re-asking install/phone or re-pitching the same product is
+      // wrong, and inventing a cheaper tire (Haida HD878RT etc.) is the
+      // worst-case hallucination.
+      if (priceObjection.triggered) {
+        const leadName = liveLeadProduct && liveLeadProduct.name ? liveLeadProduct.name : null;
+        const leadPriceStr = liveLeadProduct && (liveLeadProduct.priceFormatted || (liveLeadProduct.price ? `$${liveLeadProduct.price.toFixed(2)}` : null));
+        const altName = cheaperAlternative ? cheaperAlternative.name : null;
+        const altPriceStr = cheaperAlternative ? (cheaperAlternative.priceFormatted || (cheaperAlternative.price ? `$${cheaperAlternative.price.toFixed(2)}` : null)) : null;
+        if (cheaperAlternative) {
+          ctaInstruction = `BUDGET OBJECTION — customer signaled they can't afford / want cheaper. A REAL CHEAPER PICK exists in live inventory for the same size: "${altName}" at ${altPriceStr} each (vs the lead at ${leadPriceStr}). Variants MUST: (1) briefly acknowledge the budget concern, (2) name "${altName}" EXACTLY with its ${altPriceStr} price as the cheaper swap option, (3) one-clause feature reason grounded in its name/specs. HARD PROHIBITION: do NOT name any tire other than "${leadName}" or "${altName}". Inventing brand+model names that are NOT in the live inventory above (Haida HD878RT, Sailun, Wanli, any made-up SKU) is a HARD FAIL — those are training hallucinations, not real products in stock. Close with a soft re-ask: "want me to put the estimate together with these instead?" — do NOT re-ask install / phone if those were already answered.`;
+        } else {
+          ctaInstruction = `BUDGET OBJECTION — customer signaled they can't afford / want cheaper. NO CHEAPER PICK exists in live inventory for the same size — ${leadName} at ${leadPriceStr} IS our value tier in that fit. Variants MUST: (1) acknowledge the budget concern straight, (2) confirm the lead pick is already our value option in that exact size ("${leadName} at ${leadPriceStr} is already our value tier in that fit"), (3) ASK ABOUT SIZE FLEXIBILITY — "if you're open to going down a size or playing with the ratio a bit, I can pull some options at a better price point. Or if you need to stick with that exact size, this is the best we have." HARD PROHIBITION: do NOT name ANY tire other than "${leadName}". Inventing brand+model names that are NOT in the live inventory above (Haida HD878RT, Sailun, Wanli, any made-up SKU) is a HARD FAIL — those are training hallucinations, not real products in stock. Do NOT promise a discount we don't have. Do NOT re-ask install/phone if those were already answered.`;
+        }
+      } else if (installAnswer.state === 'answered' && installAnswer.affirmative === true) {
         if (installAnswer.soft) {
           const warrantyClause = knownWarrantyClause
             ? `, warranty: "iLink covers it with a ${knownWarrantyClause}" (state this only — do NOT say "multi-year" or "the rep has the exact length")`
