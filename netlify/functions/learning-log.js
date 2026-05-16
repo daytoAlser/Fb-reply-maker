@@ -4,14 +4,20 @@
 // mirrors sync-lead.js. Auth: x-api-secret header against SHARED_SECRET.
 //
 // Actions:
-//   insert_event   — atomically supersedes pending rows in the same thread,
-//                    then inserts the new capture row (final_sent_message NULL).
-//   finalize_event — updates a row by client_event_id with the send result
-//                    (or a send_timeout=true row if no send was detected).
-//                    Idempotent via the "finalized_at is null" guard.
-//   update_flag    — toggles flagged_for_review on a row (by id).
-//   recent         — returns the last 20 rows for the Learning Log tab.
-//                    Optional filter: 'all' | 'edited' | 'never_sent' | 'flagged'.
+//   insert_event    — atomically supersedes pending rows in the same thread,
+//                     then inserts the new capture row (final_sent_message NULL).
+//   finalize_event  — updates a row by client_event_id with the send result
+//                     (or a send_timeout=true row if no send was detected).
+//                     Idempotent via the "finalized_at is null" guard.
+//   update_flag     — toggles flagged_for_review on a row (by id).
+//   recent          — returns the last 20 rows for the Learning Log tab.
+//                     Optional filter: 'all' | 'edited' | 'never_sent' | 'flagged'.
+//   delete_event    — hard-deletes a row by id (UUID) or client_event_id.
+//                     Use for pruning captures with hallucinated content.
+//   delete_by_match — hard-deletes rows whose variant_shown or
+//                     final_sent_message matches a case-insensitive substring.
+//                     Use sparingly — primarily for purging training-data
+//                     hallucinations (e.g. delete_by_match { match: "Haida" }).
 
 import { supabase } from './_shared/supabaseClient.js';
 
@@ -145,6 +151,45 @@ async function updateFlag(payload) {
   return respond(200, { ok: true, action: 'update_flag', row: data });
 }
 
+// Hard-delete a learning row. Used to prune captures that contain
+// hallucinated content (e.g. an invented brand+model the AI shouldn't
+// learn from). Accepts either an id (UUID) or a client_event_id.
+async function deleteEvent(payload) {
+  const { id, client_event_id } = payload || {};
+  if (!id && !client_event_id) {
+    return respond(400, { ok: false, error: 'delete_event requires id or client_event_id' });
+  }
+  const query = supabase.from('auto_response_learning').delete();
+  const filtered = id ? query.eq('id', id) : query.eq('client_event_id', client_event_id);
+  const { data, error } = await filtered.select();
+  if (error) {
+    console.error('[learning-log] delete failed:', error.message);
+    return respond(500, { ok: false, error: error.message });
+  }
+  return respond(200, { ok: true, action: 'delete_event', deleted: Array.isArray(data) ? data.length : 0 });
+}
+
+// Bulk-delete rows whose variant_shown or final_sent_message matches a
+// case-insensitive substring. Use sparingly — this is for purging
+// training-data hallucinations from past captures. Returns count.
+async function deleteByMatch(payload) {
+  const { match } = payload || {};
+  if (typeof match !== 'string' || match.trim().length < 3) {
+    return respond(400, { ok: false, error: 'delete_by_match requires match string (>=3 chars)' });
+  }
+  const m = match.trim();
+  const { data, error } = await supabase
+    .from('auto_response_learning')
+    .delete()
+    .or(`variant_shown.ilike.%${m}%,final_sent_message.ilike.%${m}%`)
+    .select();
+  if (error) {
+    console.error('[learning-log] delete_by_match failed:', error.message);
+    return respond(500, { ok: false, error: error.message });
+  }
+  return respond(200, { ok: true, action: 'delete_by_match', match: m, deleted: Array.isArray(data) ? data.length : 0 });
+}
+
 async function recent(payload) {
   const filter = (payload && payload.filter) || 'all';
   const limit = 20;
@@ -192,10 +237,12 @@ export async function handler(event) {
 
   try {
     switch (action) {
-      case 'insert_event':   return await insertEvent(body);
-      case 'finalize_event': return await finalizeEvent(body);
-      case 'update_flag':    return await updateFlag(body);
-      case 'recent':         return await recent(body);
+      case 'insert_event':    return await insertEvent(body);
+      case 'finalize_event':  return await finalizeEvent(body);
+      case 'update_flag':     return await updateFlag(body);
+      case 'recent':          return await recent(body);
+      case 'delete_event':    return await deleteEvent(body);
+      case 'delete_by_match': return await deleteByMatch(body);
       default:
         return respond(400, { ok: false, error: `Unknown action: ${action}` });
     }

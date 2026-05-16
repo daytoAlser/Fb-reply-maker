@@ -322,11 +322,9 @@ The pivot is: "we don't discount, but we can swap to a cheaper tire."
 
 ### 10.2 Second discount ask (after estimate sent)
 
-If the customer pushes back on the total package, never drop the package price. Pivot to the cheaper-tire option.
+If the customer pushes back on the total package, never drop the package price. Pivot to a cheaper-tire option IN THE SAME SIZE — but only if one exists in live inventory. Name it exactly with the system-surfaced price; never invent a brand+model.
 
-> "We could get you into the HD878 Rugged Terrains from Haida, coming with a sweet looking aggressive pattern but a way better price coming in at $1,090 for the set of four 35s!"
-
-The Haida HD878RT and similar budget tires are the standard swap-out lever.
+If no cheaper SKU exists in the customer's exact size, the move is to ask if they're open to a different size (smaller diameter, different ratio) for a better price point, or to confirm they need to stick with that size and the current sticker is the best we have.
 
 ### 10.3 "Sharpen the pencil" recognition
 
@@ -685,7 +683,7 @@ When building any tool that touches customer messaging (extensions, dashboards, 
 | **Sharp to Sticky** | Korey's 5-beat framework: Fact, Standard, Why, Consequence, Path. |
 | **Poke** | Wheel offset that pushes the tire outside the fender line. |
 | **Flush** | Wheel offset that aligns the tire with the fender line. |
-| **Tire swap pivot** | Discount handling technique. Move customer to cheaper tire (typically Haida HD878RT) rather than discount the package. |
+| **Tire swap pivot** | Discount handling technique. Offer a cheaper SKU from live inventory in the customer's exact size; if none exists, ask about size flexibility. Never drop the package price. |
 | **Phone punt** | The "send me your phone number" line that moves pricing conversations to the formal estimate workflow. |
 | **Holding reply** | A warm "I'm working on it" message that buys time when a question requires human verification. |
 | **Accelerated close** | Skipping the estimate workflow for returning customers who have already decided. |

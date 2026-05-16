@@ -109,8 +109,8 @@ These are Dayton's reusable lines that should be canonized in the trainer:
 ### Holding price with a value reframe
 > "I wish man unfortunately we give everyone the best possible price right off the bat to try and save us all time. We could look at going with a bit better deal on a different tire, what do you think about that my man?"
 
-### Offering a budget tire as the discount lever
-> "We do have the Haida HD878 RTs in the same sizing, these guys are coming with a sweet looking tread pattern, 10 ply E rated and on sale right now for $390 for the set, bringing the wheel tire package down to $990 for the set, totaling just under $3k out the door. That would be the best bang for the buck by far and still looking absolutely wicked."
+### Offering a value tire as the discount lever
+> If a cheaper SKU in the SAME SIZE is in live inventory, name it exactly with the real price the system surfaces. Do not invent brand+model names. If no cheaper option exists in the customer's exact size, the move is to ask if they're open to going down a size (smaller diameter, different ratio) to get into a better price point — or to confirm they need to stick with that size and accept the current sticker.
 
 ### Three payment paths close
 > "You can send us an e-transfer at [address], or give us a call at [number] with a CC, as well as pop by in person and we can make it work!"
@@ -231,12 +231,11 @@ REP: I wish man unfortunately we give everyone the best possible price right
 
 CUSTOMER: ya what other tires u got / something cheaper but still looks mean
 
-REP: We do have the Haida Hd878RTs in the same sizing, these guys are coming
-     with a sweet looking tread pattern, 10 ply E rated and on sale right now
-     for $390 for the set bring the wheel tire package down to $990 for the
-     set, totaling just under $3k out the door
-     That would be the best bang for the buck by far and still looking
-     absolutely wicked
+REP: [If the live inventory surfaces a cheaper SKU in the SAME size, name it
+     exactly with the price the system shows — never invent a brand+model.
+     If no cheaper SKU exists in the customer's exact size, the script is
+     to confirm the current pick is already the value tier and ask if
+     they're open to going down a size for a better deal.]
 
 CUSTOMER: ok ya that works / lets do it / when do i pay the deposit
 
@@ -540,7 +539,7 @@ When pressured for a discount, Dayton protects in this order:
 | 4 | TPMS sensors / lug nuts | Small items, mostly cost recovery |
 | 5 | Tire brand swap | The ONE acceptable lever |
 
-If the customer needs to hit a price, the move is to swap the tire to a budget brand (Haida HD878 RT for example) and protect the rest of the package. Never drop the install fee or wheel price.
+If the customer needs to hit a price, the move is to swap to a cheaper SKU IN THE SAME SIZE that lives in our live inventory — name it exactly, never invent a brand+model. If no cheaper SKU exists in the customer's exact size, the move is to ask if they're open to a different size for a better price point. Never invent products. Never drop the install fee or wheel price.
 
 ## Tone Matching Across the Five Customers
 

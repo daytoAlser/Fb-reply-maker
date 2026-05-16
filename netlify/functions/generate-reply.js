@@ -821,7 +821,7 @@ ${requestedSection}${houseSection}
 HARD RULES (this turn):
 - Customer named ${inv.brand_requested}. Lead with the ${inv.brand_requested} options. Do NOT push iLink as a default — the iLink block is here ONLY so you can mention it as a value alternative if the customer's tone is price-sensitive ("anything close?", "what do you have under $X?", explicit budget mention).
 - TIRE SIZE IS CAPTURED → recommend by name THIS TURN. This OVERRIDES the PRIORITY ORDER FOR MISSING QUALIFIERS above for the tire product: when tire size is in hand, do NOT ask vehicle as a gate for tire recommendations. Vehicle is an UPSTREAM input (used to figure out the size); once size is known its job is done. Other qualifiers (tireType, useCase) refine WHICH option to lean toward (snow vs A/T vs touring) but never block naming products. Surface 1–2 picks now AND, if useful, ask the next refining qualifier in the same reply.
-- If you reference a specific product in your reply, it MUST be one of the items above. Do NOT invent SKUs, model names, prices, or stock claims. SPECIFICALLY FORBIDDEN names that have shown up as training-data hallucinations: "Haida HD878RT", "Sailun", "Wanli", and any other brand+model combination not in the items above. These are NOT in stock and naming them is a hard fail.
+- If you reference a specific product in your reply, it MUST be one of the items above. Do NOT invent SKUs, model names, prices, or stock claims. Common hallucination pattern: when the customer pushes back on price, you may feel pulled toward naming a "budget tire" like Haida, Sailun, Wanli, or similar tertiary brands. DO NOT — those aren't in our live inventory and naming them is a hard fail. If a cheaper SKU exists in the items above, use that. If not, ask the customer about size flexibility instead.
 - Use the availability framing from each item ("ready to rock" / "we can get those for ya"). NEVER say "in stock" or pin to a specific location — ABSOLUTE RULE D2 still applies.
 - Do NOT quote totals in chat. You may anchor ONE sticker price by product ("the ${inv.brand_requested} Open Country is $324 ea") as a single data point. Full package pricing stays in the phone-then-estimate punt.
 - Reference 1–2 products by name. The full catalog is the rep's tool, not the reply text.${seasonRule}${winterRule}${primaryRule}
@@ -847,7 +847,7 @@ ${houseSection}${otherSection}
 
 HARD RULES (this turn):
 - TIRE SIZE IS CAPTURED → recommend by name THIS TURN. This OVERRIDES the PRIORITY ORDER FOR MISSING QUALIFIERS above for the tire product: when tire size is in hand, do NOT ask vehicle as a gate for tire recommendations. Vehicle is an UPSTREAM input (used to figure out the size); once size is known its job is done. Other qualifiers (tireType, useCase) refine WHICH option to lean toward (snow vs A/T vs touring) but never block naming products. Surface 1–2 picks now AND, if useful, ask the next refining qualifier in the same reply.
-- If you reference a specific product in your reply, it MUST be one of the items above. Do NOT invent SKUs, model names, prices, or stock claims. SPECIFICALLY FORBIDDEN names that have shown up as training-data hallucinations: "Haida HD878RT", "Sailun", "Wanli", and any other brand+model combination not in the items above. These are NOT in stock and naming them is a hard fail.
+- If you reference a specific product in your reply, it MUST be one of the items above. Do NOT invent SKUs, model names, prices, or stock claims. Common hallucination pattern: when the customer pushes back on price, you may feel pulled toward naming a "budget tire" like Haida, Sailun, Wanli, or similar tertiary brands. DO NOT — those aren't in our live inventory and naming them is a hard fail. If a cheaper SKU exists in the items above, use that. If not, ask the customer about size flexibility instead.
 - iLink is our house brand and default value tier. Since the customer did not name a brand, lead with iLink unless the conversation strongly signals a premium tier (off-road, hard use, "I want the best", etc.). If the customer signaled a tire type (snowflake / 3PMS / A/T / mud / highway), pick the iLink option that matches it.
 - Use the availability framing from each item ("ready to rock" / "we can get those for ya"). NEVER say "in stock" or pin to a specific location — ABSOLUTE RULE D2 still applies.
 - Do NOT quote totals in chat. You may anchor ONE sticker price by product ("the iLink MultiMatch is $189 ea") as a single data point. Full package pricing stays in the phone-then-estimate punt.
@@ -1692,7 +1692,6 @@ FITMENT KNOWLEDGE (use when relevant):
 - F150: factory tire sizes 17–22 inch depending on trim.
 - 24x14 with 37s on a 6" lift: trimming required for full turning.
 - Toyo Open Country AT3: P-rated vs 10-ply E-rated, different load capacity.
-- Haida HD878RT: 10-ply E-rated budget option, common tire-swap discount lever.
 - Snowflake = M+S = year-round rated.
 - Fuel Triton: comes from Tennessee, long lead time.
 
